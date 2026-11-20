@@ -1,0 +1,8 @@
+{
+  "title": "星待ちの放課後",
+  "width": 1280,
+  "height": 720,
+  "main": "main.ts",
+  "id": "noiria-demo-hoshimachi",
+  "pack": { "exclude": ["autotest/**"] }
+}

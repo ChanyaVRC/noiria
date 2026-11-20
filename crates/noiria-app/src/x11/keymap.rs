@@ -1,0 +1,174 @@
+//! GetKeyboardMapping の結果を keysym テーブルとして保持し、win32.rs と同じ
+//! キー集合（Enter/Escape/Control/space/矢印上下/PageUp,Down/F5/F9）+
+//! Latin-1/Unicode keysym の印字文字へ変換する。IME 非対応
+//! （win32.rs の WM_CHAR 最小互換）。
+//!
+//! **win32.rs との差異（意図的）**: 計画書は矢印キーの keysym 範囲として
+//! 0xFF51〜0xFF54（Left/Up/Right/Down）を挙げているが、参照実装である
+//! win32.rs 自体は VK_LEFT/VK_RIGHT を一切ハンドルしていない（VK_UP/VK_DOWN
+//! のみ）。本実装は「win32.rs と同じキー集合のみ」という上位の指示を優先し、
+//! ArrowLeft/ArrowRight は生成しない（win32.rs と完全に挙動を一致させる）。
+
+use anyhow::{bail, Result};
+
+pub struct Keymap {
+    min_keycode: u8,
+    keysyms_per_keycode: u8,
+    keysyms: Vec<u32>,
+}
+
+impl Keymap {
+    /// `keycode` の `column`（0=無シフト、1=シフト）に対応する keysym。
+    /// column が keysyms_per_keycode を超える場合は最後の列にクランプする。
+    /// 値が 0（NoSymbol）で column>=1 の場合は列 0 にフォールバックする
+    /// （X11 の慣例: シフト列が未定義なら無シフト値を使う）。
+    pub fn keysym(&self, keycode: u8, column: usize) -> u32 {
+        let k = self.keysyms_per_keycode as usize;
+        if k == 0 || keycode < self.min_keycode {
+            return 0;
+        }
+        let row = (keycode - self.min_keycode) as usize;
+        let base = row * k;
+        let col = column.min(k - 1);
+        let primary = self.keysyms.get(base + col).copied().unwrap_or(0);
+        if primary == 0 && col != 0 {
+            self.keysyms.get(base).copied().unwrap_or(0)
+        } else {
+            primary
+        }
+    }
+}
+
+/// GetKeyboardMapping リプライ（`proto::XConn::send_request_and_wait` が返す
+/// 生バイト列、32 バイトヘッダ込み）をパースする。
+pub fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
+    if reply.len() < 32 {
+        bail!("GetKeyboardMapping リプライが短すぎます");
+    }
+    let keysyms_per_keycode = reply[1];
+    let reply_len_words = u32::from_le_bytes([reply[4], reply[5], reply[6], reply[7]]) as usize;
+    let n = reply_len_words * 4;
+    if reply.len() < 32 + n {
+        bail!("GetKeyboardMapping リプライのデータ長が不足しています");
+    }
+    let data = &reply[32..32 + n];
+    let mut keysyms = Vec::with_capacity(n / 4);
+    for chunk in data.chunks_exact(4) {
+        keysyms.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Keymap {
+        min_keycode,
+        keysyms_per_keycode,
+        keysyms,
+    })
+}
+
+pub const KS_RETURN: u32 = 0xFF0D;
+const KS_ESCAPE: u32 = 0xFF1B;
+const KS_CONTROL_L: u32 = 0xFFE3;
+const KS_CONTROL_R: u32 = 0xFFE4;
+const KS_SPACE: u32 = 0x0020;
+const KS_UP: u32 = 0xFF52;
+const KS_DOWN: u32 = 0xFF54;
+const KS_PAGE_UP: u32 = 0xFF55;
+const KS_PAGE_DOWN: u32 = 0xFF56;
+const KS_F5: u32 = 0xFFC2;
+const KS_F9: u32 = 0xFFC6;
+pub const KS_F11: u32 = 0xFFC8;
+const KS_SHIFT_L: u32 = 0xFFE1;
+const KS_SHIFT_R: u32 = 0xFFE2;
+const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
+
+/// keysym → `InputEvent.key` 文字列。win32.rs の WM_KEYDOWN/WM_CHAR 送出集合
+/// と同じ結果を返す（"Enter"/"Escape"/"Control"/" "/"ArrowUp"/"ArrowDown"/
+/// "PageUp"/"PageDown"/"F5"/"F9"、または印字 1 文字）。非対応 keysym は None。
+pub fn to_input_key(keysym: u32) -> Option<String> {
+    match keysym {
+        KS_RETURN => Some("Enter".to_string()),
+        KS_ESCAPE => Some("Escape".to_string()),
+        KS_CONTROL_L | KS_CONTROL_R => Some("Control".to_string()),
+        KS_SHIFT_L | KS_SHIFT_R => Some("Shift".to_string()),
+        KS_SPACE => Some(" ".to_string()),
+        KS_UP => Some("ArrowUp".to_string()),
+        KS_DOWN => Some("ArrowDown".to_string()),
+        KS_PAGE_UP => Some("PageUp".to_string()),
+        KS_PAGE_DOWN => Some("PageDown".to_string()),
+        KS_F5 => Some("F5".to_string()),
+        KS_F9 => Some("F9".to_string()),
+        // Latin-1 印字文字（space は上で処理済みなので 0x21 から）。
+        0x0021..=0x00FF => char::from_u32(keysym)
+            .filter(|c| !c.is_control())
+            .map(|c| c.to_string()),
+        // Unicode keysym（0x01000000 + codepoint）。
+        k if k >= UNICODE_KEYSYM_BASE && k - UNICODE_KEYSYM_BASE <= 0x10FFFF => {
+            char::from_u32(k - UNICODE_KEYSYM_BASE)
+                .filter(|c| !c.is_control())
+                .map(|c| c.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GetKeyboardMapping リプライのワイヤバイト列を固定フィクスチャとして
+    /// 組み立てる: min_keycode=8, keysyms_per_keycode=2, keycode 8 →
+    /// ('a'=0x61, 'A'=0x41)、keycode 9 → (Return=0xFF0D, NoSymbol=0)。
+    fn fixture_reply() -> Vec<u8> {
+        let keysyms_per_keycode: u8 = 2;
+        let entries: [u32; 4] = [0x0061, 0x0041, KS_RETURN, 0];
+        let mut reply = vec![0u8; 32];
+        reply[0] = 1; // Reply
+        reply[1] = keysyms_per_keycode;
+        let reply_len_words = (entries.len() * 4 / 4) as u32; // 4 keysyms * 4B / 4 = 4
+        reply[4..8].copy_from_slice(&reply_len_words.to_le_bytes());
+        for v in entries {
+            reply.extend_from_slice(&v.to_le_bytes());
+        }
+        reply
+    }
+
+    #[test]
+    fn parse_reply_fixed_wire_bytes() {
+        let km = parse_reply(8, &fixture_reply()).unwrap();
+        assert_eq!(km.keysym(8, 0), 0x0061);
+        assert_eq!(km.keysym(8, 1), 0x0041);
+        assert_eq!(km.keysym(9, 0), KS_RETURN);
+        // keycode 9 col1 は NoSymbol(0) なので col0 にフォールバック。
+        assert_eq!(km.keysym(9, 1), KS_RETURN);
+    }
+
+    #[test]
+    fn to_input_key_special_set_matches_win32() {
+        assert_eq!(to_input_key(KS_RETURN).as_deref(), Some("Enter"));
+        assert_eq!(to_input_key(KS_ESCAPE).as_deref(), Some("Escape"));
+        assert_eq!(to_input_key(KS_CONTROL_L).as_deref(), Some("Control"));
+        assert_eq!(to_input_key(KS_CONTROL_R).as_deref(), Some("Control"));
+        assert_eq!(to_input_key(KS_SHIFT_L).as_deref(), Some("Shift"));
+        assert_eq!(to_input_key(KS_SHIFT_R).as_deref(), Some("Shift"));
+        // F11 はホスト（フルスクリーン切替）が消費するのでスクリプトへは渡さない。
+        assert_eq!(to_input_key(KS_F11), None);
+        assert_eq!(to_input_key(KS_SPACE).as_deref(), Some(" "));
+        assert_eq!(to_input_key(KS_UP).as_deref(), Some("ArrowUp"));
+        assert_eq!(to_input_key(KS_DOWN).as_deref(), Some("ArrowDown"));
+        assert_eq!(to_input_key(KS_PAGE_UP).as_deref(), Some("PageUp"));
+        assert_eq!(to_input_key(KS_PAGE_DOWN).as_deref(), Some("PageDown"));
+        assert_eq!(to_input_key(KS_F5).as_deref(), Some("F5"));
+        assert_eq!(to_input_key(KS_F9).as_deref(), Some("F9"));
+        // win32.rs は ArrowLeft/ArrowRight を送出しないので、対応する keysym
+        // (Left=0xFF51, Right=0xFF53) も意図的に None。
+        assert_eq!(to_input_key(0xFF51), None);
+        assert_eq!(to_input_key(0xFF53), None);
+    }
+
+    #[test]
+    fn to_input_key_printable_latin1_and_unicode() {
+        assert_eq!(to_input_key(0x0061).as_deref(), Some("a")); // 'a'
+        assert_eq!(
+            to_input_key(UNICODE_KEYSYM_BASE + 0x3042).as_deref(),
+            Some("あ")
+        );
+    }
+}

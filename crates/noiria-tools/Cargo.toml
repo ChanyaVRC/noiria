@@ -1,0 +1,44 @@
+[package]
+name = "noiria-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gen-assets"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen-w3-icon"
+path = "src/gen_w3_icon.rs"
+
+[[bin]]
+name = "gen-w4-button"
+path = "src/gen_w4_button.rs"
+
+[[bin]]
+name = "gen-w5-anim"
+path = "src/gen_w5_anim.rs"
+
+[[bin]]
+name = "noiria-pack"
+path = "src/bin/noiria_pack.rs"
+
+[[bin]]
+name = "noiria-export"
+path = "src/bin/noiria_export.rs"
+
+[[bin]]
+name = "gen-icon"
+path = "src/bin/gen_icon.rs"
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+hound = "3"
+serde_json.workspace = true
+noiria-core = { path = "../noiria-core" }
+
+[[bin]]
+name = "gen-demo-assets"
+path = "src/bin/gen_demo_assets.rs"

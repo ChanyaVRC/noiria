@@ -1,0 +1,830 @@
+//! PNG デコーダ（自作）。8bit / 非インターレースの
+//! グレースケール・RGB・パレット・グレースケール+α・RGBA に対応。
+//! 出力は straight RGBA8。
+
+use anyhow::{bail, ensure, Context, Result};
+
+use super::deflate::zlib_compress;
+use super::inflate::zlib_decompress_limited;
+
+/// デコードを受け付ける最大画素数（8192x8192。RGBA で 256MB）。IHDR の 32bit 幅・高さが申告する
+/// だけで巨大な確保をさせない。
+const MAX_PIXELS: usize = 1 << 26;
+
+/// IDAT の展開後サイズが IHDR から求めた期待値を超えてよい余白（末尾の余分なバイトを許す）。
+const IDAT_SLACK: usize = 64 * 1024;
+
+const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+pub struct DecodedPng {
+    pub width: u32,
+    pub height: u32,
+    /// straight RGBA8
+    pub rgba: Vec<u8>,
+}
+
+struct Ihdr {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    interlace: u8,
+}
+
+pub fn decode(data: &[u8]) -> Result<DecodedPng> {
+    ensure!(
+        data.len() > 8 && data[..8] == SIGNATURE,
+        "PNG シグネチャがありません"
+    );
+
+    let mut pos = 8usize;
+    let mut ihdr: Option<Ihdr> = None;
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut trns: Vec<u8> = Vec::new();
+    let mut idat: Vec<u8> = Vec::new();
+
+    while pos + 8 <= data.len() {
+        let len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let ctype = &data[pos + 4..pos + 8];
+        let body_start = pos + 8;
+        ensure!(
+            body_start + len + 4 <= data.len(),
+            "チャンクがファイル末尾を超えています"
+        );
+        let body = &data[body_start..body_start + len];
+        // CRC は検証しない（4 バイト読み飛ばし）
+        pos = body_start + len + 4;
+
+        match ctype {
+            b"IHDR" => {
+                ensure!(len == 13, "IHDR 長が不正");
+                let h = Ihdr {
+                    width: u32::from_be_bytes(body[0..4].try_into().unwrap()),
+                    height: u32::from_be_bytes(body[4..8].try_into().unwrap()),
+                    bit_depth: body[8],
+                    color_type: body[9],
+                    interlace: body[12],
+                };
+                ensure!(body[10] == 0, "非対応の圧縮方式");
+                ensure!(body[11] == 0, "非対応のフィルタ方式");
+                ihdr = Some(h);
+            }
+            b"PLTE" => {
+                ensure!(len.is_multiple_of(3), "PLTE 長が不正");
+                palette = body.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect();
+            }
+            b"tRNS" => trns = body.to_vec(),
+            b"IDAT" => idat.extend_from_slice(body),
+            b"IEND" => break,
+            _ => {} // 補助チャンクは無視
+        }
+    }
+
+    let ihdr = ihdr.context("IHDR がありません")?;
+    ensure!(ihdr.interlace == 0, "インターレース PNG は非対応です");
+    ensure!(
+        ihdr.bit_depth == 8,
+        "ビット深度 {} は非対応です (8 のみ)",
+        ihdr.bit_depth
+    );
+    ensure!(ihdr.width > 0 && ihdr.height > 0, "画像サイズが不正");
+
+    // チャンネル数
+    let channels: usize = match ihdr.color_type {
+        0 => 1, // grayscale
+        2 => 3, // RGB
+        3 => 1, // palette index
+        4 => 2, // gray + alpha
+        6 => 4, // RGBA
+        t => bail!("非対応のカラータイプ: {t}"),
+    };
+
+    let w = ihdr.width as usize;
+    let h = ihdr.height as usize;
+    ensure!(
+        w.checked_mul(h).is_some_and(|px| px <= MAX_PIXELS),
+        "画像が大きすぎます: {w}x{h}"
+    );
+    let stride = w * channels;
+    let expected = h * (stride + 1);
+    let raw = zlib_decompress_limited(&idat, expected.saturating_add(IDAT_SLACK))
+        .context("IDAT の展開に失敗")?;
+    ensure!(
+        raw.len() >= expected,
+        "画像データが不足しています (期待 {} 実際 {})",
+        expected,
+        raw.len()
+    );
+
+    // フィルタ解除
+    let mut lines: Vec<u8> = vec![0; h * stride];
+    for y in 0..h {
+        let src = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
+        let filter = src[0];
+        let row = &src[1..];
+        // 直前行のコピー（借用回避のため先に取り出す）
+        let prev: Vec<u8> = if y > 0 {
+            lines[(y - 1) * stride..y * stride].to_vec()
+        } else {
+            vec![0; stride]
+        };
+        let dst = &mut lines[y * stride..(y + 1) * stride];
+        match filter {
+            0 => dst.copy_from_slice(row),
+            1 => {
+                // Sub
+                for i in 0..stride {
+                    let left = if i >= channels { dst[i - channels] } else { 0 };
+                    dst[i] = row[i].wrapping_add(left);
+                }
+            }
+            2 => {
+                // Up
+                for i in 0..stride {
+                    dst[i] = row[i].wrapping_add(prev[i]);
+                }
+            }
+            3 => {
+                // Average
+                for i in 0..stride {
+                    let left = if i >= channels {
+                        dst[i - channels] as u16
+                    } else {
+                        0
+                    };
+                    dst[i] = row[i].wrapping_add(((left + prev[i] as u16) / 2) as u8);
+                }
+            }
+            4 => {
+                // Paeth
+                for i in 0..stride {
+                    let a = if i >= channels {
+                        dst[i - channels] as i16
+                    } else {
+                        0
+                    };
+                    let b = prev[i] as i16;
+                    let c = if i >= channels {
+                        prev[i - channels] as i16
+                    } else {
+                        0
+                    };
+                    let p = a + b - c;
+                    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                    let pred = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    } as u8;
+                    dst[i] = row[i].wrapping_add(pred);
+                }
+            }
+            f => bail!("非対応のフィルタタイプ: {f}"),
+        }
+    }
+
+    // RGBA へ変換
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    match ihdr.color_type {
+        0 => {
+            for &g in &lines {
+                rgba.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        2 => {
+            for px in lines.as_chunks::<3>().0 {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        }
+        3 => {
+            ensure!(!palette.is_empty(), "パレットがありません");
+            for &idx in &lines {
+                let c = palette.get(idx as usize).context("パレット添字が範囲外")?;
+                let a = trns.get(idx as usize).copied().unwrap_or(255);
+                rgba.extend_from_slice(&[c[0], c[1], c[2], a]);
+            }
+        }
+        4 => {
+            for px in lines.as_chunks::<2>().0 {
+                rgba.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
+            }
+        }
+        6 => rgba = lines,
+        _ => unreachable!(),
+    }
+
+    Ok(DecodedPng {
+        width: ihdr.width,
+        height: ihdr.height,
+        rgba,
+    })
+}
+
+/// 1 行に 5 種類のフィルタ (None/Sub/Up/Average/Paeth) を適用する。
+fn apply_filter(filter: u8, row: &[u8], prev: &[u8], channels: usize, out: &mut [u8]) {
+    match filter {
+        0 => out.copy_from_slice(row),
+        1 => {
+            // Sub
+            for i in 0..row.len() {
+                let left = if i >= channels { row[i - channels] } else { 0 };
+                out[i] = row[i].wrapping_sub(left);
+            }
+        }
+        2 => {
+            // Up
+            for i in 0..row.len() {
+                out[i] = row[i].wrapping_sub(prev[i]);
+            }
+        }
+        3 => {
+            // Average
+            for i in 0..row.len() {
+                let left = if i >= channels {
+                    row[i - channels] as u16
+                } else {
+                    0
+                };
+                out[i] = row[i].wrapping_sub(((left + prev[i] as u16) / 2) as u8);
+            }
+        }
+        4 => {
+            // Paeth
+            for i in 0..row.len() {
+                let a = if i >= channels {
+                    row[i - channels] as i16
+                } else {
+                    0
+                };
+                let b = prev[i] as i16;
+                let c = if i >= channels {
+                    prev[i - channels] as i16
+                } else {
+                    0
+                };
+                let p = a + b - c;
+                let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                let pred = if pa <= pb && pa <= pc {
+                    a
+                } else if pb <= pc {
+                    b
+                } else {
+                    c
+                } as u8;
+                out[i] = row[i].wrapping_sub(pred);
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// MSAD (絶対値和最小) ヒューリスティクスでフィルタ後バイト列のコストを見積もる。
+/// フィルタ後バイトを符号付き差分とみなし (128 以上は 256 を引く)、絶対値の総和を取る。
+fn msad(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .map(|&b| {
+            let v = b as i32;
+            (if v < 128 { v } else { 256 - v }) as u64
+        })
+        .sum()
+}
+
+/// straight RGBA8 から PNG の IDAT 生データ（フィルタタイプバイト + フィルタ後
+/// ピクセル列、圧縮前）を作る。行ごとに 5 種類のフィルタを試し MSAD 最小を選ぶ。
+fn build_filtered_raw(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    const CHANNELS: usize = 4;
+    let stride = width as usize * CHANNELS;
+    let mut raw = Vec::with_capacity(height as usize * (stride + 1));
+    let mut prev = vec![0u8; stride];
+    let mut candidates: Vec<Vec<u8>> = (0..5).map(|_| vec![0u8; stride]).collect();
+    for row in rgba.chunks_exact(stride) {
+        let mut best = 0usize;
+        let mut best_cost = u64::MAX;
+        for (f, cand) in candidates.iter_mut().enumerate() {
+            apply_filter(f as u8, row, &prev, CHANNELS, cand);
+            let cost = msad(cand);
+            if cost < best_cost {
+                best_cost = cost;
+                best = f;
+            }
+        }
+        raw.push(best as u8);
+        raw.extend_from_slice(&candidates[best]);
+        prev.copy_from_slice(row);
+    }
+    raw
+}
+
+/// straight RGBA8 を PNG にエンコードする（自作）。行フィルタ選択 (MSAD) +
+/// 自作 DEFLATE (`deflate::zlib_compress`) による実圧縮。
+pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    assert_eq!(
+        rgba.len(),
+        width as usize * height as usize * 4,
+        "rgba のサイズが width*height*4 と一致しません"
+    );
+
+    let raw = build_filtered_raw(width, height, rgba);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&SIGNATURE);
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth 8, color type 6 (RGBA), compression/filter/interlace 0
+    write_chunk(&mut out, b"IHDR", &ihdr);
+    write_chunk(&mut out, b"IDAT", &zlib_compress(&raw));
+    write_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn write_chunk(out: &mut Vec<u8>, ctype: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(ctype);
+    out.extend_from_slice(data);
+    let mut crc_input = Vec::with_capacity(4 + data.len());
+    crc_input.extend_from_slice(ctype);
+    crc_input.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+}
+
+/// zlib (RFC1950) ラッパで包んだ無圧縮 (stored ブロック) DEFLATE ストリームを作る。
+/// W4 で実圧縮 (`deflate::zlib_compress`) に切り替えたため通常経路では未使用。
+/// テストでの圧縮率比較・stored 経路の参照実装として残す。
+#[cfg(test)]
+fn zlib_compress_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01]; // CMF=8(深さ32K)/CINFO=7, FLG (ヘッダチェック OK かつ最速)
+    const MAX_BLOCK: usize = 65535; // stored ブロックの LEN は u16
+    let mut pos = 0;
+    loop {
+        let end = (pos + MAX_BLOCK).min(data.len());
+        let chunk = &data[pos..end];
+        let is_final = end == data.len();
+        out.push(if is_final { 1 } else { 0 }); // BFINAL(1bit) + BTYPE=00(2bit) + パディング
+        out.extend_from_slice(&(chunk.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(chunk.len() as u16)).to_le_bytes());
+        out.extend_from_slice(chunk);
+        pos = end;
+        if is_final {
+            break;
+        }
+    }
+    out.extend_from_slice(&super::inflate::adler32(data).to_be_bytes());
+    out
+}
+
+/// PNG チャンクの CRC32 (ITU-T V.42 多項式、反転版 0xEDB88320)。
+/// Ogg で使う CRC32 (`ogg.rs`) とは多項式が異なるため共用しない。
+/// W6: `pak.rs` の NPK1 エントリ整合性チェックが同じ多項式 (zip/PNG 系) を必要とするため
+/// `pub(crate)` にしてここから再利用している（テスト済みの実装を重複させないため）。
+pub(crate) fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
+
+    /// image クレートで PNG にエンコードし、自作デコーダの出力と
+    /// image クレートのデコード結果をピクセル単位で突き合わせる。
+    fn roundtrip_rgba(w: u32, h: u32, rgba: Vec<u8>) {
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!((ours.width, ours.height), (w, h));
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice(), "ピクセル不一致");
+        assert_eq!(ours.rgba, rgba, "元データと不一致");
+    }
+
+    fn lcg(seed: &mut u64) -> u8 {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*seed >> 33) as u8
+    }
+
+    #[test]
+    fn decode_noise_rgba() {
+        // ノイズは動的ハフマン + 全フィルタを強く踏む
+        let (w, h) = (73u32, 41u32);
+        let mut seed = 42u64;
+        let rgba: Vec<u8> = (0..w * h * 4).map(|_| lcg(&mut seed)).collect();
+        roundtrip_rgba(w, h, rgba);
+    }
+
+    #[test]
+    fn decode_gradient_rgba() {
+        // グラデーションは Sub/Up/Paeth フィルタが選ばれやすい
+        let (w, h) = (128u32, 96u32);
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8, 255]);
+            }
+        }
+        roundtrip_rgba(w, h, rgba);
+    }
+
+    #[test]
+    fn decode_flat_color() {
+        // 均一色は長い一致 (LZ77 距離コピー) を踏む
+        roundtrip_rgba(200, 150, vec![120; 200 * 150 * 4]);
+    }
+
+    #[test]
+    fn decode_rgb_without_alpha() {
+        let (w, h) = (64u32, 48u32);
+        let mut rgb = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                rgb.extend_from_slice(&[(x * 4) as u8, (y * 5) as u8, 200]);
+            }
+        }
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice());
+    }
+
+    #[test]
+    fn decode_grayscale() {
+        let (w, h) = (50u32, 30u32);
+        let gray: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&gray, w, h, image::ExtendedColorType::L8)
+            .unwrap();
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice());
+    }
+
+    #[test]
+    fn decode_gray_alpha() {
+        let (w, h) = (33u32, 17u32);
+        let mut la = Vec::new();
+        for i in 0..w * h {
+            la.extend_from_slice(&[(i % 256) as u8, ((i * 7) % 256) as u8]);
+        }
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&la, w, h, image::ExtendedColorType::La8)
+            .unwrap();
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice());
+    }
+
+    #[test]
+    fn decode_generated_game_assets() {
+        // gen-assets が生成した実アセットも自作デコーダで一致すること
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sample/assets");
+        if !root.exists() {
+            return; // アセット未生成の環境ではスキップ
+        }
+        for rel in [
+            "bg/room.png",
+            "bg/street.png",
+            "fg/alice_normal.png",
+            "rule/wipe.png",
+        ] {
+            let path = root.join(rel);
+            let bytes = std::fs::read(&path).unwrap();
+            let ours = decode(&bytes).unwrap();
+            let theirs = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            assert_eq!(
+                ours.rgba,
+                theirs.as_raw().as_slice(),
+                "{rel} のデコード結果が不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(decode(b"not a png").is_err());
+        let mut broken = SIGNATURE.to_vec();
+        broken.extend_from_slice(&[0, 0, 0, 1]);
+        assert!(decode(&broken).is_err());
+    }
+
+    /// 自作エンコーダ → 自作デコーダで往復し、ピクセルが一致すること。
+    fn encode_decode_roundtrip(w: u32, h: u32, rgba: Vec<u8>) {
+        let png = encode(w, h, &rgba);
+        let decoded = decode(&png).unwrap();
+        assert_eq!((decoded.width, decoded.height), (w, h));
+        assert_eq!(decoded.rgba, rgba, "エンコード→デコードでピクセルが不一致");
+    }
+
+    #[test]
+    fn encode_roundtrip_noise() {
+        let (w, h) = (73u32, 41u32);
+        let mut seed = 99u64;
+        let rgba: Vec<u8> = (0..w * h * 4).map(|_| lcg(&mut seed)).collect();
+        encode_decode_roundtrip(w, h, rgba);
+    }
+
+    #[test]
+    fn encode_roundtrip_flat() {
+        encode_decode_roundtrip(16, 8, vec![7; 16 * 8 * 4]);
+    }
+
+    #[test]
+    fn encode_roundtrip_with_transparency() {
+        let (w, h) = (10u32, 10u32);
+        let mut rgba = Vec::new();
+        for i in 0..w * h {
+            rgba.extend_from_slice(&[(i % 256) as u8, 0, 255, (i * 3 % 256) as u8]);
+        }
+        encode_decode_roundtrip(w, h, rgba);
+    }
+
+    #[test]
+    fn encode_roundtrip_multi_stored_block() {
+        // 1 行あたり >65535 バイトになる大きな画像で stored ブロック分割を踏む。
+        let (w, h) = (20000u32, 2u32);
+        let mut seed = 7u64;
+        let rgba: Vec<u8> = (0..w * h * 4).map(|_| lcg(&mut seed)).collect();
+        encode_decode_roundtrip(w, h, rgba);
+    }
+
+    #[test]
+    fn encode_readable_by_image_crate() {
+        // image クレートでも読めること（PNG ファイルとしての妥当性の裏取り）。
+        let (w, h) = (12u32, 9u32);
+        let mut seed = 3u64;
+        let rgba: Vec<u8> = (0..w * h * 4).map(|_| lcg(&mut seed)).collect();
+        let png = encode(w, h, &rgba);
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(theirs.as_raw().as_slice(), rgba.as_slice());
+    }
+
+    #[test]
+    fn encode_generated_game_assets_readable_by_image_crate() {
+        // 回帰テスト: 我々の inflate.rs は不完全 (degenerate) なハフマン木でも
+        // 許容してしまうため、自作デコーダとの round-trip だけでは
+        // ハフマン符号長構築の不備 (Kraft 不等式の非等号) を検出できない。
+        // image クレート (png クレート経由、zlib 準拠の厳密なデコーダ) で
+        // 実際にゲーム背景相当の大きな画像を再デコードできることを確認する。
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sample/assets");
+        if !root.exists() {
+            return;
+        }
+        for rel in [
+            "bg/room.png",
+            "bg/street.png",
+            "rule/circle.png",
+            "rule/wipe.png",
+        ] {
+            let path = root.join(rel);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let decoded = decode(&bytes).unwrap();
+            let png = encode(decoded.width, decoded.height, &decoded.rgba);
+            let theirs = image::load_from_memory(&png)
+                .unwrap_or_else(|e| {
+                    panic!("{rel} の再エンコード結果を image クレートが読めない: {e:#}")
+                })
+                .to_rgba8();
+            assert_eq!(
+                theirs.as_raw().as_slice(),
+                decoded.rgba.as_slice(),
+                "{rel} のピクセルが不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_smaller_than_stored() {
+        // 実圧縮 (deflate) は無圧縮 (stored) より必ず小さいか同等であること。
+        let (w, h) = (128u32, 96u32);
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8, 255]);
+            }
+        }
+        let raw = build_filtered_raw(w, h, &rgba);
+        let compressed_len = zlib_compress(&raw).len();
+        let stored_len = zlib_compress_stored(&raw).len();
+        assert!(
+            compressed_len < stored_len,
+            "圧縮後 ({compressed_len}) が無圧縮 ({stored_len}) より小さくなっていない"
+        );
+    }
+
+    #[test]
+    fn compression_ratio_report_sample_assets() {
+        // W4 品質基準: sample の PNG 群を自作デコード→再エンコードし、
+        // stored (無圧縮) 比のサイズと所要時間を報告する（アセット差し替えはしない）。
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/sample/assets");
+        if !root.exists() {
+            return;
+        }
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "png") {
+                    out.push(path);
+                }
+            }
+        }
+        walk(&root, &mut files);
+        if files.is_empty() {
+            return;
+        }
+
+        let mut total_stored = 0u64;
+        let mut total_compressed = 0u64;
+        let mut total_image_crate = 0u64;
+        let mut total_elapsed = std::time::Duration::ZERO;
+        for path in &files {
+            let bytes = std::fs::read(path).unwrap();
+            let decoded = decode(&bytes).unwrap();
+            let raw = build_filtered_raw(decoded.width, decoded.height, &decoded.rgba);
+            let start = std::time::Instant::now();
+            let compressed = zlib_compress(&raw);
+            let per_file = start.elapsed();
+            total_elapsed += per_file;
+            let stored = zlib_compress_stored(&raw);
+
+            // 参照値: image クレート (png crate 経由、既定圧縮設定) での再エンコードサイズ。
+            let mut theirs_png = Vec::new();
+            PngEncoder::new(&mut theirs_png)
+                .write_image(
+                    &decoded.rgba,
+                    decoded.width,
+                    decoded.height,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .unwrap();
+
+            total_stored += stored.len() as u64;
+            total_compressed += compressed.len() as u64;
+            total_image_crate += theirs_png.len() as u64;
+            eprintln!(
+                "  {:?} {}x{} raw={}B -> ours={}B image-crate={}B ({:?})",
+                path.file_name().unwrap(),
+                decoded.width,
+                decoded.height,
+                raw.len(),
+                compressed.len(),
+                theirs_png.len(),
+                per_file
+            );
+        }
+        eprintln!(
+            "[W4 圧縮率レポート] {} 枚, stored={}B ours={}B ({:.1}%) image-crate参考={}B ({:.1}%) elapsed={:?}",
+            files.len(),
+            total_stored,
+            total_compressed,
+            100.0 * total_compressed as f64 / total_stored as f64,
+            total_image_crate,
+            100.0 * total_compressed as f64 / total_image_crate as f64,
+            total_elapsed
+        );
+        assert!(
+            total_compressed < total_stored,
+            "圧縮後合計が無圧縮合計を上回っている"
+        );
+    }
+    // --- 外部入力の堅牢化（R1） ---
+
+    fn ihdr_png(width: u32, height: u32, color_type: u8, idat: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&SIGNATURE);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]);
+        write_chunk(&mut out, b"IHDR", &ihdr);
+        write_chunk(&mut out, b"IDAT", idat);
+        write_chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn huge_ihdr_dimensions_are_errors_not_overflow_panics() {
+        // 中身が空の zlib ストリーム (stored, 0 バイト)。h * (stride + 1) が usize を溢れる寸法。
+        let empty_zlib = zlib_compress_stored(&[]);
+        for (w, h) in [
+            (u32::MAX, u32::MAX),
+            (u32::MAX, 1),
+            (1, u32::MAX),
+            (65535, 65535),
+            (0x4000_0000, 0x4000_0000),
+        ] {
+            for color_type in [0u8, 2, 3, 4, 6] {
+                let png = ihdr_png(w, h, color_type, &empty_zlib);
+                assert!(
+                    decode(&png).is_err(),
+                    "{w}x{h} color_type={color_type} が Err にならない"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deflate_bomb_in_idat_is_not_expanded_beyond_the_expected_size() {
+        // 1x1 の PNG に 16MB ぶんに展開される IDAT。期待サイズ (5 バイト) を超える展開はしない。
+        let bomb = zlib_compress(&vec![0u8; 16 << 20]);
+        let png = ihdr_png(1, 1, 6, &bomb);
+        let r = crate::test_support::with_alloc_limit(1 << 20, || decode(&png));
+        assert!(r.is_err() || r.unwrap().rgba.len() == 4);
+    }
+    // --- 破壊 fuzz（R1） ---
+
+    fn png_palette_bytes() -> Vec<u8> {
+        let (w, h) = (9usize, 7usize);
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0u8);
+            raw.extend((0..w).map(|x| ((x + y) % 4) as u8));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&SIGNATURE);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+        write_chunk(&mut out, b"IHDR", &ihdr);
+        write_chunk(&mut out, b"PLTE", &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+        write_chunk(&mut out, b"tRNS", &[255, 128]);
+        write_chunk(&mut out, b"IDAT", &zlib_compress(&raw));
+        write_chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    fn png_via_image_crate(
+        w: u32,
+        h: u32,
+        color: image::ExtendedColorType,
+        channels: usize,
+    ) -> Vec<u8> {
+        let mut seed = 7u64;
+        let px: Vec<u8> = (0..w as usize * h as usize * channels)
+            .map(|_| lcg(&mut seed))
+            .collect();
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&px, w, h, color)
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn fuzz_corrupted_png_never_panics_or_overallocates() {
+        let mut seed = 3u64;
+        let rgba: Vec<u8> = (0..13 * 9 * 4).map(|_| lcg(&mut seed)).collect();
+        let bases = [
+            png_via_image_crate(13, 9, image::ExtendedColorType::Rgba8, 4),
+            png_via_image_crate(11, 8, image::ExtendedColorType::Rgb8, 3),
+            png_via_image_crate(10, 10, image::ExtendedColorType::L8, 1),
+            png_via_image_crate(10, 6, image::ExtendedColorType::La8, 2),
+            png_palette_bytes(),
+            encode(13, 9, &rgba),
+        ];
+        for (i, base) in bases.iter().enumerate() {
+            assert!(decode(base).is_ok(), "基準入力 {i} がデコードできる");
+            crate::test_support::fuzz("png", 0x2222 + i as u64, 700, base, |d| {
+                if let Ok(img) = decode(d) {
+                    assert_eq!(img.rgba.len(), img.width as usize * img.height as usize * 4);
+                }
+            });
+        }
+    }
+}

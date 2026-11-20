@@ -1,0 +1,72 @@
+# ひなたEND（選択肢 1 / 1 / 1） ルート。実行例（セーブ先は毎回空のディレクトリにすること。sf.* や設定が前回から引き継がれる）:
+#   cargo run -p noiria-app -- games/demo --engine tsint --autotest-script games/demo/autotest/hinata.txt \
+#     --autotest-fast --autotest-out target/autotest-demo/hinata --save-dir target/autotest-demo/save-hinata
+#
+# 座標（ui="modern"、1280x720 の設計座標）:
+#   タイトル: START (200,372) / CONTINUE (200,434) / GALLERY (200,496) / CONFIG (200,558) / EXIT (200,620)。
+#   選択肢: 画面中央の横長ボタン（幅 720 x 高さ 64、間隔 16、中心 y=322 に縦並び）。x=640 を踏む。
+#     2 択は y=282 / 362、3 択は y=242 / 322 / 402。ボタンは本文の文字送りが終わってから段階的に現れる
+#     （最後のボタンまで約 0.5 秒）ので、選択肢の撮影・クリックの前に 600ms 余分に待つ。
+#   本文送りのクリックは帯の中の (1150,600)（システムボタン列 y≈668..702 や選択肢ボタンを避ける）。
+# クリック数は各 .ks の [np] の個数（scenario/ch*.ks）。通常のクリックは 2200ms 空ける
+#   （文字送りは 35cps で最長でも約 1.7 秒）。直後に場面転換（[scene] 最長 1800ms）が続くクリックは
+#   転換 + 文字送りが終わる前に次のクリックを入れると「文字送りの完了」に消費されて 1 クリック
+#   ずれるため 4200ms 空ける。
+# 撮影: タイトル / 各選択肢 / CG / エンド名 / エンドカード / タイトル復帰 / ギャラリー。
+
+wait 2800
+shot 01_title
+click 200 372                       # START
+wait 4200
+
+# ch1: morning 12 + clubroom 18 + choice 1 = 31 クリックで選択肢が出る（12 個目の後に場面転換）
+repeat 11 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+repeat 19 { click 1150 600 ; wait 2200 }
+wait 600
+shot 02_choice1
+click 640 282                       # 1 個目「ひなたと一緒にチラシを配る」
+wait 4200
+# ch1 の分岐: 8 クリック（最後の 1 つの後に ch2 への場面転換）
+repeat 7 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+
+# ch2: wednesday 14 + thursday 6 = 20 クリックで選択肢が出る（14 個目の後に場面転換）
+repeat 13 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+repeat 6 { click 1150 600 ; wait 2200 }
+wait 600
+shot 03_choice2
+click 640 282                       # 1 個目「昇降口へ走る（ひなたを追いかける）」
+wait 4200
+# ch2 の分岐 11 + night 4: それぞれの最後の後に場面転換（chase → night、night → ch3）
+repeat 10 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+repeat 3 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+
+# ch3: friday 5 + meteor 4 = 9 クリックで選択肢が出る（5 個目の後に場面転換）
+repeat 4 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4200
+repeat 4 { click 1150 600 ; wait 2200 }
+wait 600
+shot 04_choice3
+click 640 242                       # 1 個目「ひなたを探す」→ f.hinata>=2 で end_hinata
+wait 4200
+
+# end_hinata: CG までに 9 クリック。CG 表示中（メッセージ窓非表示で [waitclick]）を撮る
+repeat 8 { click 1150 600 ; wait 2200 }
+click 1150 600 ; wait 4000
+shot 05_cg
+click 1150 600 ; wait 3000          # CG の [waitclick] を解除
+repeat 3 { click 1150 600 ; wait 2200 }
+shot 06_end_name                    # エンド名の行（[np] 待ち）
+click 1150 600
+wait 8000
+shot 07_ending_card                 # 共通の締め「おしまい」
+click 1150 600
+wait 4200
+shot 08_title_after                 # タイトル復帰（CONTINUE が有効になっている）
+click 200 496                       # GALLERY
+wait 2200
+shot 09_gallery                     # 到達済みエンドだけ解放

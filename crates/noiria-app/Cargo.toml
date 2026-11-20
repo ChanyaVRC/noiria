@@ -1,0 +1,53 @@
+[package]
+name = "noiria-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noiria"
+path = "src/main.rs"
+
+[features]
+default = ["engine-v8", "engine-tsint"]
+# 開発ビルド用の env_logger（`main.rs` の `cfg(all(not(feature = "dist"), feature = "dev-log"))` 側で使う。
+# どちらの feature も無い構成は stderr の最小ロガーにフォールバックする）。dist ビルドは
+# 自前ロガーなので `--no-default-features` で外れ、依存グラフ（THIRD-PARTY.txt の対象）に載らない。
+# engine-v8 は開発の既定エンジンなので一緒に有効にする（`--no-default-features --features
+# engine-v8` が単独で通るように。tsint のみの非 dist ビルドは `--features engine-tsint,dev-log`）。
+dev-log = ["dep:env_logger"]
+# V8 (deno_core) スクリプトエンジン。開発時の既定エンジン。
+engine-v8 = ["dep:deno_core", "dep:deno_ast", "dep:deno_error", "dev-log"]
+# 完全自作 TS インタプリタ (tsint) スクリプトエンジン。配布ビルドの既定エンジン。
+engine-tsint = ["dep:tsint"]
+# 配布ビルド用の挙動切り替え（windows_subsystem・自前ロガー・既定ゲームパス探索・
+# 既定エンジン tsint 化）。noiria-core 側の dist feature も連動させる。
+dist = ["noiria-core/dist"]
+
+[dependencies]
+noiria-core = { path = "../noiria-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+crossbeam-channel.workspace = true
+env_logger = { version = "0.11", optional = true }
+deno_core = { version = "=0.407.0", optional = true }
+deno_ast = { version = "=0.53.2", features = ["transpiling"], optional = true }
+deno_error = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# 完全自作 TS インタプリタ（別リポジトリ、Noiria と同じ BuildSoft 配下に sibling で clone
+# されている前提）。V8/deno_core と並走で選べる第 2 のスクリプトエンジン (T5b)。
+tsint = { path = "../../../tsint", optional = true }
+
+# ウィンドウ/描画/入力は Win32 API 直叩き（winit/softbuffer は不使用）。
+# OS 境界 API（ウィンドウ/音声出力/動画デコードと同格の扱い）。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+] }

@@ -1,0 +1,47 @@
+[package]
+name = "noiria-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# 配布ビルド（W7）: GameConfig::engine の既定を "tsint" にする（開発時の既定 "v8" から変更）。
+dist = []
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+crossbeam-channel.workspace = true
+directories = "6"
+# WebP (VP8L lossless)。`codec/webp.rs` の 1 モジュールに隔離（外部依存の段階的
+# 自作化ロードマップ、W8 参照）。
+image-webp.workspace = true
+# 自作 VP9 デコーダ（別リポジトリ）。動画 (IVF/VP9) 再生用。
+# 純 Rust実装・依存クレートゼロなので通常依存として全プラットフォームで使える。
+vp9dec = { path = "../../../vp9dec" }
+
+# 動画 (H.264/MP4 等) 再生・音声出力 (WASAPI) 用。OS 内蔵 API を使う
+# OS 境界 API 呼び出しで、ffmpeg/cpal 等の外部ライブラリは使わない。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    # WASAPI 直叩き (wasapi_out.rs) 用
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
+# テスト専用: codec/png.rs・codec/jpeg.rs・codec/webp.rs のクロスチェック (自作/隔離
+# デコーダと image クレートのデコード結果突き合わせ)。非テストコードからは参照しない。
+# webp feature は image クレート内部でも image-webp を使っているため、
+# 同じ実装を別経路（デコーダ設定/呼び出しコード）から叩く形のクロスチェックになる
+# （docs/implementation-notes.md 2026-07-12 W8 参照）。
+[dev-dependencies]
+image = { workspace = true, features = ["webp"] }

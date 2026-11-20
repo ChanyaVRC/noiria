@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/noiria-core",
+    "crates/noiria-app",
+    "crates/noiria-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+crossbeam-channel = "0.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# WebP (VP8L lossless) デコード/エンコード。image-rs 公式の純 Rust クレート
+# (unsafe 禁止・C 依存なし)。`crates/noiria-core/src/codec/webp.rs` の 1 モジュールに
+# 隔離して使う（外部依存の段階的自作化ロードマップに沿う。将来自作 VP8L へ置換可能な
+# 想定で、公開 API を decode_rgba/encode_lossless の 2 関数だけに絞ってある）。
+image-webp = "0.2"
+
+[profile.dev]
+# CPU 合成なので画像処理系だけは開発時も最適化する
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# vp9dec は opt-level=3 で rustc のコード生成がスタックオーバーフローする
+# (rustc 1.94.1 の既知問題の踏み抜き)。2 なら安定してビルドできる。
+[profile.release.package.vp9dec]
+opt-level = 2
+
+# 配布ビルド専用プロファイル（W7）。`cargo build --profile dist --no-default-features
+# --features engine-tsint,dist -p noiria-app` で使う。release ベースに軽量化を追加。
+# panic="abort" は事前に catch_unwind 非使用を確認済み（docs/implementation-notes.md
+# 2026-07-12 配布対応 W7 参照）。
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = "symbols"
+panic = "abort"
+
+# vp9dec は dist プロファイルでも同じスタックオーバーフロー回避が必要。
+[profile.dist.package.vp9dec]
+opt-level = 2

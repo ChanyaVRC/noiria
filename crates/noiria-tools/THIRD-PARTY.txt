@@ -1,0 +1,111 @@
+Noiria 配布ビルド（`dist` feature, engine-tsint）— サードパーティ依存の一覧とライセンス表記
+====================================================================================
+
+このファイルは `noiria-export` が生成する配布物 (`game.pak` の実行に使う exe/バイナリ) に
+静的リンクされている Rust クレート（crates.io 由来。ワークスペース内の他クレート
+noiria-core/tsint/vp9dec は同一プロジェクト内の自作コードなので対象外）の一覧です。
+`cargo metadata --no-default-features --features engine-tsint,dist
+--manifest-path crates/noiria-app/Cargo.toml --filter-platform <windows/linux>` の依存
+グラフ（normal + build 依存、Windows/Linux 両ターゲットの和集合）から機械的に確認して
+います。最新の一致状況は `crates/noiria-tools/tests/third_party_check.rs`
+（`cargo metadata` を実行し、このファイルに全クレート名が載っていることを検査する）
+で継続的にチェックされます。
+
+各クレートの正確な著作権者はクレートのソース同梱の LICENSE ファイルに記載されています。
+以下は代表的なライセンス全文（MIT / Apache License 2.0）を 1 部ずつ掲載し、各クレートが
+どちらに該当するか一覧化する形式を取っています（多くの Rust エコシステムのクレートが
+"MIT OR Apache-2.0" のデュアルライセンスであるため）。
+
+--------------------------------------------------------------------------------------
+依存クレート一覧（クレート名 バージョン [ライセンス]）
+--------------------------------------------------------------------------------------
+
+MIT OR Apache-2.0 （どちらか選択可。本配布物は MIT の下で利用）:
+  anyhow 1.0.103
+  bitflags 1.3.2
+  byteorder-lite 0.1.0         (Unlicense OR MIT。本配布物は MIT の下で利用。image-webp の依存)
+  crossbeam-channel 0.5.16
+  crossbeam-utils 0.8.22
+  directories 6.0.0
+  dirs-sys 0.5.0
+  image-webp 0.2.4             (WebP デコード/エンコード。`codec/webp.rs` に隔離、W8)
+  itoa 1.0.18
+  libc 0.2.186                 (Linux のみ)
+  log 0.4.33
+  memchr 2.8.3                 (Unlicense OR MIT。本配布物は MIT の下で利用)
+  pin-project-lite 0.2.17
+  proc-macro2 1.0.106
+  quick-error 2.0.1            (image-webp の依存)
+  quote 1.0.46
+  serde 1.0.228
+  serde_core 1.0.228
+  serde_derive 1.0.228
+  serde_json 1.0.150
+  syn 2.0.118
+  thiserror 2.0.18
+  thiserror-impl 2.0.18
+  unicode-ident 1.0.24         (MIT OR Apache-2.0 に加え、Unicode 文字データ表の部分は
+                                 Unicode License v3 が適用。全文: https://www.unicode.org/license.txt)
+  windows 0.62.2               (Windows のみ)
+  windows-collections 0.3.2    (Windows のみ)
+  windows-core 0.62.2          (Windows のみ)
+  windows-future 0.3.2         (Windows のみ)
+  windows-implement 0.60.2     (Windows のみ)
+  windows-interface 0.59.3     (Windows のみ)
+  windows-link 0.2.1           (Windows のみ)
+  windows-numerics 0.3.1       (Windows のみ)
+  windows-result 0.4.1         (Windows のみ)
+  windows-strings 0.5.1        (Windows のみ)
+  windows-sys 0.61.2           (Windows のみ)
+  windows-threading 0.2.1      (Windows のみ)
+
+MIT のみ:
+  tokio 1.52.3
+  tokio-macros 2.7.0
+  zmij 1.0.21
+
+MPL-2.0（Mozilla Public License 2.0）:
+  option-ext 0.2.0             (dirs-sys の Windows 向け依存。全文:
+                                 https://www.mozilla.org/en-US/MPL/2.0/ 。改変せず
+                                 そのままリンクしているのみで、ソースコードの改変は
+                                 行っていない)
+
+--------------------------------------------------------------------------------------
+MIT License（全文。上記「MIT OR Apache-2.0」「MIT のみ」欄のクレートに適用。
+著作権者は各クレートの Cargo.toml/LICENSE に記載の作者）
+--------------------------------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+--------------------------------------------------------------------------------------
+Apache License, Version 2.0（全文の要旨。上記「MIT OR Apache-2.0」欄のクレートは
+この下で利用することも選択可。全文: https://www.apache.org/licenses/LICENSE-2.0）
+--------------------------------------------------------------------------------------
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# Local fonts (non-redistributable, see docs/linux-dev.md)
+games/*/fonts/
+
+# Temporary test outputs
+/o_s1_v8/
+
+# Generated knowledge graph
+/graphify-out/
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
