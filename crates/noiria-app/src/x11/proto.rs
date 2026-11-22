@@ -357,8 +357,8 @@ pub fn get_property_u32s(
         );
     }
     let mut out = Vec::with_capacity(num_items);
-    for chunk in reply[32..need].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in reply[32..need].as_chunks::<4>().0 {
+        out.push(u32::from_le_bytes(*chunk));
     }
     Ok(out)
 }
@@ -381,8 +381,8 @@ pub fn parse_query_tree_children(reply: &[u8]) -> Result<Vec<u32>> {
         bail!("QueryTree リプライのデータ長が不足しています");
     }
     let mut out = Vec::with_capacity(num_children);
-    for chunk in reply[32..need].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in reply[32..need].as_chunks::<4>().0 {
+        out.push(u32::from_le_bytes(*chunk));
     }
     Ok(out)
 }
@@ -408,8 +408,8 @@ pub fn get_image_pixels(
         );
     }
     let mut out = Vec::with_capacity((w as usize) * (h as usize));
-    for chunk in data[..need].chunks_exact(4) {
-        out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in data[..need].as_chunks::<4>().0 {
+        out.push(u32::from_le_bytes(*chunk));
     }
     Ok(out)
 }

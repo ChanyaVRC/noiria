@@ -38,6 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+      - name: Install CJK TrueType font (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        # noiria-core only parses TrueType (glyf) outlines and rejects CFF ('OTTO')
+        # fonts such as Ubuntu's fonts-noto-cjk; fonts-ipafont-gothic ships ipag.ttf
+        # (IPAGothic, in FALLBACK_CHAIN) with TrueType outlines.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-ipafont-gothic
       - name: Test noiria-core
         run: cargo test -p noiria-core
       - name: Test noiria-tools
@@ -55,6 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+      - name: Install CJK TrueType font (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-ipafont-gothic
       - name: Build noiria (dist)
         run: cargo build --profile dist --no-default-features --features engine-tsint,dist -p noiria-app
       - name: Build noiria-tools (release)

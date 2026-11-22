@@ -53,8 +53,8 @@ pub fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
     }
     let data = &reply[32..32 + n];
     let mut keysyms = Vec::with_capacity(n / 4);
-    for chunk in data.chunks_exact(4) {
-        keysyms.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in data.as_chunks::<4>().0 {
+        keysyms.push(u32::from_le_bytes(*chunk));
     }
     Ok(Keymap {
         min_keycode,

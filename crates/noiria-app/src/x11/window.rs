@@ -72,7 +72,7 @@ fn net_wm_icon_data(icon: &AppIcon) -> Vec<u8> {
         let img = icon.image(size);
         out.extend_from_slice(&img.w.to_le_bytes());
         out.extend_from_slice(&img.h.to_le_bytes());
-        for px in img.rgba.chunks_exact(4) {
+        for px in img.rgba.as_chunks::<4>().0 {
             let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
             let argb = (a << 24) | (r << 16) | (g << 8) | b;
             out.extend_from_slice(&argb.to_le_bytes());
