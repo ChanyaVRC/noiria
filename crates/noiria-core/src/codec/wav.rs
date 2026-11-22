@@ -1,5 +1,8 @@
 //! WAV (RIFF/WAVE) デコーダ（自作）。PCM 8bit/16bit/24bit と IEEE float 32bit に対応。
-//! 出力は f32 インターリーブ（`mixer::BufferSource` にそのまま渡せる形）。
+//! 出力は f32 インターリーブ。全量デコード (`decode`) とヘッダ解析＋逐次変換 (`parse_header` +
+//! `WavSampleFormat::decode_into`) の両方を提供する。
+
+use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -10,6 +13,82 @@ pub struct DecodedWav {
     pub samples: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WavSampleFormat {
+    Pcm8,
+    Pcm16,
+    Pcm24,
+    Float32,
+}
+
+impl WavSampleFormat {
+    pub fn from_fmt(format: u16, bits: u16) -> Result<Self> {
+        match (format, bits) {
+            (1, 8) => Ok(Self::Pcm8),
+            (1, 16) => Ok(Self::Pcm16),
+            (1, 24) => Ok(Self::Pcm24),
+            (3, 32) => Ok(Self::Float32),
+            (f, b) => bail!("非対応の WAV 形式: format={f} bits={b}"),
+        }
+    }
+
+    pub fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Pcm8 => 1,
+            Self::Pcm16 => 2,
+            Self::Pcm24 => 3,
+            Self::Float32 => 4,
+        }
+    }
+
+    /// `bytes` から最大 `out.len()` サンプルを f32 へ変換して `out` に書き、変換したサンプル数を返す。
+    pub fn decode_into(self, bytes: &[u8], out: &mut [f32]) -> usize {
+        match self {
+            Self::Pcm8 => {
+                let n = bytes.len().min(out.len());
+                for (dst, &b) in out[..n].iter_mut().zip(&bytes[..n]) {
+                    *dst = (b as f32 - 128.0) / 128.0;
+                }
+                n
+            }
+            Self::Pcm16 => {
+                let chunks = bytes.as_chunks::<2>().0;
+                let n = chunks.len().min(out.len());
+                for (dst, c) in out[..n].iter_mut().zip(&chunks[..n]) {
+                    *dst = i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0;
+                }
+                n
+            }
+            Self::Pcm24 => {
+                let chunks = bytes.as_chunks::<3>().0;
+                let n = chunks.len().min(out.len());
+                for (dst, c) in out[..n].iter_mut().zip(&chunks[..n]) {
+                    let v = i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8;
+                    *dst = v as f32 / 8_388_608.0;
+                }
+                n
+            }
+            Self::Float32 => {
+                let chunks = bytes.as_chunks::<4>().0;
+                let n = chunks.len().min(out.len());
+                for (dst, c) in out[..n].iter_mut().zip(&chunks[..n]) {
+                    *dst = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                }
+                n
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WavHeader {
+    pub format: WavSampleFormat,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub data_offset: u64,
+    pub data_len: u64,
+}
+
 fn u16le(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
 }
@@ -17,81 +96,92 @@ fn u32le(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-pub fn decode(data: &[u8]) -> Result<DecodedWav> {
-    ensure!(data.len() >= 12, "WAV ファイルが短すぎます");
-    ensure!(&data[0..4] == b"RIFF", "RIFF ヘッダがありません");
-    ensure!(&data[8..12] == b"WAVE", "WAVE 形式ではありません");
+/// シーク可能なストリームから WAV ヘッダと `data` チャンクの位置を解析し、`data_offset` にシークする。
+pub fn parse_header<R: Read + Seek>(reader: &mut R) -> Result<WavHeader> {
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    ensure!(file_len >= 12, "WAV ファイルが短すぎます");
+    reader.seek(SeekFrom::Start(0))?;
+    let mut riff = [0u8; 12];
+    reader.read_exact(&mut riff)?;
+    ensure!(&riff[0..4] == b"RIFF", "RIFF ヘッダがありません");
+    ensure!(&riff[8..12] == b"WAVE", "WAVE 形式ではありません");
 
-    let mut pos = 12usize;
-    let mut fmt: Option<(u16, u16, u32, u16)> = None; // (format, channels, rate, bits)
-    let mut body: Option<&[u8]> = None;
+    let mut pos: u64 = 12;
+    let mut fmt: Option<(u16, u16, u32, u16)> = None;
+    let mut data_range: Option<(u64, u64)> = None;
 
-    while pos + 8 <= data.len() {
-        let id = &data[pos..pos + 4];
-        let len = u32le(data, pos + 4) as usize;
+    while pos.checked_add(8).is_some_and(|end| end <= file_len) {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut hdr = [0u8; 8];
+        reader.read_exact(&mut hdr)?;
+        let id = &hdr[0..4];
+        let len = u32le(&hdr, 4) as u64;
         let start = pos + 8;
-        ensure!(
-            start + len <= data.len(),
-            "チャンクがファイル末尾を超えています"
-        );
-        let chunk = &data[start..start + len];
-        // チャンクは 2 バイト境界にパディングされる
-        pos = start + len + (len & 1);
+        let end = start
+            .checked_add(len)
+            .filter(|&e| e <= file_len)
+            .context("チャンクがファイル末尾を超えています")?;
 
         match id {
             b"fmt " => {
                 ensure!(len >= 16, "fmt チャンクが短すぎます");
+                let mut fmt_buf = [0u8; 16];
+                reader.read_exact(&mut fmt_buf)?;
                 fmt = Some((
-                    u16le(chunk, 0),
-                    u16le(chunk, 2),
-                    u32le(chunk, 4),
-                    u16le(chunk, 14),
+                    u16le(&fmt_buf, 0),
+                    u16le(&fmt_buf, 2),
+                    u32le(&fmt_buf, 4),
+                    u16le(&fmt_buf, 14),
                 ));
             }
             b"data" => {
-                body = Some(chunk);
-                // data 以降は読まなくてよい（fmt は data より先にあるのが通例）
+                data_range = Some((start, len));
                 if fmt.is_some() {
                     break;
                 }
             }
             _ => {}
         }
+
+        // チャンクは 2 バイト境界にパディングされる。
+        let Some(next) = end.checked_add(len & 1) else {
+            break;
+        };
+        pos = next;
     }
 
-    let (format, channels, sample_rate, bits) = fmt.context("fmt チャンクがありません")?;
-    let body = body.context("data チャンクがありません")?;
+    let (format_tag, channels, sample_rate, bits) = fmt.context("fmt チャンクがありません")?;
+    let (data_offset, data_len) = data_range.context("data チャンクがありません")?;
     ensure!(
         (1..=8).contains(&channels),
         "チャンネル数が不正: {channels}"
     );
     ensure!(sample_rate > 0, "サンプルレートが不正");
+    let format = WavSampleFormat::from_fmt(format_tag, bits)?;
+    reader.seek(SeekFrom::Start(data_offset))?;
 
-    let samples: Vec<f32> = match (format, bits) {
-        // PCM
-        (1, 8) => body.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
-        (1, 16) => body
-            .as_chunks::<2>().0.iter()
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-            .collect(),
-        (1, 24) => body
-            .as_chunks::<3>().0.iter()
-            .map(|c| {
-                let v = i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8;
-                v as f32 / 8_388_608.0
-            })
-            .collect(),
-        // IEEE float
-        (3, 32) => body
-            .as_chunks::<4>().0.iter()
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-        (f, b) => bail!("非対応の WAV 形式: format={f} bits={b}"),
-    };
-
-    Ok(DecodedWav {
+    Ok(WavHeader {
+        format,
         channels,
         sample_rate,
+        data_offset,
+        data_len,
+    })
+}
+
+pub fn decode(data: &[u8]) -> Result<DecodedWav> {
+    let mut cursor = std::io::Cursor::new(data);
+    let hdr = parse_header(&mut cursor)?;
+    let start = hdr.data_offset as usize;
+    let end = start + hdr.data_len as usize;
+    let body = &data[start..end];
+    let sample_count = body.len() / hdr.format.bytes_per_sample();
+    let mut samples = vec![0.0f32; sample_count];
+    hdr.format.decode_into(body, &mut samples);
+
+    Ok(DecodedWav {
+        channels: hdr.channels,
+        sample_rate: hdr.sample_rate,
         samples,
     })
 }

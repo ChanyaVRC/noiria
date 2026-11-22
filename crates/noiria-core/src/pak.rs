@@ -64,6 +64,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 #[cfg(not(any(unix, windows)))]
 use std::sync::Mutex;
 
@@ -479,7 +480,7 @@ impl PakSource {
 /// 開いた NPK1 pak。`Pak::open` はメモリ上のバイト列、`Pak::open_file` はファイルハンドルから
 /// 必要な範囲だけをオンデマンドで読み出す（アーカイブ全体を RAM に常駐させない）。
 pub struct Pak {
-    source: PakSource,
+    source: Arc<PakSource>,
     key: [u8; 32],
     entries: HashMap<String, IndexEntry>,
 }
@@ -572,7 +573,7 @@ impl Pak {
 
         let entries = parse_index(&index_plain)?;
         Ok(Self {
-            source,
+            source: Arc::new(source),
             key: *key,
             entries,
         })
@@ -658,10 +659,7 @@ impl Pak {
         Ok(plain)
     }
 
-    /// 無圧縮 (codec=0) エントリをシーク可能に読むリーダーを作る。ChaCha20 のカウンタ
-    /// シーク性を使い、先頭から復号せずに任意オフセットの読み出しができる。
-    /// 圧縮エントリ (codec=1) には使えない（圧縮ストリームは途中から展開できないため）。
-    pub fn entry_reader(&self, path: &str) -> Result<PakEntryReader<'_>> {
+    fn entry_cursor(&self, path: &str) -> Result<EntryCursor> {
         let e = self
             .entries
             .get(path)
@@ -685,8 +683,7 @@ impl Pak {
             end <= self.source.len(),
             "pak エントリの範囲がファイル外です: {path}"
         );
-        Ok(PakEntryReader {
-            source: &self.source,
+        Ok(EntryCursor {
             base_offset: e.offset,
             stored_len: e.stored_len,
             key: self.key,
@@ -695,13 +692,30 @@ impl Pak {
             pos: 0,
         })
     }
+
+    /// 無圧縮 (codec=0) エントリをシーク可能に読むリーダーを作る。ChaCha20 のカウンタ
+    /// シーク性を使い、先頭から復号せずに任意オフセットの読み出しができる。
+    /// 圧縮エントリ (codec=1) には使えない（圧縮ストリームは途中から展開できないため）。
+    pub fn entry_reader(&self, path: &str) -> Result<PakEntryReader<'_>> {
+        let cursor = self.entry_cursor(path)?;
+        Ok(PakEntryReader {
+            source: &self.source,
+            cursor,
+        })
+    }
+
+    /// 無圧縮 (codec=0) エントリを所有権付き (`'static + Send`) で読むリーダーを作る。
+    /// 音声ストリーミングなど `Pak` の借用をまたいで保持する用途向け。
+    pub fn open_entry_reader(&self, path: &str) -> Result<OwnedPakEntryReader> {
+        let cursor = self.entry_cursor(path)?;
+        Ok(OwnedPakEntryReader {
+            source: Arc::clone(&self.source),
+            cursor,
+        })
+    }
 }
 
-/// `Pak` の 1 エントリ（無圧縮のみ）をシーク可能に読み出すリーダー。ChaCha20 のカウンタは
-/// エントリ内バイトオフセットから直接導出するので、`seek()` しても先頭からの再復号は不要。
-/// 現状エンジン本体からは未使用（将来のストリーミング再生向けの土台、W6 計画の必須成果物）。
-pub struct PakEntryReader<'a> {
-    source: &'a PakSource,
+struct EntryCursor {
     base_offset: u64,
     stored_len: u64,
     key: [u8; 32],
@@ -710,8 +724,8 @@ pub struct PakEntryReader<'a> {
     pos: u64,
 }
 
-impl Read for PakEntryReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+impl EntryCursor {
+    fn read(&mut self, source: &PakSource, buf: &mut [u8]) -> std::io::Result<usize> {
         let remaining = self.len.min(self.stored_len).saturating_sub(self.pos);
         if remaining == 0 || buf.is_empty() {
             return Ok(0);
@@ -723,7 +737,7 @@ impl Read for PakEntryReader<'_> {
                 "pak オフセットがオーバーフローしました",
             )
         })?;
-        let n = self.source.read_at(file_offset, &mut buf[..to_read])?;
+        let n = source.read_at(file_offset, &mut buf[..to_read])?;
         if n == 0 {
             return Ok(0);
         }
@@ -731,9 +745,7 @@ impl Read for PakEntryReader<'_> {
         self.pos += n as u64;
         Ok(n)
     }
-}
 
-impl Seek for PakEntryReader<'_> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let new_pos = match pos {
             SeekFrom::Start(p) => Some(p),
@@ -748,6 +760,53 @@ impl Seek for PakEntryReader<'_> {
         };
         self.pos = new_pos;
         Ok(self.pos)
+    }
+}
+
+/// `Pak` の 1 エントリ（無圧縮のみ）をシーク可能に読み出すリーダー。ChaCha20 のカウンタは
+/// エントリ内バイトオフセットから直接導出するので、`seek()` しても先頭からの再復号は不要。
+pub struct PakEntryReader<'a> {
+    source: &'a PakSource,
+    cursor: EntryCursor,
+}
+
+impl Read for PakEntryReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.cursor.read(self.source, buf)
+    }
+}
+
+impl Seek for PakEntryReader<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.cursor.seek(pos)
+    }
+}
+
+/// `PakEntryReader` の所有権付き (`'static + Send`) 版。
+pub struct OwnedPakEntryReader {
+    source: Arc<PakSource>,
+    cursor: EntryCursor,
+}
+
+impl OwnedPakEntryReader {
+    pub fn len(&self) -> u64 {
+        self.cursor.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cursor.len == 0
+    }
+}
+
+impl Read for OwnedPakEntryReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.cursor.read(&self.source, buf)
+    }
+}
+
+impl Seek for OwnedPakEntryReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.cursor.seek(pos)
     }
 }
 

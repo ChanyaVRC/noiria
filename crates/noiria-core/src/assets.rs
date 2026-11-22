@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -17,8 +18,51 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::codec::video::VideoSource;
-use crate::pak::Pak;
+use crate::pak::{OwnedPakEntryReader, Pak, CODEC_STORED};
 use crate::pixmap::Pixmap;
+
+/// `GameDir::open_reader` が返すシーク可能なアセットリーダー。
+/// 実ファイル・pak 内無圧縮エントリはディスクから逐次読み出し、pak 内圧縮エントリ
+/// (DEFLATE / wav-flac) のみ展開済みメモリバッファへフォールバックする。
+pub enum AssetReader {
+    File { file: fs::File, len: u64 },
+    Pak(OwnedPakEntryReader),
+    Memory(Cursor<Vec<u8>>),
+}
+
+impl AssetReader {
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::File { len, .. } => *len,
+            Self::Pak(r) => r.len(),
+            Self::Memory(c) => c.get_ref().len() as u64,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Read for AssetReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File { file, .. } => file.read(buf),
+            Self::Pak(r) => r.read(buf),
+            Self::Memory(c) => c.read(buf),
+        }
+    }
+}
+
+impl Seek for AssetReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::File { file, .. } => file.seek(pos),
+            Self::Pak(r) => r.seek(pos),
+            Self::Memory(c) => c.seek(pos),
+        }
+    }
+}
 
 fn default_width() -> u32 {
     1280
@@ -261,6 +305,35 @@ impl GameDir {
                 let key = pak_key(rel)?;
                 pak.read(&key)
                     .with_context(|| format!("ファイルが読めません: {rel}"))
+            }
+        }
+    }
+
+    /// バイナリファイルをシーク可能なストリームとして開く（ストリーミング音声デコード用）。
+    pub fn open_reader(&self, rel: &str) -> Result<AssetReader> {
+        match self.backend.as_ref() {
+            Backend::Dir(_) => {
+                let path = self.resolve(rel)?;
+                let file = fs::File::open(&path)
+                    .with_context(|| format!("ファイルが読めません: {}", path.display()))?;
+                let len = file
+                    .metadata()
+                    .with_context(|| format!("ファイルが読めません: {}", path.display()))?
+                    .len();
+                Ok(AssetReader::File { file, len })
+            }
+            Backend::Pak { pak, .. } => {
+                let key = pak_key(rel)?;
+                if pak.codec_of(&key) == Some(CODEC_STORED) {
+                    let reader = pak
+                        .open_entry_reader(&key)
+                        .with_context(|| format!("ファイルが読めません: {rel}"))?;
+                    return Ok(AssetReader::Pak(reader));
+                }
+                let bytes = pak
+                    .read(&key)
+                    .with_context(|| format!("ファイルが読めません: {rel}"))?;
+                Ok(AssetReader::Memory(Cursor::new(bytes)))
             }
         }
     }
@@ -570,6 +643,69 @@ mod tests {
             assert_eq!(dir.read_bytes("fonts/a.ttf").unwrap(), vec![1, 2, 3, 4]);
             assert_eq!(dir.list_dir("fonts").unwrap(), vec!["a.ttf".to_string()]);
             assert!(dir.read_bytes("../secret.bin").is_err());
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_reader_supports_dir_pak_stored_and_pak_compressed_and_enforces_jail() {
+        let root = std::env::temp_dir().join(format!(
+            "noiria_open_reader_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        // Backend::Dir
+        let payload = b"0123456789abcdef".to_vec();
+        fs::write(root.join("clip.wav"), &payload).unwrap();
+        let dir = GameDir::for_test(root.clone());
+        let mut r = dir.open_reader("clip.wav").unwrap();
+        assert_eq!(r.len(), payload.len() as u64);
+        assert!(matches!(r, AssetReader::File { .. }));
+        r.seek(SeekFrom::Start(6)).unwrap();
+        let mut slice = [0u8; 4];
+        r.read_exact(&mut slice).unwrap();
+        assert_eq!(&slice, b"6789");
+        assert!(dir.open_reader("../secret.wav").is_err());
+
+        // Backend::Pak (stored OGG + deflated compressible data)
+        let pak_path = root.join("game.pak");
+        let game_json = br#"{"title":"StreamTest","id":"stream-test"}"#.to_vec();
+        let compressible = vec![b'A'; 4096];
+        let key = crate::pak::dev_key();
+        let (pak_bytes, _) = crate::pak::build(
+            vec![
+                ("game.json".to_string(), game_json),
+                ("bgm/theme.ogg".to_string(), payload.clone()),
+                ("bgm/tone.wav".to_string(), compressible.clone()),
+            ],
+            &key,
+        );
+        fs::write(&pak_path, &pak_bytes).unwrap();
+        {
+            let (pak_dir, _) = GameDir::open(&pak_path).unwrap();
+            let mut stored_r = pak_dir.open_reader("bgm/theme.ogg").unwrap();
+            assert!(matches!(stored_r, AssetReader::Pak(_)));
+            assert_eq!(stored_r.len(), payload.len() as u64);
+            stored_r.seek(SeekFrom::Start(10)).unwrap();
+            let mut out = Vec::new();
+            stored_r.read_to_end(&mut out).unwrap();
+            assert_eq!(out, &payload[10..]);
+
+            let mut deflated_r = pak_dir.open_reader("bgm/tone.wav").unwrap();
+            assert!(matches!(deflated_r, AssetReader::Memory(_)));
+            assert_eq!(deflated_r.len(), compressible.len() as u64);
+            let mut out = Vec::new();
+            deflated_r.read_to_end(&mut out).unwrap();
+            assert_eq!(out, compressible);
+
+            assert!(pak_dir.open_reader("../secret.ogg").is_err());
+            assert!(pak_dir.open_reader("bgm/missing.ogg").is_err());
         }
 
         let _ = fs::remove_dir_all(&root);

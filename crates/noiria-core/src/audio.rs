@@ -15,23 +15,25 @@
 //!
 //! だけを行う。外部オーディオライブラリ (rodio 等) には一切依存しない。
 //! WAV (`codec::wav`)・OGG/Vorbis (`codec::ogg` + `codec::vorbis`) とも
-//! クリーンルーム自作デコーダで全デコード → `mixer::BufferSource` に載せる。
+//! クリーンルーム自作デコーダで逐次ストリーミングデコードし、定数メモリで再生する。
 //! MP3/FLAC は対応を打ち切った（`build_source` 参照）。
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use crossbeam_channel::{select, Receiver, Sender};
 
 use crate::assets::GameDir;
+use crate::codec::ogg::{OggBookmark, OggPacketReader};
+use crate::codec::vorbis::VorbisStreamDecoder;
+use crate::codec::wav::{parse_header as parse_wav_header, WavHeader};
 pub use crate::mixer::FadeThen;
-use crate::mixer::{
-    BufferSource, ChannelConverter, Mixer, PcmSource, PreparedSource, Resampler, NUM_SLOTS,
-};
+use crate::mixer::{ChannelConverter, Mixer, PcmSource, PreparedSource, Resampler, NUM_SLOTS};
 
 pub const CH_BGM: usize = 0;
 pub const CH_SE: usize = 1;
@@ -60,8 +62,7 @@ pub fn channel_index(name: &str) -> Option<usize> {
 pub enum AudioCmd {
     Play {
         ch: usize,
-        /// GameDir ルート相対パス（W5: 絶対パスの持ち回りを撲滅。`build_source` が
-        /// `GameDir::read_bytes` 経由で読む）。
+        /// GameDir ルート相対パス（`build_source` が `GameDir::open_reader` 経由で読む）。
         rel: String,
         looping: bool,
         volume: f32,
@@ -235,21 +236,350 @@ impl AudioShared {
 /// 周期は「再生状態と現在位置をどれくらいの頻度で同期するか」だけを決める。
 const TICK: Duration = Duration::from_millis(10);
 
-/// デコード結果を出力フォーマット (device channels / rate) に変換し、
-/// `mixer::Mixer` にそのまま渡せる `PcmSource` を返す。
-/// 戻り値の bool は「`Mixer` 側でループを面倒見る必要があるか」。
-///
-/// WAV・OGG(Vorbis) とも自作デコーダで**全デコードしてから** `BufferSource`
-/// （巻き戻し可能なメモリ上バッファ）に載せる。ノベルゲームの BGM は
-/// 長くてもせいぜい 1 分未満級 (数MB) なので全デコードで実用上問題ない。
-/// ループはこの `BufferSource::rewind` を使って `Mixer` 側で行う
-/// （WAV と同じ扱い）。
-///
-/// 将来の最適化余地: BGM が長時間化する場合はストリーミングデコード
-/// （`codec::vorbis::VorbisStreamDecoder` はパケット単位デコードに対応済み
-/// なので、Ogg ページを逐次読みながら `PcmSource::next_sample` 呼び出し毎に
-/// 必要な分だけデコードする `PcmSource` 実装に差し替えられる）。現状は
-/// シンプルさを優先し全デコードのみとする。
+/// 1/2/3/4 バイトサンプルすべての公倍数（12 の倍数）に揃えた WAV ストリーミング読み込み長。
+const WAV_STREAM_BUF_BYTES: usize = 16_380;
+
+/// WAV (RIFF/WAVE) を固定サイズバッファで逐次デコードする `PcmSource`。
+/// ヘッダを一度だけ解析し、再生・巻き戻し・シーク中にヒープ確保しない。
+pub struct StreamingWavSource<R> {
+    reader: R,
+    header: WavHeader,
+    total_samples: u64,
+    usable_bytes: u64,
+    file_data_pos: u64,
+    sample_pos: u64,
+    raw_buf: Vec<u8>,
+    raw_pos: usize,
+    raw_len: usize,
+}
+
+impl<R: Read + Seek + Send> StreamingWavSource<R> {
+    pub fn new(mut reader: R) -> Result<Self> {
+        let header = parse_wav_header(&mut reader)?;
+        let bps = header.format.bytes_per_sample() as u64;
+        let total_samples = header.data_len / bps;
+        let usable_bytes = total_samples * bps;
+        let mut src = Self {
+            reader,
+            header,
+            total_samples,
+            usable_bytes,
+            file_data_pos: 0,
+            sample_pos: 0,
+            raw_buf: vec![0u8; WAV_STREAM_BUF_BYTES],
+            raw_pos: 0,
+            raw_len: 0,
+        };
+        // デコードスレッド上で先頭チャンクを先読みしておき、短い SE は
+        // 再生スレッドから OS read ゼロで鳴らし切れるようにする。
+        if total_samples > 0 {
+            src.refill();
+        }
+        Ok(src)
+    }
+
+    fn refill(&mut self) -> bool {
+        let bps = self.header.format.bytes_per_sample();
+        let rem = self.raw_len - self.raw_pos;
+        if rem > 0 {
+            self.raw_buf.copy_within(self.raw_pos..self.raw_len, 0);
+        }
+        self.raw_pos = 0;
+        self.raw_len = rem;
+
+        while self.raw_len < bps {
+            let remaining_in_chunk = self.usable_bytes.saturating_sub(self.file_data_pos);
+            if remaining_in_chunk == 0 {
+                return false;
+            }
+            let max_read = (self.raw_buf.len() - self.raw_len).min(remaining_in_chunk as usize);
+            match self
+                .reader
+                .read(&mut self.raw_buf[self.raw_len..self.raw_len + max_read])
+            {
+                Ok(0) => return false,
+                Ok(n) => {
+                    self.raw_len += n;
+                    self.file_data_pos += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    log::warn!("WAV ストリーム読み込みエラー（再生を終了します）: {e}");
+                    self.file_data_pos = self.usable_bytes;
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+impl<R: Read + Seek + Send> PcmSource for StreamingWavSource<R> {
+    fn channels(&self) -> u16 {
+        self.header.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.header.sample_rate
+    }
+
+    fn next_sample(&mut self) -> Option<f32> {
+        let mut one = [0.0f32];
+        (self.read(&mut one) == 1).then_some(one[0])
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> usize {
+        let bps = self.header.format.bytes_per_sample();
+        let mut written = 0;
+        while written < out.len() {
+            if self.raw_len - self.raw_pos < bps && !self.refill() {
+                break;
+            }
+            let decoded = self.header.format.decode_into(
+                &self.raw_buf[self.raw_pos..self.raw_len],
+                &mut out[written..],
+            );
+            if decoded == 0 {
+                break;
+            }
+            self.raw_pos += decoded * bps;
+            self.sample_pos += decoded as u64;
+            written += decoded;
+        }
+        written
+    }
+
+    fn skip_samples(&mut self, samples: u64) -> bool {
+        let remaining = self.total_samples.saturating_sub(self.sample_pos);
+        if samples > remaining {
+            self.sample_pos = self.total_samples;
+            self.file_data_pos = self.usable_bytes;
+            self.raw_pos = 0;
+            self.raw_len = 0;
+            return false;
+        }
+        if samples == 0 {
+            return true;
+        }
+        let bps = self.header.format.bytes_per_sample() as u64;
+        let skip_bytes = samples * bps;
+        let buffered = (self.raw_len - self.raw_pos) as u64;
+        if skip_bytes <= buffered {
+            self.raw_pos += skip_bytes as usize;
+            self.sample_pos += samples;
+            return true;
+        }
+        let new_sample_pos = self.sample_pos + samples;
+        let target_data_offset = new_sample_pos * bps;
+        let Some(abs_offset) = self.header.data_offset.checked_add(target_data_offset) else {
+            return false;
+        };
+        if self.reader.seek(SeekFrom::Start(abs_offset)).is_err() {
+            return false;
+        }
+        self.sample_pos = new_sample_pos;
+        self.file_data_pos = target_data_offset;
+        self.raw_pos = 0;
+        self.raw_len = 0;
+        true
+    }
+
+    fn frame_count_upper_bound(&self) -> Option<u64> {
+        Some(self.total_samples / self.header.channels.max(1) as u64)
+    }
+
+    fn rewind(&mut self) -> bool {
+        if self.total_samples == 0 {
+            return false;
+        }
+        if self
+            .reader
+            .seek(SeekFrom::Start(self.header.data_offset))
+            .is_err()
+        {
+            return false;
+        }
+        self.sample_pos = 0;
+        self.file_data_pos = 0;
+        self.raw_pos = 0;
+        self.raw_len = 0;
+        true
+    }
+}
+
+/// Ogg/Vorbis をページ・パケット単位で逐次デコードする `PcmSource`。
+/// 現在の 1 パケット分のデコード済み PCM のみを保持し、長尺 BGM でもメモリ使用量を一定に保つ。
+pub struct StreamingVorbisSource<R> {
+    ogg: OggPacketReader<R>,
+    decoder: VorbisStreamDecoder,
+    audio_start: OggBookmark,
+    frame_upper_bound: Option<u64>,
+    pcm_buf: Vec<f32>,
+    pcm_pos: usize,
+    ended: bool,
+    has_any_samples: bool,
+}
+
+impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
+    pub fn new(reader: R) -> Result<Self> {
+        let mut ogg = OggPacketReader::new(reader);
+        let id_packet = ogg
+            .next_packet()?
+            .context("Vorbis の 3 ヘッダパケットが揃っていません")?;
+        let _comment_packet = ogg
+            .next_packet()?
+            .context("Vorbis の 3 ヘッダパケットが揃っていません")?;
+        let setup_packet = ogg
+            .next_packet()?
+            .context("Vorbis の 3 ヘッダパケットが揃っていません")?;
+        let decoder = VorbisStreamDecoder::new(&id_packet, &setup_packet)?;
+        let audio_start = ogg.bookmark()?;
+
+        // 各有効音声パケットは最小でも 1 バイト以上を占め、overlap-add は最大 blocksize_1/2 フレームを
+        // 返す。granule_position を使わないのは、合成ストリームで granule=0 のまま音声パケットを
+        // 持つ場合があるため（過小見積もりはシーク失敗になる）。
+        let remaining_bytes = ogg.stream_len()?.saturating_sub(audio_start.byte_offset());
+        let frame_upper_bound =
+            Some(remaining_bytes.saturating_mul((decoder.max_blocksize() / 2) as u64));
+
+        let mut src = Self {
+            ogg,
+            decoder,
+            audio_start,
+            frame_upper_bound,
+            pcm_buf: Vec::new(),
+            pcm_pos: 0,
+            ended: false,
+            has_any_samples: false,
+        };
+        // デコードスレッド上で先頭 PCM ブロックを用意し、再生開始時の初回遅延と
+        // 先頭音声ページの破損を前倒しで処理する。
+        src.prime_first_pcm()?;
+        src.has_any_samples = !src.pcm_buf.is_empty();
+        Ok(src)
+    }
+
+    fn prime_first_pcm(&mut self) -> Result<()> {
+        loop {
+            match self.ogg.next_packet()? {
+                Some(pkt) => {
+                    let pcm = self.decoder.decode_packet(&pkt)?;
+                    if !pcm.is_empty() {
+                        self.pcm_buf = pcm;
+                        self.pcm_pos = 0;
+                        return Ok(());
+                    }
+                }
+                None => {
+                    self.ended = true;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn fill_next_pcm(&mut self) -> bool {
+        if self.ended {
+            return false;
+        }
+        loop {
+            match self.ogg.next_packet() {
+                Ok(Some(pkt)) => match self.decoder.decode_packet(&pkt) {
+                    Ok(pcm) => {
+                        if !pcm.is_empty() {
+                            self.pcm_buf = pcm;
+                            self.pcm_pos = 0;
+                            return true;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("OGG/Vorbis デコードエラー（再生を終了します）: {e:#}");
+                        self.ended = true;
+                        return false;
+                    }
+                },
+                Ok(None) => {
+                    self.ended = true;
+                    return false;
+                }
+                Err(e) => {
+                    log::warn!("OGG ストリーム読み込みエラー（再生を終了します）: {e:#}");
+                    self.ended = true;
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+impl<R: Read + Seek + Send> PcmSource for StreamingVorbisSource<R> {
+    fn channels(&self) -> u16 {
+        self.decoder.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.decoder.sample_rate()
+    }
+
+    fn next_sample(&mut self) -> Option<f32> {
+        if self.pcm_pos >= self.pcm_buf.len() && !self.fill_next_pcm() {
+            return None;
+        }
+        let s = self.pcm_buf[self.pcm_pos];
+        self.pcm_pos += 1;
+        Some(s)
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> usize {
+        let mut written = 0;
+        while written < out.len() {
+            if self.pcm_pos >= self.pcm_buf.len() && !self.fill_next_pcm() {
+                break;
+            }
+            let take = (self.pcm_buf.len() - self.pcm_pos).min(out.len() - written);
+            out[written..written + take]
+                .copy_from_slice(&self.pcm_buf[self.pcm_pos..self.pcm_pos + take]);
+            self.pcm_pos += take;
+            written += take;
+        }
+        written
+    }
+
+    fn skip_samples(&mut self, mut samples: u64) -> bool {
+        while samples > 0 {
+            if self.pcm_pos >= self.pcm_buf.len() && !self.fill_next_pcm() {
+                return false;
+            }
+            let avail = (self.pcm_buf.len() - self.pcm_pos) as u64;
+            let take = samples.min(avail);
+            self.pcm_pos += take as usize;
+            samples -= take;
+        }
+        true
+    }
+
+    fn frame_count_upper_bound(&self) -> Option<u64> {
+        self.frame_upper_bound
+    }
+
+    fn rewind(&mut self) -> bool {
+        if !self.has_any_samples {
+            return false;
+        }
+        if self.ogg.seek_to_bookmark(&self.audio_start).is_err() {
+            self.ended = true;
+            return false;
+        }
+        self.decoder.reset();
+        self.pcm_buf.clear();
+        self.pcm_pos = 0;
+        self.ended = false;
+        true
+    }
+}
+
+/// 音声ファイルを開いて出力フォーマット (device channels / rate) 変換を繋いだ
+/// `PcmSource` を返す。戻り値の bool は「`Mixer` 側でループを面倒見る必要があるか」。
 fn build_source(
     game_dir: &GameDir,
     rel: &str,
@@ -265,22 +595,20 @@ fn build_source(
 
     match ext.as_str() {
         "wav" => {
-            let bytes = game_dir.read_bytes(rel)?;
-            let w = crate::codec::wav::decode(&bytes)?;
-            ensure!(w.channels > 0, "WAV のチャンネル数が不正: {rel}");
-            ensure!(w.sample_rate > 0, "WAV のサンプルレートが不正: {rel}");
-            let buf = BufferSource::new(w.channels, w.sample_rate, w.samples);
-            let resampled = Resampler::new(buf, out_rate);
+            let reader = game_dir.open_reader(rel)?;
+            let src = StreamingWavSource::new(reader)?;
+            ensure!(src.channels() > 0, "WAV のチャンネル数が不正: {rel}");
+            ensure!(src.sample_rate() > 0, "WAV のサンプルレートが不正: {rel}");
+            let resampled = Resampler::new(src, out_rate);
             let converted = ChannelConverter::new(resampled, out_channels);
             Ok((Box::new(converted), looping))
         }
         "ogg" | "oga" => {
-            let bytes = game_dir.read_bytes(rel)?;
-            let v = crate::codec::vorbis::decode(&bytes)?;
-            ensure!(v.channels > 0, "OGG のチャンネル数が不正: {rel}");
-            ensure!(v.sample_rate > 0, "OGG のサンプルレートが不正: {rel}");
-            let buf = BufferSource::new(v.channels, v.sample_rate, v.samples);
-            let resampled = Resampler::new(buf, out_rate);
+            let reader = game_dir.open_reader(rel)?;
+            let src = StreamingVorbisSource::new(reader)?;
+            ensure!(src.channels() > 0, "OGG のチャンネル数が不正: {rel}");
+            ensure!(src.sample_rate() > 0, "OGG のサンプルレートが不正: {rel}");
+            let resampled = Resampler::new(src, out_rate);
             let converted = ChannelConverter::new(resampled, out_channels);
             Ok((Box::new(converted), looping))
         }
@@ -901,6 +1229,7 @@ fn sync_shared(shared: &AudioShared, mixer: &Mixer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mixer::BufferSource;
     use std::path::PathBuf;
 
     /// PCM16 モノラルの最小 WAV バイト列を組み立てる（テスト専用）。
@@ -1671,5 +2000,387 @@ mod tests {
             "シーク中にレンダー側のロック待ちが発生した: {worst:?}"
         );
         assert!(mixer.lock().unwrap().position_ms(CH_BGM) >= 100);
+    }
+
+    // ---- ストリーミングデコード（WAV / OGG Vorbis） ----
+
+    /// 1 回の `read` を `max_chunk` バイト以下に制限するラッパ（途中切れ読み出しの回帰用）。
+    struct ShortReadCursor {
+        inner: std::io::Cursor<Vec<u8>>,
+        max_chunk: usize,
+    }
+
+    impl Read for ShortReadCursor {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let cap = buf.len().min(self.max_chunk);
+            self.inner.read(&mut buf[..cap])
+        }
+    }
+
+    impl Seek for ShortReadCursor {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    fn build_wav_custom(
+        format_tag: u16,
+        channels: u16,
+        rate: u32,
+        bits: u16,
+        body: &[u8],
+        fmt_after_data: bool,
+    ) -> Vec<u8> {
+        let block_align = channels * bits / 8;
+        let mut fmt_chunk = Vec::new();
+        fmt_chunk.extend_from_slice(b"fmt ");
+        fmt_chunk.extend_from_slice(&16u32.to_le_bytes());
+        fmt_chunk.extend_from_slice(&format_tag.to_le_bytes());
+        fmt_chunk.extend_from_slice(&channels.to_le_bytes());
+        fmt_chunk.extend_from_slice(&rate.to_le_bytes());
+        fmt_chunk.extend_from_slice(&(rate * block_align as u32).to_le_bytes());
+        fmt_chunk.extend_from_slice(&block_align.to_le_bytes());
+        fmt_chunk.extend_from_slice(&bits.to_le_bytes());
+
+        // 奇数長チャンク（2 バイト境界パディングの検証用）
+        let mut junk_chunk = Vec::new();
+        junk_chunk.extend_from_slice(b"JUNK");
+        junk_chunk.extend_from_slice(&3u32.to_le_bytes());
+        junk_chunk.extend_from_slice(&[1, 2, 3, 0]);
+
+        let mut data_chunk = Vec::new();
+        data_chunk.extend_from_slice(b"data");
+        data_chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        data_chunk.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            data_chunk.push(0);
+        }
+
+        let payload_len = fmt_chunk.len() + junk_chunk.len() + data_chunk.len();
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(4 + payload_len as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(&junk_chunk);
+        if fmt_after_data {
+            v.extend_from_slice(&data_chunk);
+            v.extend_from_slice(&fmt_chunk);
+        } else {
+            v.extend_from_slice(&fmt_chunk);
+            v.extend_from_slice(&data_chunk);
+        }
+        v
+    }
+
+    fn drain_source(src: &mut dyn PcmSource, chunk_lens: &[usize]) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut buf = vec![0.0f32; *chunk_lens.iter().max().unwrap_or(&1)];
+        let mut idx = 0;
+        loop {
+            let want = chunk_lens[idx % chunk_lens.len()];
+            idx += 1;
+            let got = src.read(&mut buf[..want]);
+            out.extend_from_slice(&buf[..got]);
+            if got < want {
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn streaming_wav_matches_wav_decode_across_all_formats_and_short_reads() {
+        // 16 KB の内部バッファを複数回またぐデータ量で全 4 形式を検証する。
+        let n_samples = 12_000usize;
+        let body8: Vec<u8> = (0..n_samples).map(|i| ((i * 37) % 256) as u8).collect();
+        let body16: Vec<u8> = (0..n_samples)
+            .flat_map(|i| (((i as i32 * 521) - 32000) as i16).to_le_bytes())
+            .collect();
+        let body24: Vec<u8> = (0..n_samples)
+            .flat_map(|i| {
+                let v = ((i as i32 * 131_071) % 8_388_607) - 4_194_304;
+                let b = v.to_le_bytes();
+                [b[0], b[1], b[2]]
+            })
+            .collect();
+        let bodyf32: Vec<u8> = (0..n_samples)
+            .flat_map(|i| ((i as f32 / n_samples as f32) * 2.0 - 1.0).to_le_bytes())
+            .collect();
+
+        let cases: [(&str, Vec<u8>, usize); 5] = [
+            ("pcm8", build_wav_custom(1, 1, 22050, 8, &body8, false), 13),
+            ("pcm16", build_wav_custom(1, 2, 44100, 16, &body16, false), 7),
+            ("pcm24_short_read", build_wav_custom(1, 2, 48000, 24, &body24, false), 5),
+            ("float32", build_wav_custom(3, 2, 48000, 32, &bodyf32, false), 11),
+            ("fmt_after_data", build_wav_custom(1, 1, 44100, 16, &body16[..500], true), 19),
+        ];
+
+        for (label, wav_bytes, max_chunk) in cases {
+            let expected = crate::codec::wav::decode(&wav_bytes).unwrap();
+            let reader = ShortReadCursor {
+                inner: std::io::Cursor::new(wav_bytes),
+                max_chunk,
+            };
+            let mut src = StreamingWavSource::new(reader).unwrap();
+            assert_eq!(src.channels(), expected.channels, "{label}");
+            assert_eq!(src.sample_rate(), expected.sample_rate, "{label}");
+            let got = drain_source(&mut src, &[1, 7, 63, 257, 1024]);
+            assert_eq!(
+                got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected.samples.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "{label}: ストリーミング WAV 出力が wav::decode とビット一致しない"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_wav_looping_seek_position_ms_and_zero_alloc_playback() {
+        // 2 秒 (44100Hz ステレオ 16bit = ~352 KB) で複数バッファ跨ぎのシーク・ループ・無確保を検証。
+        let frames = 44_100 * 2;
+        let body: Vec<u8> = (0..frames * 2)
+            .flat_map(|i| (((i * 257) % 60000 - 30000) as i16).to_le_bytes())
+            .collect();
+        let wav_bytes = build_wav_custom(1, 2, 44100, 16, &body, false);
+        let decoded = crate::codec::wav::decode(&wav_bytes).unwrap();
+
+        // 1. 任意位置 (750ms) からの再生が BufferSource とビット一致し position_ms が正確
+        let mk_stream = || {
+            let s = StreamingWavSource::new(std::io::Cursor::new(wav_bytes.clone())).unwrap();
+            Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
+        };
+        let mk_buf = || {
+            let s = BufferSource::new(decoded.channels, decoded.sample_rate, decoded.samples.clone());
+            Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
+        };
+
+        let mut m_stream = Mixer::new(2, 48000);
+        let mut m_buf = Mixer::new(2, 48000);
+        m_stream.play_from_ms(CH_BGM, mk_stream(), true, 1.0, 0, 750);
+        m_buf.play_from_ms(CH_BGM, mk_buf(), true, 1.0, 0, 750);
+        assert_eq!(m_stream.position_ms(CH_BGM), 750);
+        assert_eq!(m_stream.position_ms(CH_BGM), m_buf.position_ms(CH_BGM));
+
+        // 末尾をまたいで 2 周目に入るまで (1.5 秒 = 72000 フレーム) 比較
+        let mut out_s = vec![0.0f32; 4800 * 2];
+        let mut out_b = vec![0.0f32; 4800 * 2];
+        for _ in 0..15 {
+            m_stream.mix_into(&mut out_s);
+            m_buf.mix_into(&mut out_b);
+            assert_eq!(
+                out_s.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                out_b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(m_stream.position_ms(CH_BGM), m_buf.position_ms(CH_BGM));
+        }
+
+        // 2. 終端超過 (u64::MAX) でも先頭へ巻き戻される
+        m_stream.play_from_ms(CH_BGM, mk_stream(), false, 1.0, 0, u64::MAX);
+        assert_eq!(m_stream.position_ms(CH_BGM), 0);
+        m_stream.mix_into(&mut out_s[..200]);
+        assert!(out_s[..200].iter().any(|&s| s.abs() > 1e-6));
+
+        // 3. 再生・シーク・巻き戻し中にヒープ確保が 0 バイトであること
+        let mut src = StreamingWavSource::new(std::io::Cursor::new(wav_bytes)).unwrap();
+        let mut scratch = vec![0.0f32; 512];
+        let ((), peak) = crate::test_support::measure_peak(|| {
+            assert!(src.skip_samples(50_000));
+            for _ in 0..20 {
+                let _ = src.read(&mut scratch);
+            }
+            assert!(src.rewind());
+            let _ = src.read(&mut scratch);
+        });
+        assert_eq!(peak, 0, "StreamingWavSource は再生・シーク・巻き戻し中に確保しない");
+    }
+
+    #[test]
+    fn streaming_vorbis_matches_vorbis_decode_bit_exactly() {
+        let dir = vectors_dir();
+        for name in [
+            "mono1_a_boy2.ogg",
+            "mono2_abashed_en.ogg",
+            "stereo1_kalmykia_anthem_trimmed.ogg",
+        ] {
+            let path = dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let expected = crate::codec::vorbis::decode(&bytes).unwrap();
+            let mut src = StreamingVorbisSource::new(std::io::Cursor::new(bytes)).unwrap();
+            assert_eq!(src.channels(), expected.channels, "{name}");
+            assert_eq!(src.sample_rate(), expected.sample_rate, "{name}");
+            let got = drain_source(&mut src, &[1, 19, 256, 1024, 333]);
+            assert_eq!(
+                got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected.samples.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "{name}: StreamingVorbisSource が vorbis::decode とビット一致しない"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_vorbis_uses_constant_memory_much_smaller_than_full_pcm() {
+        let path = vectors_dir().join("stereo1_kalmykia_anthem_trimmed.ogg");
+        if !path.exists() {
+            return;
+        }
+        // 27 秒ステレオ 48kHz の全デコード済み PCM は約 10.4 MB。
+        // ストリーミング再生中のピーク確保はそれより桁違いに小さい（定数メモリ）はず。
+        let (total_samples, peak) = crate::test_support::measure_peak(|| {
+            let file = std::fs::File::open(&path).unwrap();
+            let mut src = StreamingVorbisSource::new(file).unwrap();
+            let mut buf = [0.0f32; 1024];
+            let mut total = 0usize;
+            loop {
+                let n = src.read(&mut buf);
+                total += n;
+                if n < buf.len() {
+                    break;
+                }
+            }
+            total
+        });
+        let full_pcm_bytes = total_samples * std::mem::size_of::<f32>();
+        assert!(full_pcm_bytes > 8 * 1024 * 1024, "想定より短いベクタ: {full_pcm_bytes}");
+        assert!(
+            peak < 2 * 1024 * 1024,
+            "ストリーミング再生のピーク確保が大きすぎる: peak={peak} bytes (full_pcm={full_pcm_bytes} bytes)"
+        );
+    }
+
+    #[test]
+    fn streaming_vorbis_looping_and_position_seek_match_buffer_source() {
+        let path = vectors_dir().join("mono2_abashed_en.ogg");
+        if !path.exists() {
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let decoded = crate::codec::vorbis::decode(&bytes).unwrap();
+
+        let mk_stream = || {
+            let s = StreamingVorbisSource::new(std::io::Cursor::new(bytes.clone())).unwrap();
+            Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
+        };
+        let mk_buf = || {
+            let s = BufferSource::new(decoded.channels, decoded.sample_rate, decoded.samples.clone());
+            Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
+        };
+
+        // 1. 途中位置 (500ms) から開始し、終端 (約 1.67s) をまたいで 2 周目まで BufferSource と一致
+        let mut m_stream = Mixer::new(2, 48000);
+        let mut m_buf = Mixer::new(2, 48000);
+        m_stream.play_from_ms(CH_BGM, mk_stream(), true, 1.0, 0, 500);
+        m_buf.play_from_ms(CH_BGM, mk_buf(), true, 1.0, 0, 500);
+        assert_eq!(m_stream.position_ms(CH_BGM), 500);
+
+        let mut out_s = vec![0.0f32; 4800 * 2];
+        let mut out_b = vec![0.0f32; 4800 * 2];
+        for _ in 0..20 {
+            m_stream.mix_into(&mut out_s);
+            m_buf.mix_into(&mut out_b);
+            assert_eq!(
+                out_s.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                out_b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(m_stream.position_ms(CH_BGM), m_buf.position_ms(CH_BGM));
+        }
+
+        // 2. 終端超過 (60s / u64::MAX) は先頭に巻き戻されて先頭から一致再生される
+        for past_end in [60_000u64, u64::MAX] {
+            m_stream.play_from_ms(CH_BGM, mk_stream(), false, 1.0, 0, past_end);
+            m_buf.play_from_ms(CH_BGM, mk_buf(), false, 1.0, 0, past_end);
+            assert_eq!(m_stream.position_ms(CH_BGM), 0);
+            m_stream.mix_into(&mut out_s);
+            m_buf.mix_into(&mut out_b);
+            assert_eq!(
+                out_s.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                out_b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn build_source_streams_ogg_and_wav_from_file_backed_pak() {
+        let ogg_path = vectors_dir().join("mono1_a_boy2.ogg");
+        if !ogg_path.exists() {
+            return;
+        }
+        let ogg_bytes = std::fs::read(&ogg_path).unwrap();
+        let wav_bytes = build_wav_bytes(44100, &[0, 16384, 32767, -32768, -16384, 0]);
+        let game_json = br#"{"title":"AudioPak","id":"audio-pak"}"#.to_vec();
+
+        let dir = temp_path("pak-audio");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pak_path = dir.join("game.pak");
+        let key = crate::pak::dev_key();
+        let (pak_bytes, _) = crate::pak::build(
+            vec![
+                ("game.json".to_string(), game_json),
+                ("bgm/theme.ogg".to_string(), ogg_bytes.clone()),
+                ("se/click.wav".to_string(), wav_bytes.clone()),
+            ],
+            &key,
+        );
+        std::fs::write(&pak_path, &pak_bytes).unwrap();
+
+        {
+            let (game_dir, _) = GameDir::open(&pak_path).unwrap();
+            let (mut ogg_src, ogg_loop) =
+                build_source(&game_dir, "bgm/theme.ogg", true, 1, 44100).unwrap();
+            assert!(ogg_loop);
+            let expected_ogg = crate::codec::vorbis::decode(&ogg_bytes).unwrap();
+            let mut expected_ogg_chain = ChannelConverter::new(
+                Resampler::new(
+                    BufferSource::new(
+                        expected_ogg.channels,
+                        expected_ogg.sample_rate,
+                        expected_ogg.samples.clone(),
+                    ),
+                    44100,
+                ),
+                1,
+            );
+            let got_ogg = drain_source(&mut *ogg_src, &[512]);
+            let want_ogg = drain_source(&mut expected_ogg_chain, &[512]);
+            assert_eq!(
+                got_ogg.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                want_ogg.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+            assert!(ogg_src.rewind());
+            let mut head = [0.0f32; 64];
+            assert_eq!(ogg_src.read(&mut head), 64);
+            assert_eq!(
+                head.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                want_ogg[..64]
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+
+            let (mut wav_src, wav_loop) =
+                build_source(&game_dir, "se/click.wav", false, 1, 44100).unwrap();
+            assert!(!wav_loop);
+            let expected_wav = crate::codec::wav::decode(&wav_bytes).unwrap();
+            let mut expected_wav_chain = ChannelConverter::new(
+                Resampler::new(
+                    BufferSource::new(
+                        expected_wav.channels,
+                        expected_wav.sample_rate,
+                        expected_wav.samples,
+                    ),
+                    44100,
+                ),
+                1,
+            );
+            let got_wav = drain_source(&mut *wav_src, &[16]);
+            let want_wav = drain_source(&mut expected_wav_chain, &[16]);
+            assert_eq!(
+                got_wav.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                want_wav.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

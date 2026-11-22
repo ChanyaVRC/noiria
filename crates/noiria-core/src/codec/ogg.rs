@@ -2,6 +2,8 @@
 //! `codec/vorbis` レイヤが使う。チェイン/複数論理ストリームの多重化には対応せず、
 //! ファイル中で最初に現れる論理ストリーム（先頭ページの serial）のみを対象とする。
 
+use std::io::{BufReader, Read, Seek, SeekFrom};
+
 use anyhow::{ensure, Context, Result};
 
 /// Ogg の CRC32: 多項式 0x04C11DB7、反射なし、初期値 0、最終 XOR なし。
@@ -193,6 +195,235 @@ pub fn extract_first_stream_packets(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i
     Ok((serial, packets, last_granule))
 }
 
+/// `OggPacketReader::seek_to_bookmark` で戻るための位置情報。
+#[derive(Debug, Clone, Copy)]
+pub struct OggBookmark {
+    pub(crate) byte_offset: u64,
+    packets_to_skip: usize,
+    target_serial: Option<u32>,
+    eos_reached: bool,
+}
+
+impl OggBookmark {
+    pub fn byte_offset(&self) -> u64 {
+        self.byte_offset
+    }
+}
+
+fn read_header_or_eof(r: &mut impl Read, header: &mut [u8; 27]) -> std::io::Result<bool> {
+    let mut filled = 0;
+    while filled < header.len() {
+        match r.read(&mut header[filled..]) {
+            Ok(0) => {
+                if filled == 0 {
+                    return Ok(false);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Ogg ページヘッダが短すぎます",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Ogg ページを 1 ページずつ逐次読み出し、先頭論理ストリームのパケット列を再構築するリーダ。
+/// メモリ使用量は 1 ページ分（最大約 64 KB）+ 進行中 1 パケット分に抑える。
+pub struct OggPacketReader<R> {
+    reader: BufReader<R>,
+    target_serial: Option<u32>,
+    page_buf: Vec<u8>,
+    seg_count: usize,
+    seg_idx: usize,
+    body_off: usize,
+    page_eos: bool,
+    eos_reached: bool,
+    pending: Vec<u8>,
+    have_pending: bool,
+    packets_yielded: usize,
+    last_granule: i64,
+}
+
+impl<R: Read> OggPacketReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::with_capacity(8192, reader),
+            target_serial: None,
+            page_buf: Vec::new(),
+            seg_count: 0,
+            seg_idx: 0,
+            body_off: 0,
+            page_eos: false,
+            eos_reached: false,
+            pending: Vec::new(),
+            have_pending: false,
+            packets_yielded: 0,
+            last_granule: 0,
+        }
+    }
+
+    pub fn last_granule(&self) -> i64 {
+        self.last_granule
+    }
+
+    pub fn serial(&self) -> Option<u32> {
+        self.target_serial
+    }
+
+    fn read_next_page(&mut self) -> Result<bool> {
+        loop {
+            let mut header = [0u8; 27];
+            if !read_header_or_eof(&mut self.reader, &mut header)? {
+                return Ok(false);
+            }
+            ensure!(&header[0..4] == b"OggS", "Ogg キャプチャパターンがありません");
+            let version = header[4];
+            ensure!(version == 0, "非対応の Ogg バージョン: {version}");
+            let header_type = header[5];
+            let granule_position = i64le(&header, 6);
+            let serial = u32le(&header, 14);
+            let crc_stored = u32le(&header, 22);
+            let page_segments = header[26] as usize;
+
+            let total_prefix = 27 + page_segments;
+            self.page_buf.resize(total_prefix, 0);
+            self.page_buf[..27].copy_from_slice(&header);
+            self.reader
+                .read_exact(&mut self.page_buf[27..total_prefix])
+                .map_err(|_| anyhow::anyhow!("セグメントテーブルが途中で切れています"))?;
+
+            let body_len: usize = self.page_buf[27..total_prefix]
+                .iter()
+                .map(|&s| s as usize)
+                .sum();
+            let total = total_prefix + body_len;
+            self.page_buf.resize(total, 0);
+            self.reader
+                .read_exact(&mut self.page_buf[total_prefix..total])
+                .map_err(|_| anyhow::anyhow!("Ogg ページ本体が途中で切れています"))?;
+
+            self.page_buf[22..26].fill(0);
+            let computed = crc32(&self.page_buf[..total]);
+            ensure!(computed == crc_stored, "Ogg ページの CRC32 が一致しません");
+
+            let continued = header_type & 0x01 != 0;
+            let bos = header_type & 0x02 != 0;
+            let eos = header_type & 0x04 != 0;
+
+            if self.target_serial.is_none() {
+                ensure!(
+                    bos,
+                    "最初のページが BOS ではありません（複数論理ストリームの先頭欠落）"
+                );
+                self.target_serial = Some(serial);
+            }
+            if Some(serial) != self.target_serial {
+                continue;
+            }
+            if !continued && self.have_pending {
+                self.pending.clear();
+                self.have_pending = false;
+            }
+            self.seg_count = page_segments;
+            self.seg_idx = 0;
+            self.body_off = total_prefix;
+            self.page_eos = eos;
+            self.last_granule = granule_position;
+            return Ok(true);
+        }
+    }
+
+    /// 次のパケットを返す。ストリーム終端 (EOS / EOF) に達したら `Ok(None)`。
+    pub fn next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+        loop {
+            while self.seg_idx < self.seg_count {
+                let seg = self.page_buf[27 + self.seg_idx] as usize;
+                self.seg_idx += 1;
+                let chunk = &self.page_buf[self.body_off..self.body_off + seg];
+                self.body_off += seg;
+                self.pending.extend_from_slice(chunk);
+                self.have_pending = true;
+                if seg < 255 {
+                    self.have_pending = false;
+                    self.packets_yielded += 1;
+                    return Ok(Some(std::mem::take(&mut self.pending)));
+                }
+            }
+
+            if self.page_eos || self.eos_reached {
+                self.eos_reached = true;
+                if self.have_pending && !self.pending.is_empty() {
+                    self.have_pending = false;
+                    self.packets_yielded += 1;
+                    return Ok(Some(std::mem::take(&mut self.pending)));
+                }
+                return Ok(None);
+            }
+
+            if !self.read_next_page()? {
+                self.eos_reached = true;
+                if self.have_pending && !self.pending.is_empty() {
+                    self.have_pending = false;
+                    self.packets_yielded += 1;
+                    return Ok(Some(std::mem::take(&mut self.pending)));
+                }
+                return Ok(None);
+            }
+        }
+    }
+}
+
+impl<R: Read + Seek> OggPacketReader<R> {
+    /// 現在位置を後で巻き戻せるブックマークとして記録する。
+    /// ページ境界上にあれば直後のページオフセットを記録してヘッダ再読込を省き、
+    /// ページ途中にある非標準ストリームでは先頭からのスキップ数でフォールバックする。
+    pub fn bookmark(&mut self) -> Result<OggBookmark> {
+        if self.seg_idx == self.seg_count && !self.have_pending {
+            Ok(OggBookmark {
+                byte_offset: self.reader.stream_position()?,
+                packets_to_skip: 0,
+                target_serial: self.target_serial,
+                eos_reached: self.page_eos || self.eos_reached,
+            })
+        } else {
+            Ok(OggBookmark {
+                byte_offset: 0,
+                packets_to_skip: self.packets_yielded,
+                target_serial: None,
+                eos_reached: false,
+            })
+        }
+    }
+
+    pub fn seek_to_bookmark(&mut self, bm: &OggBookmark) -> Result<()> {
+        self.reader.seek(SeekFrom::Start(bm.byte_offset))?;
+        self.target_serial = bm.target_serial;
+        self.seg_count = 0;
+        self.seg_idx = 0;
+        self.body_off = 0;
+        self.page_eos = false;
+        self.eos_reached = bm.eos_reached;
+        self.pending.clear();
+        self.have_pending = false;
+        self.packets_yielded = 0;
+        for _ in 0..bm.packets_to_skip {
+            let _ = self.next_packet()?;
+        }
+        Ok(())
+    }
+
+    pub fn stream_len(&mut self) -> Result<u64> {
+        let cur = self.reader.stream_position()?;
+        let end = self.reader.seek(SeekFrom::End(0))?;
+        self.reader.seek(SeekFrom::Start(cur))?;
+        Ok(end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +548,67 @@ mod tests {
         let (serial, packets, _) = extract_first_stream_packets(&all).unwrap();
         assert_eq!(serial, 1);
         assert_eq!(packets, vec![body1.to_vec()]);
+    }
+
+    #[test]
+    fn packet_reader_matches_extract_and_bookmark_rewinds() {
+        // 1. 複数ページ跨ぎ + 別 serial 混在 + 255 倍数終端
+        let p0 = b"hdr0".to_vec();
+        let p1 = vec![0xAAu8; 255];
+        let p2_a = vec![0xBBu8; 255];
+        let p2_b = b"tail".to_vec();
+        let mut all = Vec::new();
+        all.extend(build_page(0x02, 0, 10, 0, &[4], &p0));
+        all.extend(build_page(0x00, 0, 99, 0, &[3], b"ign"));
+        all.extend(build_page(0x00, 0, 10, 1, &[255, 0], &p1));
+        all.extend(build_page(0x00, 0, 10, 2, &[255], &p2_a));
+        all.extend(build_page(0x05, 42, 10, 3, &[4], &p2_b));
+
+        let (_, expected, expected_granule) = extract_first_stream_packets(&all).unwrap();
+        let mut r = OggPacketReader::new(std::io::Cursor::new(&all));
+        let first = r.next_packet().unwrap().unwrap();
+        let bm = r.bookmark().unwrap();
+        let mut got = vec![first];
+        while let Some(p) = r.next_packet().unwrap() {
+            got.push(p);
+        }
+        assert_eq!(got, expected);
+        assert_eq!(r.last_granule(), expected_granule);
+
+        r.seek_to_bookmark(&bm).unwrap();
+        let mut rewound = Vec::new();
+        while let Some(p) = r.next_packet().unwrap() {
+            rewound.push(p);
+        }
+        assert_eq!(rewound, expected[1..]);
+
+        // 2. ページ途中でブックマークする非標準レイアウト（1 ページに複数パケット）
+        let mut body = Vec::new();
+        body.extend_from_slice(b"aa");
+        body.extend_from_slice(b"bbb");
+        body.extend_from_slice(b"cccc");
+        let single_page = build_page(0x06, 10, 7, 0, &[2, 3, 4], &body);
+        let mut r2 = OggPacketReader::new(std::io::Cursor::new(&single_page));
+        assert_eq!(r2.next_packet().unwrap().unwrap(), b"aa");
+        let mid_bm = r2.bookmark().unwrap();
+        assert_eq!(r2.next_packet().unwrap().unwrap(), b"bbb");
+        assert_eq!(r2.next_packet().unwrap().unwrap(), b"cccc");
+        assert!(r2.next_packet().unwrap().is_none());
+
+        r2.seek_to_bookmark(&mid_bm).unwrap();
+        assert_eq!(r2.next_packet().unwrap().unwrap(), b"bbb");
+        assert_eq!(r2.next_packet().unwrap().unwrap(), b"cccc");
+        assert!(r2.next_packet().unwrap().is_none());
+
+        // 3. 実ファイルテストベクタで extract_first_stream_packets と完全一致
+        let ogg = include_bytes!("../../tests/vectors_audio/mono1_a_boy2.ogg");
+        let (_, expected_real, _) = extract_first_stream_packets(ogg).unwrap();
+        let mut rr = OggPacketReader::new(std::io::Cursor::new(&ogg[..]));
+        let mut got_real = Vec::new();
+        while let Some(p) = rr.next_packet().unwrap() {
+            got_real.push(p);
+        }
+        assert_eq!(got_real, expected_real);
     }
     // --- 破壊 fuzz（R1）: Ogg/Vorbis ---
 

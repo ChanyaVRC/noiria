@@ -98,6 +98,13 @@ impl VorbisStreamDecoder {
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+    pub fn max_blocksize(&self) -> usize {
+        self.blocksize_1
+    }
+    /// オーバーラップ加算の直前ブロック状態を破棄して先頭からの再デコードに備える。
+    pub fn reset(&mut self) {
+        self.prev_block = None;
+    }
 
     /// 1 音声パケットをデコードし、確定したインターリーブ PCM サンプルを返す
     /// (最初のパケットや非音声パケットの場合は空 Vec)。
