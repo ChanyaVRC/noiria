@@ -70,19 +70,20 @@ impl Pixmap {
     /// ストレートアルファの RGBA8 バッファからプリマルチプライして作成。
     pub fn from_rgba_straight(width: u32, height: u32, rgba: &[u8]) -> Self {
         assert_eq!(rgba.len(), (width as usize) * (height as usize) * 4);
-        let mut data = Vec::with_capacity(rgba.len());
-        for px in rgba.as_chunks::<4>().0 {
-            let a = px[3] as u32;
-            data.push(((px[0] as u32 * a + 127) / 255) as u8);
-            data.push(((px[1] as u32 * a + 127) / 255) as u8);
-            data.push(((px[2] as u32 * a + 127) / 255) as u8);
-            data.push(a as u8);
+        let mut data = vec![0u8; rgba.len()];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability was checked above.
+                unsafe { simd::premultiply_rgba_avx2(rgba, &mut data) };
+            } else {
+                // SAFETY: SSE2 is guaranteed on x86_64.
+                unsafe { simd::premultiply_rgba_sse2(rgba, &mut data) };
+            }
         }
-        Self {
-            width,
-            height,
-            data,
-        }
+        #[cfg(not(target_arch = "x86_64"))]
+        premultiply_rgba_scalar(rgba, &mut data);
+        Self { width, height, data }
     }
 
     /// 全画素が不透明 (alpha == 255) な RGBA8 バッファをコピー・乗算なしでそのまま包む。
@@ -192,37 +193,58 @@ impl Pixmap {
             return;
         }
 
-        for ty in y0..y1 {
-            let sy = (ty - y) as usize;
-            let drow = (ty as usize * self.width as usize + x0 as usize) * 4;
-            let srow = (sy * src.width as usize + (x0 - x) as usize) * 4;
-            let dst_row = &mut self.data[drow..drow + ((x1 - x0) as usize) * 4];
-            let src_row = &src.data[srow..srow + ((x1 - x0) as usize) * 4];
-            if opacity == 255 {
-                // 高速パス: 不透明ピクセルはコピー、透明はスキップ
-                for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
-                    let sa = s[3] as u32;
-                    if sa == 255 {
-                        d.copy_from_slice(s);
-                    } else if sa != 0 || s[0] | s[1] | s[2] != 0 {
-                        let inv = 255 - sa;
-                        for c in 0..4 {
-                            d[c] = (s[c] as u32 + div255(d[c] as u32 * inv)).min(255) as u8;
-                        }
-                    }
+        let row_bytes = ((x1 - x0) as usize) * 4;
+        let dst_stride = self.width as usize * 4;
+        let src_stride = src.width as usize * 4;
+        let d_base = (y0 as usize * self.width as usize + x0 as usize) * 4;
+        let s_base = ((y0 - y) as usize * src.width as usize + (x0 - x) as usize) * 4;
+        let rows = (y1 - y0) as usize;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability was checked above.
+                unsafe {
+                    simd::blit_rect_avx2(
+                        &mut self.data,
+                        d_base,
+                        dst_stride,
+                        &src.data,
+                        s_base,
+                        src_stride,
+                        row_bytes,
+                        rows,
+                        o,
+                    );
                 }
             } else {
-                for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
-                    let sa = div255(s[3] as u32 * o);
-                    if sa == 0 && s[0] | s[1] | s[2] == 0 {
-                        continue;
-                    }
-                    let inv = 255 - sa;
-                    for c in 0..4 {
-                        let sc = div255(s[c] as u32 * o);
-                        d[c] = (sc + div255(d[c] as u32 * inv)).min(255) as u8;
-                    }
+                // SAFETY: SSE2 is guaranteed on x86_64.
+                unsafe {
+                    simd::blit_rect_sse2(
+                        &mut self.data,
+                        d_base,
+                        dst_stride,
+                        &src.data,
+                        s_base,
+                        src_stride,
+                        row_bytes,
+                        rows,
+                        o,
+                    );
                 }
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        for r in 0..rows {
+            let d0 = d_base + r * dst_stride;
+            let s0 = s_base + r * src_stride;
+            let dst_row = &mut self.data[d0..d0 + row_bytes];
+            let src_row = &src.data[s0..s0 + row_bytes];
+            if opacity == 255 {
+                blit_row_opaque_scalar(dst_row, src_row);
+            } else {
+                blit_row_opacity_scalar(dst_row, src_row, o);
             }
         }
     }
@@ -230,10 +252,41 @@ impl Pixmap {
     /// 2 枚のバッファを t (0.0-1.0) で線形補間して self に書き込む。サイズは同一前提。
     pub fn lerp_from(&mut self, a: &Pixmap, b: &Pixmap, t: f32) {
         let t256 = (t.clamp(0.0, 1.0) * 256.0) as u32;
-        let inv = 256 - t256;
-        for ((o, pa), pb) in self.data.iter_mut().zip(a.data.iter()).zip(b.data.iter()) {
-            *o = ((*pa as u32 * inv + *pb as u32 * t256) >> 8) as u8;
+        let len = self.data.len().min(a.data.len()).min(b.data.len());
+        if t256 == 0 {
+            self.data[..len].copy_from_slice(&a.data[..len]);
+            return;
         }
+        if t256 == 256 {
+            self.data[..len].copy_from_slice(&b.data[..len]);
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability was checked above.
+                unsafe {
+                    simd::lerp_bytes_avx2(
+                        &mut self.data[..len],
+                        &a.data[..len],
+                        &b.data[..len],
+                        t256,
+                    );
+                }
+            } else {
+                // SAFETY: SSE2 is guaranteed on x86_64.
+                unsafe {
+                    simd::lerp_bytes_sse2(
+                        &mut self.data[..len],
+                        &a.data[..len],
+                        &b.data[..len],
+                        t256,
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        lerp_bytes_scalar(&mut self.data[..len], &a.data[..len], &b.data[..len], t256);
     }
 
     /// ルール画像によるユニバーサルトランジション合成。
@@ -244,21 +297,35 @@ impl Pixmap {
         let vague = vague.max(1.0);
         let phase_q8 = (t.clamp(0.0, 1.0) * (255.0 + vague) * 256.0) as i64;
         let recip_q16 = (65536.0 / vague) as i64; // 1/vague (Q16)
-        for (i, ((o, pa), pb)) in self
-            .data
-            .as_chunks_mut::<4>().0.iter_mut()
-            .zip(a.data.as_chunks::<4>().0)
-            .zip(b.data.as_chunks::<4>().0)
-            .enumerate()
-        {
-            let diff_q8 = phase_q8 - ((rule[i] as i64) << 8);
-            // t256 = clamp(diff/vague, 0, 1) * 256
-            let t256 = ((diff_q8 * recip_q16) >> 16).clamp(0, 256) as u32;
-            let inv = 256 - t256;
-            for c in 0..4 {
-                o[c] = ((pa[c] as u32 * inv + pb[c] as u32 * t256) >> 8) as u8;
-            }
+        let mut lut = [0u16; 256];
+        for (r, slot) in lut.iter_mut().enumerate() {
+            let diff_q8 = phase_q8 - ((r as i64) << 8);
+            *slot = ((diff_q8 * recip_q16) >> 16).clamp(0, 256) as u16;
         }
+        let pixels = self.data.len().min(a.data.len()).min(b.data.len()) / 4;
+        assert!(rule.len() >= pixels);
+        let bytes = pixels * 4;
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 availability was checked above.
+            unsafe {
+                simd::universal_avx2(
+                    &mut self.data[..bytes],
+                    &a.data[..bytes],
+                    &b.data[..bytes],
+                    &rule[..pixels],
+                    &lut,
+                );
+            }
+            return;
+        }
+        universal_lut_scalar(
+            &mut self.data[..bytes],
+            &a.data[..bytes],
+            &b.data[..bytes],
+            &rule[..pixels],
+            &lut,
+        );
     }
 
     /// `(x, y, w, h)` の矩形を切り出して新しい `Pixmap` として返す（`layer_blit_image`
@@ -393,9 +460,547 @@ impl Pixmap {
 
     /// softbuffer 用の 0x00RRGGBB u32 列へ変換（黒背景へフラット化）。
     pub fn to_bgrx_u32(&self, out: &mut [u32]) {
-        for (o, px) in out.iter_mut().zip(self.data.as_chunks::<4>().0) {
-            *o = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability was checked above.
+                unsafe { simd::to_bgrx_u32_avx2(&self.data, out) };
+                return;
+            }
+            if is_x86_feature_detected!("ssse3") {
+                // SAFETY: SSSE3 availability was checked above.
+                unsafe { simd::to_bgrx_u32_ssse3(&self.data, out) };
+                return;
+            }
         }
+        to_bgrx_u32_scalar(&self.data, out);
+    }
+}
+
+#[inline]
+fn premultiply_rgba_scalar(rgba: &[u8], out: &mut [u8]) {
+    for (dst, px) in out.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
+        let a = px[3] as u32;
+        dst[0] = div255(px[0] as u32 * a) as u8;
+        dst[1] = div255(px[1] as u32 * a) as u8;
+        dst[2] = div255(px[2] as u32 * a) as u8;
+        dst[3] = a as u8;
+    }
+}
+
+#[inline]
+fn blit_row_opaque_scalar(dst_row: &mut [u8], src_row: &[u8]) {
+    for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
+        let sa = s[3] as u32;
+        if sa == 255 {
+            d.copy_from_slice(s);
+        } else if sa != 0 || s[0] | s[1] | s[2] != 0 {
+            let inv = 255 - sa;
+            for c in 0..4 {
+                d[c] = (s[c] as u32 + div255(d[c] as u32 * inv)).min(255) as u8;
+            }
+        }
+    }
+}
+
+#[inline]
+fn blit_row_opacity_scalar(dst_row: &mut [u8], src_row: &[u8], o: u32) {
+    for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
+        let sa = div255(s[3] as u32 * o);
+        if sa == 0 && s[0] | s[1] | s[2] == 0 {
+            continue;
+        }
+        let inv = 255 - sa;
+        for c in 0..4 {
+            let sc = div255(s[c] as u32 * o);
+            d[c] = (sc + div255(d[c] as u32 * inv)).min(255) as u8;
+        }
+    }
+}
+
+#[inline]
+fn lerp_bytes_scalar(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
+    let inv = 256 - t256;
+    for ((o, pa), pb) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *o = ((*pa as u32 * inv + *pb as u32 * t256) >> 8) as u8;
+    }
+}
+
+#[inline]
+fn universal_lut_scalar(out: &mut [u8], a: &[u8], b: &[u8], rule: &[u8], lut: &[u16; 256]) {
+    for (i, ((o, pa), pb)) in out
+        .as_chunks_mut::<4>().0.iter_mut()
+        .zip(a.as_chunks::<4>().0)
+        .zip(b.as_chunks::<4>().0)
+        .enumerate()
+    {
+        let t256 = lut[rule[i] as usize] as u32;
+        let inv = 256 - t256;
+        for c in 0..4 {
+            o[c] = ((pa[c] as u32 * inv + pb[c] as u32 * t256) >> 8) as u8;
+        }
+    }
+}
+
+#[inline]
+fn to_bgrx_u32_scalar(src: &[u8], out: &mut [u32]) {
+    for (o, px) in out.iter_mut().zip(src.as_chunks::<4>().0) {
+        *o = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use std::arch::x86_64::*;
+
+    use super::{
+        blit_row_opacity_scalar, blit_row_opaque_scalar, lerp_bytes_scalar, premultiply_rgba_scalar,
+        to_bgrx_u32_scalar, universal_lut_scalar,
+    };
+
+    // For 0 <= v <= 65025, ((v + 128) * 257) >> 16 == ((v + 128) + ((v + 128) >> 8)) >> 8 == (v + 127) / 255.
+    // v + 128 <= 65153 fits in u16 without overflow, so vpmulhuw computes exact div255 in 1 instruction.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn div255_epi16_avx2(v: __m256i, v128: __m256i, v0101: __m256i) -> __m256i {
+        _mm256_mulhi_epu16(_mm256_add_epi16(v, v128), v0101)
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    unsafe fn div255_epi16_sse2(v: __m128i, v128: __m128i, v0101: __m128i) -> __m128i {
+        _mm_mulhi_epu16(_mm_add_epi16(v, v128), v0101)
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn to_bgrx_u32_avx2(src: &[u8], out: &mut [u32]) {
+        let n = out.len().min(src.len() / 4);
+        let mask = _mm256_setr_epi8(
+            2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+            2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+        );
+        let mut i = 0;
+        let src_ptr = src.as_ptr();
+        let dst_ptr = out.as_mut_ptr();
+        while i + 8 <= n {
+            let v = _mm256_loadu_si256(src_ptr.add(i * 4) as *const __m256i);
+            let shuffled = _mm256_shuffle_epi8(v, mask);
+            _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, shuffled);
+            i += 8;
+        }
+        to_bgrx_u32_scalar(&src[i * 4..], &mut out[i..]);
+    }
+
+    #[target_feature(enable = "ssse3")]
+    pub(super) unsafe fn to_bgrx_u32_ssse3(src: &[u8], out: &mut [u32]) {
+        let n = out.len().min(src.len() / 4);
+        let mask = _mm_setr_epi8(2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128);
+        let mut i = 0;
+        let src_ptr = src.as_ptr();
+        let dst_ptr = out.as_mut_ptr();
+        while i + 4 <= n {
+            let v = _mm_loadu_si128(src_ptr.add(i * 4) as *const __m128i);
+            let shuffled = _mm_shuffle_epi8(v, mask);
+            _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, shuffled);
+            i += 4;
+        }
+        to_bgrx_u32_scalar(&src[i * 4..], &mut out[i..]);
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn lerp_bytes_avx2(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
+        let len = out.len().min(a.len()).min(b.len());
+        let zero = _mm256_setzero_si256();
+        let v_t = _mm256_set1_epi16(t256 as i16);
+        let v_inv = _mm256_set1_epi16((256 - t256) as i16);
+        let mut i = 0;
+        let out_ptr = out.as_mut_ptr();
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        while i + 32 <= len {
+            let va = _mm256_loadu_si256(a_ptr.add(i) as *const __m256i);
+            let vb = _mm256_loadu_si256(b_ptr.add(i) as *const __m256i);
+            let a_lo = _mm256_unpacklo_epi8(va, zero);
+            let a_hi = _mm256_unpackhi_epi8(va, zero);
+            let b_lo = _mm256_unpacklo_epi8(vb, zero);
+            let b_hi = _mm256_unpackhi_epi8(vb, zero);
+            let lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_mullo_epi16(a_lo, v_inv),
+                _mm256_mullo_epi16(b_lo, v_t),
+            ));
+            let hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_mullo_epi16(a_hi, v_inv),
+                _mm256_mullo_epi16(b_hi, v_t),
+            ));
+            _mm256_storeu_si256(out_ptr.add(i) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+            i += 32;
+        }
+        lerp_bytes_scalar(&mut out[i..len], &a[i..len], &b[i..len], t256);
+    }
+
+    #[target_feature(enable = "sse2")]
+    pub(super) unsafe fn lerp_bytes_sse2(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
+        let len = out.len().min(a.len()).min(b.len());
+        let zero = _mm_setzero_si128();
+        let v_t = _mm_set1_epi16(t256 as i16);
+        let v_inv = _mm_set1_epi16((256 - t256) as i16);
+        let mut i = 0;
+        let out_ptr = out.as_mut_ptr();
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        while i + 16 <= len {
+            let va = _mm_loadu_si128(a_ptr.add(i) as *const __m128i);
+            let vb = _mm_loadu_si128(b_ptr.add(i) as *const __m128i);
+            let a_lo = _mm_unpacklo_epi8(va, zero);
+            let a_hi = _mm_unpackhi_epi8(va, zero);
+            let b_lo = _mm_unpacklo_epi8(vb, zero);
+            let b_hi = _mm_unpackhi_epi8(vb, zero);
+            let lo = _mm_srli_epi16::<8>(_mm_add_epi16(
+                _mm_mullo_epi16(a_lo, v_inv),
+                _mm_mullo_epi16(b_lo, v_t),
+            ));
+            let hi = _mm_srli_epi16::<8>(_mm_add_epi16(
+                _mm_mullo_epi16(a_hi, v_inv),
+                _mm_mullo_epi16(b_hi, v_t),
+            ));
+            _mm_storeu_si128(out_ptr.add(i) as *mut __m128i, _mm_packus_epi16(lo, hi));
+            i += 16;
+        }
+        lerp_bytes_scalar(&mut out[i..len], &a[i..len], &b[i..len], t256);
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
+        let len = rgba.len().min(out.len()) & !3;
+        let zero = _mm256_setzero_si256();
+        let v128 = _mm256_set1_epi16(128);
+        let v0101 = _mm256_set1_epi16(0x0101);
+        let alpha_mask = _mm256_set1_epi32(0xFF00_0000u32 as i32);
+        let shuf_lo = _mm256_setr_epi8(
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        );
+        let shuf_hi = _mm256_setr_epi8(
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        );
+        let mut i = 0;
+        let src_ptr = rgba.as_ptr();
+        let dst_ptr = out.as_mut_ptr();
+        while i + 32 <= len {
+            let vs = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
+            let res = if _mm256_testc_si256(vs, alpha_mask) != 0 {
+                vs
+            } else if _mm256_testz_si256(vs, alpha_mask) != 0 {
+                zero
+            } else {
+                let a_lo = _mm256_shuffle_epi8(vs, shuf_lo);
+                let a_hi = _mm256_shuffle_epi8(vs, shuf_hi);
+                let s_lo = _mm256_unpacklo_epi8(vs, zero);
+                let s_hi = _mm256_unpackhi_epi8(vs, zero);
+                let p_lo = div255_epi16_avx2(_mm256_mullo_epi16(s_lo, a_lo), v128, v0101);
+                let p_hi = div255_epi16_avx2(_mm256_mullo_epi16(s_hi, a_hi), v128, v0101);
+                let premul = _mm256_packus_epi16(p_lo, p_hi);
+                _mm256_or_si256(
+                    _mm256_andnot_si256(alpha_mask, premul),
+                    _mm256_and_si256(alpha_mask, vs),
+                )
+            };
+            _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, res);
+            i += 32;
+        }
+        premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
+    }
+
+    #[target_feature(enable = "sse2")]
+    pub(super) unsafe fn premultiply_rgba_sse2(rgba: &[u8], out: &mut [u8]) {
+        let len = rgba.len().min(out.len()) & !3;
+        let zero = _mm_setzero_si128();
+        let v128 = _mm_set1_epi16(128);
+        let v0101 = _mm_set1_epi16(0x0101);
+        let alpha_mask = _mm_set1_epi32(0xFF00_0000u32 as i32);
+        let mut i = 0;
+        let src_ptr = rgba.as_ptr();
+        let dst_ptr = out.as_mut_ptr();
+        while i + 16 <= len {
+            let vs = _mm_loadu_si128(src_ptr.add(i) as *const __m128i);
+            let s_lo = _mm_unpacklo_epi8(vs, zero);
+            let s_hi = _mm_unpackhi_epi8(vs, zero);
+            let a_lo = _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_lo));
+            let a_hi = _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_hi));
+            let p_lo = div255_epi16_sse2(_mm_mullo_epi16(s_lo, a_lo), v128, v0101);
+            let p_hi = div255_epi16_sse2(_mm_mullo_epi16(s_hi, a_hi), v128, v0101);
+            let premul = _mm_packus_epi16(p_lo, p_hi);
+            let res = _mm_or_si128(
+                _mm_andnot_si128(alpha_mask, premul),
+                _mm_and_si128(alpha_mask, vs),
+            );
+            _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, res);
+            i += 16;
+        }
+        premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn blit_rect_avx2(
+        dst: &mut [u8],
+        d_base: usize,
+        dst_stride: usize,
+        src: &[u8],
+        s_base: usize,
+        src_stride: usize,
+        row_bytes: usize,
+        rows: usize,
+        o: u32,
+    ) {
+        for r in 0..rows {
+            let d0 = d_base + r * dst_stride;
+            let s0 = s_base + r * src_stride;
+            if o == 255 {
+                blit_row_opaque_avx2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes]);
+            } else {
+                blit_row_opacity_avx2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes], o);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub(super) unsafe fn blit_row_opaque_avx2(dst_row: &mut [u8], src_row: &[u8]) {
+        let len = dst_row.len().min(src_row.len()) & !3;
+        let zero = _mm256_setzero_si256();
+        let v_ff = _mm256_set1_epi8(-1);
+        let alpha_mask = _mm256_set1_epi32(0xFF00_0000u32 as i32);
+        let v128 = _mm256_set1_epi16(128);
+        let v0101 = _mm256_set1_epi16(0x0101);
+        let shuf_lo = _mm256_setr_epi8(
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        );
+        let shuf_hi = _mm256_setr_epi8(
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        );
+        let mut i = 0;
+        let dst_ptr = dst_row.as_mut_ptr();
+        let src_ptr = src_row.as_ptr();
+        while i + 32 <= len {
+            let vs = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
+            if _mm256_testz_si256(vs, vs) != 0 {
+                i += 32;
+                continue;
+            }
+            if _mm256_testc_si256(vs, alpha_mask) != 0 {
+                _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, vs);
+                i += 32;
+                continue;
+            }
+            let vd = _mm256_loadu_si256(dst_ptr.add(i) as *const __m256i);
+            let v_inv = _mm256_xor_si256(vs, v_ff);
+            let inv_lo = _mm256_shuffle_epi8(v_inv, shuf_lo);
+            let inv_hi = _mm256_shuffle_epi8(v_inv, shuf_hi);
+            let d_lo = _mm256_unpacklo_epi8(vd, zero);
+            let d_hi = _mm256_unpackhi_epi8(vd, zero);
+            let s_lo = div255_epi16_avx2(_mm256_mullo_epi16(d_lo, inv_lo), v128, v0101);
+            let s_hi = div255_epi16_avx2(_mm256_mullo_epi16(d_hi, inv_hi), v128, v0101);
+            let scaled = _mm256_packus_epi16(s_lo, s_hi);
+            _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, _mm256_adds_epu8(vs, scaled));
+            i += 32;
+        }
+        blit_row_opaque_scalar(&mut dst_row[i..len], &src_row[i..len]);
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o: u32) {
+        let len = dst_row.len().min(src_row.len()) & !3;
+        let zero = _mm256_setzero_si256();
+        let v_ff = _mm256_set1_epi8(-1);
+        let v_o = _mm256_set1_epi16(o as i16);
+        let v128 = _mm256_set1_epi16(128);
+        let v0101 = _mm256_set1_epi16(0x0101);
+        let shuf_lo = _mm256_setr_epi8(
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+            3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        );
+        let shuf_hi = _mm256_setr_epi8(
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+            11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        );
+        let mut i = 0;
+        let dst_ptr = dst_row.as_mut_ptr();
+        let src_ptr = src_row.as_ptr();
+        while i + 32 <= len {
+            let vs = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
+            if _mm256_testz_si256(vs, vs) != 0 {
+                i += 32;
+                continue;
+            }
+            let sc_lo = div255_epi16_avx2(
+                _mm256_mullo_epi16(_mm256_unpacklo_epi8(vs, zero), v_o),
+                v128,
+                v0101,
+            );
+            let sc_hi = div255_epi16_avx2(
+                _mm256_mullo_epi16(_mm256_unpackhi_epi8(vs, zero), v_o),
+                v128,
+                v0101,
+            );
+            let vsc = _mm256_packus_epi16(sc_lo, sc_hi);
+            let vd = _mm256_loadu_si256(dst_ptr.add(i) as *const __m256i);
+            let v_inv = _mm256_xor_si256(vsc, v_ff);
+            let inv_lo = _mm256_shuffle_epi8(v_inv, shuf_lo);
+            let inv_hi = _mm256_shuffle_epi8(v_inv, shuf_hi);
+            let d_lo = _mm256_unpacklo_epi8(vd, zero);
+            let d_hi = _mm256_unpackhi_epi8(vd, zero);
+            let s_lo = div255_epi16_avx2(_mm256_mullo_epi16(d_lo, inv_lo), v128, v0101);
+            let s_hi = div255_epi16_avx2(_mm256_mullo_epi16(d_hi, inv_hi), v128, v0101);
+            let scaled = _mm256_packus_epi16(s_lo, s_hi);
+            _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, _mm256_adds_epu8(vsc, scaled));
+            i += 32;
+        }
+        blit_row_opacity_scalar(&mut dst_row[i..len], &src_row[i..len], o);
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn blit_rect_sse2(
+        dst: &mut [u8],
+        d_base: usize,
+        dst_stride: usize,
+        src: &[u8],
+        s_base: usize,
+        src_stride: usize,
+        row_bytes: usize,
+        rows: usize,
+        o: u32,
+    ) {
+        for r in 0..rows {
+            let d0 = d_base + r * dst_stride;
+            let s0 = s_base + r * src_stride;
+            if o == 255 {
+                blit_row_opaque_sse2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes]);
+            } else {
+                blit_row_opacity_sse2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes], o);
+            }
+        }
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub(super) unsafe fn blit_row_opaque_sse2(dst_row: &mut [u8], src_row: &[u8]) {
+        let len = dst_row.len().min(src_row.len()) & !3;
+        let zero = _mm_setzero_si128();
+        let v_ff = _mm_set1_epi8(-1);
+        let v255 = _mm_set1_epi16(255);
+        let v128 = _mm_set1_epi16(128);
+        let v0101 = _mm_set1_epi16(0x0101);
+        let mut i = 0;
+        let dst_ptr = dst_row.as_mut_ptr();
+        let src_ptr = src_row.as_ptr();
+        while i + 16 <= len {
+            let vs = _mm_loadu_si128(src_ptr.add(i) as *const __m128i);
+            if _mm_movemask_epi8(_mm_cmpeq_epi8(vs, zero)) == 0xFFFF {
+                i += 16;
+                continue;
+            }
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(vs, v_ff)) & 0x8888) == 0x8888 {
+                _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, vs);
+                i += 16;
+                continue;
+            }
+            let vd = _mm_loadu_si128(dst_ptr.add(i) as *const __m128i);
+            let s_lo = _mm_unpacklo_epi8(vs, zero);
+            let s_hi = _mm_unpackhi_epi8(vs, zero);
+            let inv_lo = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_lo)));
+            let inv_hi = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_hi)));
+            let d_lo = _mm_unpacklo_epi8(vd, zero);
+            let d_hi = _mm_unpackhi_epi8(vd, zero);
+            let sc_lo = div255_epi16_sse2(_mm_mullo_epi16(d_lo, inv_lo), v128, v0101);
+            let sc_hi = div255_epi16_sse2(_mm_mullo_epi16(d_hi, inv_hi), v128, v0101);
+            let scaled = _mm_packus_epi16(sc_lo, sc_hi);
+            _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, _mm_adds_epu8(vs, scaled));
+            i += 16;
+        }
+        blit_row_opaque_scalar(&mut dst_row[i..len], &src_row[i..len]);
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub(super) unsafe fn blit_row_opacity_sse2(dst_row: &mut [u8], src_row: &[u8], o: u32) {
+        let len = dst_row.len().min(src_row.len()) & !3;
+        let zero = _mm_setzero_si128();
+        let v_o = _mm_set1_epi16(o as i16);
+        let v255 = _mm_set1_epi16(255);
+        let v128 = _mm_set1_epi16(128);
+        let v0101 = _mm_set1_epi16(0x0101);
+        let mut i = 0;
+        let dst_ptr = dst_row.as_mut_ptr();
+        let src_ptr = src_row.as_ptr();
+        while i + 16 <= len {
+            let vs = _mm_loadu_si128(src_ptr.add(i) as *const __m128i);
+            if _mm_movemask_epi8(_mm_cmpeq_epi8(vs, zero)) == 0xFFFF {
+                i += 16;
+                continue;
+            }
+            let sc_lo = div255_epi16_sse2(_mm_mullo_epi16(_mm_unpacklo_epi8(vs, zero), v_o), v128, v0101);
+            let sc_hi = div255_epi16_sse2(_mm_mullo_epi16(_mm_unpackhi_epi8(vs, zero), v_o), v128, v0101);
+            let vsc = _mm_packus_epi16(sc_lo, sc_hi);
+            let inv_lo = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_lo)));
+            let inv_hi = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_hi)));
+            let vd = _mm_loadu_si128(dst_ptr.add(i) as *const __m128i);
+            let d_lo = _mm_unpacklo_epi8(vd, zero);
+            let d_hi = _mm_unpackhi_epi8(vd, zero);
+            let bd_lo = div255_epi16_sse2(_mm_mullo_epi16(d_lo, inv_lo), v128, v0101);
+            let bd_hi = div255_epi16_sse2(_mm_mullo_epi16(d_hi, inv_hi), v128, v0101);
+            let scaled = _mm_packus_epi16(bd_lo, bd_hi);
+            _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, _mm_adds_epu8(vsc, scaled));
+            i += 16;
+        }
+        blit_row_opacity_scalar(&mut dst_row[i..len], &src_row[i..len], o);
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn universal_avx2(
+        out: &mut [u8],
+        a: &[u8],
+        b: &[u8],
+        rule: &[u8],
+        lut: &[u16; 256],
+    ) {
+        let pixels = rule.len();
+        let zero = _mm256_setzero_si256();
+        let v256 = _mm256_set1_epi16(256);
+        let mut p = 0;
+        let out_ptr = out.as_mut_ptr();
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        while p + 8 <= pixels {
+            let off = p * 4;
+            let va = _mm256_loadu_si256(a_ptr.add(off) as *const __m256i);
+            let vb = _mm256_loadu_si256(b_ptr.add(off) as *const __m256i);
+            let rep = |k: usize| (lut[*rule.get_unchecked(p + k) as usize] as i64).wrapping_mul(0x0001_0001_0001_0001);
+            let t_lo = _mm256_setr_epi64x(rep(0), rep(1), rep(4), rep(5));
+            let t_hi = _mm256_setr_epi64x(rep(2), rep(3), rep(6), rep(7));
+            let inv_lo = _mm256_sub_epi16(v256, t_lo);
+            let inv_hi = _mm256_sub_epi16(v256, t_hi);
+            let a_lo = _mm256_unpacklo_epi8(va, zero);
+            let a_hi = _mm256_unpackhi_epi8(va, zero);
+            let b_lo = _mm256_unpacklo_epi8(vb, zero);
+            let b_hi = _mm256_unpackhi_epi8(vb, zero);
+            let lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_mullo_epi16(a_lo, inv_lo),
+                _mm256_mullo_epi16(b_lo, t_lo),
+            ));
+            let hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+                _mm256_mullo_epi16(a_hi, inv_hi),
+                _mm256_mullo_epi16(b_hi, t_hi),
+            ));
+            _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+            p += 8;
+        }
+        universal_lut_scalar(&mut out[p * 4..], &a[p * 4..], &b[p * 4..], &rule[p..], lut);
     }
 }
 
@@ -663,5 +1268,353 @@ mod tests {
         dst.blit_over(&src, 3, 3, 255);
         dst.blit_over(&src, 10, 10, 255);
         assert_eq!(dst.data[0], 255); // (-2,-2) blit が (0,0) を塗った
+    }
+
+    fn lcg_bytes(seed: &mut u64, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (*seed >> 33) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn div255_fast_formulas_match_exact_division_exhaustively() {
+        for v in 0..=(255u32 * 255) {
+            let exact = div255(v);
+            let t = v + 128;
+            let shift = (t + (t >> 8)) >> 8;
+            let mulhi = (t * 257) >> 16;
+            assert_eq!(shift, exact, "shift mismatch at v={v}");
+            assert_eq!(mulhi, exact, "mulhi mismatch at v={v}");
+        }
+    }
+
+    #[test]
+    fn to_bgrx_u32_simd_matches_scalar_across_lengths() {
+        let mut seed = 1u64;
+        for pixels in 0..=35 {
+            let data = lcg_bytes(&mut seed, pixels * 4);
+            let pm = Pixmap {
+                width: pixels as u32,
+                height: 1,
+                data: data.clone(),
+            };
+            let mut want = vec![0xDEAD_BEEFu32; pixels + 3];
+            to_bgrx_u32_scalar(&data, &mut want[..pixels]);
+
+            let mut got = vec![0xDEAD_BEEFu32; pixels + 3];
+            pm.to_bgrx_u32(&mut got[..pixels]);
+            assert_eq!(got, want, "public to_bgrx_u32 pixels={pixels}");
+
+            // When out is longer than src, trailing elements remain untouched.
+            let mut want_long = vec![0xCAFE_BABEu32; pixels + 5];
+            to_bgrx_u32_scalar(&data, &mut want_long);
+            let mut got_long = vec![0xCAFE_BABEu32; pixels + 5];
+            pm.to_bgrx_u32(&mut got_long);
+            assert_eq!(got_long, want_long, "long out pixels={pixels}");
+
+            // When out is shorter than src, only out.len() pixels are written.
+            if pixels >= 3 {
+                let short = pixels - 2;
+                let mut want_short = vec![0u32; short];
+                to_bgrx_u32_scalar(&data, &mut want_short);
+                let mut got_short = vec![0u32; short];
+                pm.to_bgrx_u32(&mut got_short);
+                assert_eq!(got_short, want_short, "short out pixels={pixels}");
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    let mut got_avx2 = vec![0xDEAD_BEEFu32; pixels + 3];
+                    // SAFETY: AVX2 was checked above.
+                    unsafe { simd::to_bgrx_u32_avx2(&data, &mut got_avx2[..pixels]) };
+                    assert_eq!(got_avx2, want, "avx2 pixels={pixels}");
+                }
+                if is_x86_feature_detected!("ssse3") {
+                    let mut got_ssse3 = vec![0xDEAD_BEEFu32; pixels + 3];
+                    // SAFETY: SSSE3 was checked above.
+                    unsafe { simd::to_bgrx_u32_ssse3(&data, &mut got_ssse3[..pixels]) };
+                    assert_eq!(got_ssse3, want, "ssse3 pixels={pixels}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lerp_from_simd_matches_scalar_across_t_edges_and_lengths() {
+        let mut seed = 42u64;
+        let t_values = [
+            -0.5f32,
+            0.0,
+            1.0 / 256.0,
+            0.25,
+            127.0 / 256.0,
+            0.5,
+            129.0 / 256.0,
+            0.75,
+            255.0 / 256.0,
+            1.0,
+            1.5,
+            f32::NAN,
+        ];
+        for len in [0usize, 1, 3, 4, 15, 16, 17, 31, 32, 33, 63, 64, 67] {
+            let a_bytes = lcg_bytes(&mut seed, len * 4);
+            let b_bytes = lcg_bytes(&mut seed, len * 4);
+            let pa = Pixmap { width: len as u32, height: 1, data: a_bytes.clone() };
+            let pb = Pixmap { width: len as u32, height: 1, data: b_bytes.clone() };
+            for &t in &t_values {
+                let t256 = (t.clamp(0.0, 1.0) * 256.0) as u32;
+                let mut want = vec![0u8; len * 4];
+                lerp_bytes_scalar(&mut want, &a_bytes, &b_bytes, t256);
+
+                let mut out = Pixmap::new(len as u32, 1);
+                out.lerp_from(&pa, &pb, t);
+                assert_eq!(out.data, want, "public lerp len={len} t={t}");
+
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        let mut got = vec![0u8; len * 4];
+                        // SAFETY: AVX2 was checked above.
+                        unsafe { simd::lerp_bytes_avx2(&mut got, &a_bytes, &b_bytes, t256) };
+                        assert_eq!(got, want, "avx2 lerp len={len} t256={t256}");
+                    }
+                    let mut got_sse2 = vec![0u8; len * 4];
+                    // SAFETY: SSE2 is guaranteed on x86_64.
+                    unsafe { simd::lerp_bytes_sse2(&mut got_sse2, &a_bytes, &b_bytes, t256) };
+                    assert_eq!(got_sse2, want, "sse2 lerp len={len} t256={t256}");
+                }
+            }
+        }
+
+        // Exhaustive check over all 256x256 (a, b) byte pairs for key t256 values.
+        let mut all_a = Vec::with_capacity(256 * 256);
+        let mut all_b = Vec::with_capacity(256 * 256);
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                all_a.push(a);
+                all_b.push(b);
+            }
+        }
+        for t256 in [0u32, 1, 64, 127, 128, 191, 255, 256] {
+            let mut want = vec![0u8; all_a.len()];
+            lerp_bytes_scalar(&mut want, &all_a, &all_b, t256);
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    let mut got = vec![0u8; all_a.len()];
+                    // SAFETY: AVX2 was checked above.
+                    unsafe { simd::lerp_bytes_avx2(&mut got, &all_a, &all_b, t256) };
+                    assert_eq!(got, want, "exhaustive avx2 t256={t256}");
+                }
+                let mut got_sse2 = vec![0u8; all_a.len()];
+                // SAFETY: SSE2 is guaranteed on x86_64.
+                unsafe { simd::lerp_bytes_sse2(&mut got_sse2, &all_a, &all_b, t256) };
+                assert_eq!(got_sse2, want, "exhaustive sse2 t256={t256}");
+            }
+        }
+    }
+
+    #[test]
+    fn from_rgba_straight_simd_matches_scalar() {
+        let mut seed = 99u64;
+        for pixels in [0usize, 1, 3, 4, 7, 8, 9, 15, 16, 17, 33] {
+            let mut rgba = lcg_bytes(&mut seed, pixels * 4);
+            // Mix all-opaque and all-transparent runs to exercise fast paths alongside semi-transparent.
+            if pixels >= 24 {
+                for px in rgba[0..32].as_chunks_mut::<4>().0 {
+                    px[3] = 255;
+                }
+                for px in rgba[32..64].as_chunks_mut::<4>().0 {
+                    px[3] = 0;
+                }
+            }
+            let mut want = vec![0u8; rgba.len()];
+            premultiply_rgba_scalar(&rgba, &mut want);
+
+            let got = Pixmap::from_rgba_straight(pixels as u32, 1, &rgba);
+            assert_eq!(got.data, want, "public premul pixels={pixels}");
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    let mut got_avx2 = vec![0u8; rgba.len()];
+                    // SAFETY: AVX2 was checked above.
+                    unsafe { simd::premultiply_rgba_avx2(&rgba, &mut got_avx2) };
+                    assert_eq!(got_avx2, want, "avx2 premul pixels={pixels}");
+                }
+                let mut got_sse2 = vec![0u8; rgba.len()];
+                // SAFETY: SSE2 is guaranteed on x86_64.
+                unsafe { simd::premultiply_rgba_sse2(&rgba, &mut got_sse2) };
+                assert_eq!(got_sse2, want, "sse2 premul pixels={pixels}");
+            }
+        }
+    }
+
+    fn blit_over_clipped_scalar_ref(
+        dst: &mut Pixmap,
+        src: &Pixmap,
+        x: i32,
+        y: i32,
+        opacity: u8,
+        max_w: Option<u32>,
+    ) {
+        if opacity == 0 {
+            return;
+        }
+        let o = opacity as u32;
+        let dst_w = dst.width as i32;
+        let dst_h = dst.height as i32;
+        let src_w = src.width.min(max_w.unwrap_or(u32::MAX)) as i32;
+        let src_h = src.height as i32;
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + src_w).min(dst_w);
+        let y1 = (y + src_h).min(dst_h);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for ty in y0..y1 {
+            let sy = (ty - y) as usize;
+            let drow = (ty as usize * dst.width as usize + x0 as usize) * 4;
+            let srow = (sy * src.width as usize + (x0 - x) as usize) * 4;
+            let row_bytes = ((x1 - x0) as usize) * 4;
+            if opacity == 255 {
+                blit_row_opaque_scalar(&mut dst.data[drow..drow + row_bytes], &src.data[srow..srow + row_bytes]);
+            } else {
+                blit_row_opacity_scalar(&mut dst.data[drow..drow + row_bytes], &src.data[srow..srow + row_bytes], o);
+            }
+        }
+    }
+
+    #[test]
+    fn blit_over_clipped_simd_matches_scalar_exhaustively() {
+        let mut seed = 12345u64;
+        let opacities = [0u8, 1, 2, 64, 127, 128, 129, 254, 255];
+
+        // Row-level tests across widths including tails, all-zero, all-opaque, additive (a=0, rgb>0), saturation.
+        for width in [0usize, 1, 3, 4, 7, 8, 9, 15, 16, 17, 33, 40] {
+            let mut src_row = lcg_bytes(&mut seed, width * 4);
+            let dst_orig = lcg_bytes(&mut seed, width * 4);
+            if width >= 32 {
+                // Pixels 0..8: all zero (transparent fast-skip)
+                src_row[0..32].fill(0);
+                // Pixels 8..16: all opaque (opaque fast-copy)
+                for px in src_row[32..64].as_chunks_mut::<4>().0 {
+                    px[3] = 255;
+                }
+                // Pixels 16..24: alpha == 0 with non-zero RGB (additive/saturation edge)
+                for px in src_row[64..96].as_chunks_mut::<4>().0 {
+                    px[0] = 250;
+                    px[1] = 200;
+                    px[2] = 128;
+                    px[3] = 0;
+                }
+                // Pixels 24..32: extreme channel values
+                for (k, px) in src_row[96..128].as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let v = [0u8, 1, 127, 128, 254, 255, 255, 1][k];
+                    *px = [v, 255 - v, v, [0, 1, 127, 128, 254, 255, 1, 254][k]];
+                }
+            }
+
+            for &op in &opacities {
+                if op == 0 {
+                    continue;
+                }
+                let mut want = dst_orig.clone();
+                if op == 255 {
+                    blit_row_opaque_scalar(&mut want, &src_row);
+                } else {
+                    blit_row_opacity_scalar(&mut want, &src_row, op as u32);
+                }
+
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        let mut got = dst_orig.clone();
+                        // SAFETY: AVX2 was checked above.
+                        unsafe {
+                            if op == 255 {
+                                simd::blit_row_opaque_avx2(&mut got, &src_row);
+                            } else {
+                                simd::blit_row_opacity_avx2(&mut got, &src_row, op as u32);
+                            }
+                        }
+                        assert_eq!(got, want, "avx2 blit row width={width} op={op}");
+                    }
+                    let mut got_sse2 = dst_orig.clone();
+                    // SAFETY: SSE2 is guaranteed on x86_64.
+                    unsafe {
+                        if op == 255 {
+                            simd::blit_row_opaque_sse2(&mut got_sse2, &src_row);
+                        } else {
+                            simd::blit_row_opacity_sse2(&mut got_sse2, &src_row, op as u32);
+                        }
+                    }
+                    assert_eq!(got_sse2, want, "sse2 blit row width={width} op={op}");
+                }
+            }
+        }
+
+        // Full 2D clipped blit tests with offsets, negative coords, odd dimensions, and max_w.
+        let dst_base = Pixmap {
+            width: 37,
+            height: 11,
+            data: lcg_bytes(&mut seed, 37 * 11 * 4),
+        };
+        let src = Pixmap {
+            width: 29,
+            height: 9,
+            data: lcg_bytes(&mut seed, 29 * 9 * 4),
+        };
+        for &(x, y, max_w) in &[
+            (0, 0, None),
+            (-5, -3, None),
+            (15, 4, None),
+            (3, 1, Some(0)),
+            (3, 1, Some(1)),
+            (3, 1, Some(7)),
+            (3, 1, Some(9)),
+            (3, 1, Some(17)),
+            (-4, 2, Some(19)),
+        ] {
+            for &op in &[0u8, 1, 128, 255] {
+                let mut got = dst_base.clone();
+                let mut want = dst_base.clone();
+                got.blit_over_clipped(&src, x, y, op, max_w);
+                blit_over_clipped_scalar_ref(&mut want, &src, x, y, op, max_w);
+                assert_eq!(got.data, want.data, "clipped x={x} y={y} op={op} max_w={max_w:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn universal_from_simd_matches_original_scalar() {
+        let mut seed = 777u64;
+        for pixels in [0usize, 1, 7, 8, 9, 17, 33, 257] {
+            let a = Pixmap { width: pixels as u32, height: 1, data: lcg_bytes(&mut seed, pixels * 4) };
+            let b = Pixmap { width: pixels as u32, height: 1, data: lcg_bytes(&mut seed, pixels * 4) };
+            let rule: Vec<u8> = (0..pixels).map(|i| (i % 256) as u8).collect();
+            for &(t, vague) in &[(0.0f32, 1.0f32), (0.25, 16.0), (0.5, 64.0), (0.75, 255.0), (1.0, 0.5)] {
+                let mut want = vec![0u8; pixels * 4];
+                let v = vague.max(1.0);
+                let phase_q8 = (t.clamp(0.0, 1.0) * (255.0 + v) * 256.0) as i64;
+                let recip_q16 = (65536.0 / v) as i64;
+                for i in 0..pixels {
+                    let diff_q8 = phase_q8 - ((rule[i] as i64) << 8);
+                    let t256 = ((diff_q8 * recip_q16) >> 16).clamp(0, 256) as u32;
+                    let inv = 256 - t256;
+                    for c in 0..4 {
+                        want[i * 4 + c] = ((a.data[i * 4 + c] as u32 * inv + b.data[i * 4 + c] as u32 * t256) >> 8) as u8;
+                    }
+                }
+                let mut got = Pixmap::new(pixels as u32, 1);
+                got.universal_from(&a, &b, &rule, t, vague);
+                assert_eq!(got.data, want, "universal pixels={pixels} t={t} vague={vague}");
+            }
+        }
     }
 }
