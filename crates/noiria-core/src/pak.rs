@@ -61,7 +61,11 @@
 //!   `noiria-tools` に依存できないため encoder を直接呼べない設計上の制約による）
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+#[cfg(not(any(unix, windows)))]
+use std::sync::Mutex;
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -368,10 +372,114 @@ fn parse_index(data: &[u8]) -> Result<HashMap<String, IndexEntry>> {
 // 読み込み (Pak)
 // ---------------------------------------------------------------------
 
-/// 開いた NPK1 pak。ファイル全体をメモリに保持する（`GameDir` が既にファイル全読みを
-/// 前提としているのと同じ方針。実ファイルの mmap は行わない）。
+enum PakSource {
+    Memory(Vec<u8>),
+    File {
+        #[cfg(any(unix, windows))]
+        file: File,
+        #[cfg(not(any(unix, windows)))]
+        file: Mutex<File>,
+        len: u64,
+    },
+}
+
+impl PakSource {
+    fn from_file(file: File, len: u64) -> Self {
+        Self::File {
+            #[cfg(any(unix, windows))]
+            file,
+            #[cfg(not(any(unix, windows)))]
+            file: Mutex::new(file),
+            len,
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Memory(data) => data.len() as u64,
+            Self::File { len, .. } => *len,
+        }
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        match self {
+            Self::Memory(data) => {
+                let Ok(start) = usize::try_from(offset) else {
+                    return Ok(0);
+                };
+                if start >= data.len() {
+                    return Ok(0);
+                }
+                let n = buf.len().min(data.len() - start);
+                buf[..n].copy_from_slice(&data[start..start + n]);
+                Ok(n)
+            }
+            Self::File { file, .. } => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileExt;
+                    loop {
+                        match file.read_at(buf, offset) {
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            other => return other,
+                        }
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::FileExt;
+                    // seek_read はファイルポインタも更新するが、全ての読み出しが明示オフセットを
+                    // 渡しカーネルが同期ハンドルの排他を保つため並行呼び出しでも干渉しない。
+                    loop {
+                        match file.seek_read(buf, offset) {
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            other => return other,
+                        }
+                    }
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
+                    f.seek(SeekFrom::Start(offset))?;
+                    loop {
+                        match f.read(buf) {
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            other => return other,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_exact_at(&self, mut offset: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            let n = self.read_at(offset, buf)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "pak ファイル終端に到達しました",
+                ));
+            }
+            offset = offset.checked_add(n as u64).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pak オフセットがオーバーフローしました",
+                )
+            })?;
+            buf = &mut buf[n..];
+        }
+        Ok(())
+    }
+}
+
+/// 開いた NPK1 pak。`Pak::open` はメモリ上のバイト列、`Pak::open_file` はファイルハンドルから
+/// 必要な範囲だけをオンデマンドで読み出す（アーカイブ全体を RAM に常駐させない）。
 pub struct Pak {
-    data: Vec<u8>,
+    source: PakSource,
     key: [u8; 32],
     entries: HashMap<String, IndexEntry>,
 }
@@ -380,15 +488,41 @@ impl Pak {
     /// pak バイト列と鍵から開く。マジック/バージョン/鍵検証を行い、インデックスを
     /// 復号・展開・パースする。鍵が違う場合は明確なエラーを返す（パースエラーと区別できる）。
     pub fn open(data: Vec<u8>, key: &[u8; 32]) -> Result<Self> {
+        Self::open_source(PakSource::Memory(data), key)
+    }
+
+    /// pak ファイルと鍵から開く。ヘッダとインデックス領域だけを読み込んで検証・パースし、
+    /// 各エントリ本体は `read` / `entry_reader` 呼び出し時に必要な範囲だけを読む。
+    pub fn open_file(path: impl AsRef<Path>, key: &[u8; 32]) -> Result<Self> {
+        let path = path.as_ref();
+        let file = File::open(path)
+            .with_context(|| format!("pak ファイルが開けません: {}", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| {
+                format!(
+                    "pak ファイルのメタデータ取得に失敗しました: {}",
+                    path.display()
+                )
+            })?
+            .len();
+        Self::open_source(PakSource::from_file(file, len), key)
+    }
+
+    fn open_source(source: PakSource, key: &[u8; 32]) -> Result<Self> {
         ensure!(
-            data.len() >= HEADER_LEN,
+            source.len() >= HEADER_LEN as u64,
             "pak ファイルが小さすぎます（ヘッダが不足しています）"
         );
+        let mut header = [0u8; HEADER_LEN];
+        source
+            .read_exact_at(0, &mut header)
+            .context("pak ヘッダの読み込みに失敗しました")?;
         ensure!(
-            &data[0..4] == MAGIC,
+            &header[0..4] == MAGIC,
             "NPK1 形式ではありません（マジックバイト不一致）"
         );
-        let version = u16::from_le_bytes([data[4], data[5]]);
+        let version = u16::from_le_bytes([header[4], header[5]]);
         ensure!(
             version == VERSION,
             "対応していない pak バージョンです: {version}"
@@ -396,28 +530,33 @@ impl Pak {
 
         let expected = key_check_value(key);
         ensure!(
-            data[8..16] == expected,
+            header[8..16] == expected,
             "鍵が違います。この pak を復号できません（key_check 不一致）"
         );
 
-        let index_ofs = u64::from_le_bytes(data[16..24].try_into().unwrap());
-        let index_len = u64::from_le_bytes(data[24..32].try_into().unwrap());
-        let index_plain_len = u64::from_le_bytes(data[32..40].try_into().unwrap());
+        let index_ofs = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let index_len = u64::from_le_bytes(header[24..32].try_into().unwrap());
+        let index_plain_len = u64::from_le_bytes(header[32..40].try_into().unwrap());
         let index_end = index_ofs
             .checked_add(index_len)
             .context("index の範囲指定が不正です")?;
         ensure!(
-            (index_end as usize) <= data.len(),
+            index_end <= source.len(),
             "index がファイル範囲外を指しています（壊れた pak）"
         );
-
-        let mut index_cipher = data[index_ofs as usize..index_end as usize].to_vec();
-        let index_nonce = entry_nonce(INDEX_ENTRY_ID);
-        crate::crypto::apply_keystream(key, &index_nonce, 0, &mut index_cipher);
         ensure!(
             index_plain_len <= MAX_INDEX_PLAIN_LEN,
             "index の展開後サイズが大きすぎます（壊れた pak）"
         );
+        let index_len_usize =
+            usize::try_from(index_len).context("index の範囲指定が不正です")?;
+
+        let mut index_cipher = vec![0u8; index_len_usize];
+        source
+            .read_exact_at(index_ofs, &mut index_cipher)
+            .context("index の読み込みに失敗しました（壊れた pak）")?;
+        let index_nonce = entry_nonce(INDEX_ENTRY_ID);
+        crate::crypto::apply_keystream(key, &index_nonce, 0, &mut index_cipher);
         let index_plain =
             crate::codec::inflate::inflate_limited(&index_cipher, index_plain_len as usize)
                 .context("index の展開に失敗しました（壊れた pak）")?;
@@ -425,7 +564,7 @@ impl Pak {
             index_plain.len() as u64 == index_plain_len,
             "index の展開後サイズが一致しません（壊れた pak）"
         );
-        let index_crc32 = u32::from_le_bytes(data[40..44].try_into().unwrap());
+        let index_crc32 = u32::from_le_bytes(header[40..44].try_into().unwrap());
         ensure!(
             index_crc32 == 0 || crate::codec::png::crc32(&index_plain) == index_crc32,
             "index の CRC32 が一致しません（壊れた pak）"
@@ -433,7 +572,7 @@ impl Pak {
 
         let entries = parse_index(&index_plain)?;
         Ok(Self {
-            data,
+            source,
             key: *key,
             entries,
         })
@@ -479,16 +618,21 @@ impl Pak {
             .entries
             .get(path)
             .with_context(|| format!("pak にエントリがありません: {path}"))?;
-        let start = e.offset as usize;
-        let end = start
-            .checked_add(e.stored_len as usize)
+        let end = e
+            .offset
+            .checked_add(e.stored_len)
             .context("pak エントリのサイズが不正です")?;
         ensure!(
-            end <= self.data.len(),
+            end <= self.source.len(),
             "pak エントリの範囲がファイル外です: {path}"
         );
+        let stored_len =
+            usize::try_from(e.stored_len).context("pak エントリのサイズが不正です")?;
 
-        let mut buf = self.data[start..end].to_vec();
+        let mut buf = vec![0u8; stored_len];
+        self.source
+            .read_exact_at(e.offset, &mut buf)
+            .with_context(|| format!("pak エントリの読み込みに失敗しました: {path}"))?;
         let nonce = entry_nonce(e.entry_id);
         crate::crypto::apply_keystream(&self.key, &nonce, 0, &mut buf);
 
@@ -533,16 +677,18 @@ impl Pak {
             e.stored_len,
             e.plain_len
         );
-        let start = e.offset as usize;
-        let end = start
-            .checked_add(e.stored_len as usize)
+        let end = e
+            .offset
+            .checked_add(e.stored_len)
             .context("pak エントリのサイズが不正です")?;
         ensure!(
-            end <= self.data.len(),
+            end <= self.source.len(),
             "pak エントリの範囲がファイル外です: {path}"
         );
         Ok(PakEntryReader {
-            cipher: &self.data[start..end],
+            source: &self.source,
+            base_offset: e.offset,
+            stored_len: e.stored_len,
             key: self.key,
             nonce: entry_nonce(e.entry_id),
             len: e.plain_len,
@@ -555,7 +701,9 @@ impl Pak {
 /// エントリ内バイトオフセットから直接導出するので、`seek()` しても先頭からの再復号は不要。
 /// 現状エンジン本体からは未使用（将来のストリーミング再生向けの土台、W6 計画の必須成果物）。
 pub struct PakEntryReader<'a> {
-    cipher: &'a [u8],
+    source: &'a PakSource,
+    base_offset: u64,
+    stored_len: u64,
     key: [u8; 32],
     nonce: [u8; 12],
     len: u64,
@@ -564,14 +712,21 @@ pub struct PakEntryReader<'a> {
 
 impl Read for PakEntryReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // 実際に持っているバイト数（cipher）を超えて読まない。len は索引の申告値。
-        let remaining = self.len.min(self.cipher.len() as u64).saturating_sub(self.pos);
+        let remaining = self.len.min(self.stored_len).saturating_sub(self.pos);
         if remaining == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let n = (buf.len() as u64).min(remaining) as usize;
-        let start = self.pos as usize;
-        buf[..n].copy_from_slice(&self.cipher[start..start + n]);
+        let to_read = (buf.len() as u64).min(remaining) as usize;
+        let file_offset = self.base_offset.checked_add(self.pos).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "pak オフセットがオーバーフローしました",
+            )
+        })?;
+        let n = self.source.read_at(file_offset, &mut buf[..to_read])?;
+        if n == 0 {
+            return Ok(0);
+        }
         crate::crypto::apply_keystream(&self.key, &self.nonce, self.pos, &mut buf[..n]);
         self.pos += n as u64;
         Ok(n)
@@ -580,18 +735,18 @@ impl Read for PakEntryReader<'_> {
 
 impl Seek for PakEntryReader<'_> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_pos: i64 = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::End(off) => self.len as i64 + off,
-            SeekFrom::Current(off) => self.pos as i64 + off,
+        let new_pos = match pos {
+            SeekFrom::Start(p) => Some(p),
+            SeekFrom::End(off) => self.len.checked_add_signed(off),
+            SeekFrom::Current(off) => self.pos.checked_add_signed(off),
         };
-        if new_pos < 0 {
+        let Some(new_pos) = new_pos else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "シーク位置が負です",
+                "シーク位置が不正です",
             ));
-        }
-        self.pos = new_pos as u64;
+        };
+        self.pos = new_pos;
         Ok(self.pos)
     }
 }
@@ -1273,5 +1428,325 @@ mod tests {
                 }
             },
         );
+    }
+
+    struct TempPakFile {
+        path: std::path::PathBuf,
+    }
+
+    impl TempPakFile {
+        fn write(tag: &str, bytes: &[u8]) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "noiria_pak_test_{tag}_{}_{n}.pak",
+                std::process::id()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempPakFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn pak_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Pak>();
+    }
+
+    #[test]
+    fn open_file_roundtrip_stored_deflate_and_wav_flac() {
+        let mut wav_blob = Vec::new();
+        wav_blob.extend_from_slice(b"NFC1");
+        wav_blob.extend_from_slice(&1u16.to_le_bytes());
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(b"PFX!");
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(b"SFX!");
+        wav_blob.extend_from_slice(&[0x04, 0x8D, 0x00]); // CONSTANT 0x1234
+
+        let mut wav_plain = b"PFX!".to_vec();
+        for _ in 0..4 {
+            wav_plain.extend_from_slice(&[0x34, 0x12]);
+        }
+        wav_plain.extend_from_slice(b"SFX!");
+
+        let stored_plain: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let deflate_plain = "repeated scenario line\n".repeat(300).into_bytes();
+
+        let entries = vec![
+            ("assets/bg/room.png".to_string(), stored_plain.clone()),
+            ("scenario/first.ks".to_string(), deflate_plain.clone()),
+            ("bgm/theme.wav".to_string(), wav_plain.clone()),
+            ("empty.png".to_string(), Vec::new()),
+        ];
+        let key = test_key();
+        let (bytes, report) = build_with_special_codec(entries.clone(), &key, |path, _| {
+            path.ends_with(".wav")
+                .then(|| (CODEC_WAV_FLAC, wav_blob.clone()))
+        });
+        assert_eq!(report.codec_stored_count, 2);
+        assert_eq!(report.codec_deflate_count, 1);
+        assert_eq!(report.flac_converted_count, 1);
+
+        let tmp = TempPakFile::write("roundtrip", &bytes);
+        let pak = Pak::open_file(tmp.path(), &key).unwrap();
+
+        assert_eq!(pak.codec_of("assets/bg/room.png"), Some(CODEC_STORED));
+        assert_eq!(pak.codec_of("scenario/first.ks"), Some(CODEC_DEFLATE));
+        assert_eq!(pak.codec_of("bgm/theme.wav"), Some(CODEC_WAV_FLAC));
+        assert_eq!(pak.codec_of("empty.png"), Some(CODEC_STORED));
+        assert!(!pak.exists("missing.txt"));
+        assert_eq!(pak.list_dir("bgm"), vec!["theme.wav".to_string()]);
+
+        for (path, expected) in &entries {
+            assert!(pak.exists(path));
+            assert_eq!(&pak.read(path).unwrap(), expected, "path={path}");
+        }
+    }
+
+    #[test]
+    fn open_file_does_not_load_payload_into_ram() {
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let big: Vec<u8> = (0..(4 << 20))
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (seed >> 33) as u8
+            })
+            .collect();
+        let small = br#"{"title":"small"}"#.to_vec();
+        let key = test_key();
+        let (bytes, _) = build(
+            vec![
+                ("assets/big.png".to_string(), big.clone()),
+                ("game.json".to_string(), small.clone()),
+            ],
+            &key,
+        );
+        let tmp = TempPakFile::write("no_ram_resident", &bytes);
+        drop(bytes);
+
+        let (pak, peak) = crate::test_support::measure_peak(|| {
+            crate::test_support::with_alloc_limit(512 << 10, || {
+                Pak::open_file(tmp.path(), &key).unwrap()
+            })
+        });
+        assert!(
+            peak < (512 << 10),
+            "open_file がアーカイブ本体相当のメモリを確保している: peak={peak}"
+        );
+
+        let got_small =
+            crate::test_support::with_alloc_limit(512 << 10, || pak.read("game.json").unwrap());
+        assert_eq!(got_small, small);
+
+        // PakEntryReader もエントリ全体を確保せずチャンク単位で読める。
+        crate::test_support::with_alloc_limit(64 << 10, || {
+            let mut r = pak.entry_reader("assets/big.png").unwrap();
+            let mut chunk = [0u8; 4096];
+            r.seek(SeekFrom::Start(3 << 20)).unwrap();
+            r.read_exact(&mut chunk).unwrap();
+            assert_eq!(&chunk[..], &big[(3 << 20)..(3 << 20) + 4096]);
+        });
+    }
+
+    #[test]
+    fn open_file_entry_reader_chunked_and_random_seek() {
+        let mut data = Vec::with_capacity(1500);
+        let mut seed = 98765u64;
+        for _ in 0..1500 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            data.push((seed >> 33) as u8);
+        }
+        let key = test_key();
+        let (bytes, _) = build(
+            vec![
+                ("assets/video/demo.avi".to_string(), data.clone()),
+                (
+                    "scenario/c.ks".to_string(),
+                    "compressible ".repeat(200).into_bytes(),
+                ),
+            ],
+            &key,
+        );
+        let tmp = TempPakFile::write("entry_reader", &bytes);
+        let pak = Pak::open_file(tmp.path(), &key).unwrap();
+
+        assert!(pak.entry_reader("scenario/c.ks").is_err());
+
+        // 様々なチャンク幅（64 バイト ChaCha20 ブロック境界を跨ぐ）で先頭から末尾まで通読。
+        let mut r = pak.entry_reader("assets/video/demo.avi").unwrap();
+        let mut streamed = Vec::new();
+        for &chunk_size in &[1usize, 13, 63, 64, 65, 127, 256] {
+            let mut buf = vec![0u8; chunk_size];
+            let n = r.read(&mut buf).unwrap();
+            streamed.extend_from_slice(&buf[..n]);
+        }
+        let mut tail = Vec::new();
+        r.read_to_end(&mut tail).unwrap();
+        streamed.extend_from_slice(&tail);
+        assert_eq!(streamed, data);
+
+        // Start / Current / End のシークと負オフセット・EOF 超え。
+        r.seek(SeekFrom::Start(63)).unwrap();
+        let mut buf = [0u8; 10];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf[..], &data[63..73]);
+
+        r.seek(SeekFrom::Current(55)).unwrap();
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf[..], &data[128..138]);
+
+        r.seek(SeekFrom::End(-10)).unwrap();
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf[..], &data[data.len() - 10..]);
+
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+        assert!(r.seek(SeekFrom::Current(-(data.len() as i64) - 1)).is_err());
+        assert!(r.seek(SeekFrom::End(-(data.len() as i64) - 1)).is_err());
+        r.seek(SeekFrom::Start(data.len() as u64 + 100)).unwrap();
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn open_file_rejects_wrong_key_corrupted_truncated_and_out_of_range() {
+        let key = test_key();
+        let (bytes, _) = build(sample_entries(), &key);
+
+        // 1. 鍵違い
+        let tmp = TempPakFile::write("wrong_key", &bytes);
+        let err = Pak::open_file(tmp.path(), &[0x99u8; 32]).err().unwrap();
+        assert!(format!("{err:#}").contains("鍵が違います"), "{err:#}");
+
+        // 2. 不正マジック
+        let mut bad_magic = bytes.clone();
+        bad_magic[0..4].copy_from_slice(b"NOPE");
+        let tmp = TempPakFile::write("bad_magic", &bad_magic);
+        assert!(Pak::open_file(tmp.path(), &key).is_err());
+
+        // 3. 未対応バージョン
+        let mut bad_ver = bytes.clone();
+        bad_ver[4..6].copy_from_slice(&99u16.to_le_bytes());
+        let tmp = TempPakFile::write("bad_ver", &bad_ver);
+        assert!(Pak::open_file(tmp.path(), &key).is_err());
+
+        // 4. ヘッダ未満に切り詰められたファイル
+        let tmp = TempPakFile::write("trunc_hdr", &bytes[..20]);
+        assert!(Pak::open_file(tmp.path(), &key).is_err());
+
+        // 5. インデックス途中で切り詰められたファイル
+        let tmp = TempPakFile::write("trunc_idx", &bytes[..bytes.len() - 4]);
+        assert!(Pak::open_file(tmp.path(), &key).is_err());
+
+        // 6. インデックス CRC 不一致
+        let broken_crc = with_rewritten_index(&bytes, &key, |p| {
+            let at = 4 + 2 + "game.json".len() - 1;
+            p[at] = b'X';
+        });
+        let tmp = TempPakFile::write("bad_crc", &broken_crc);
+        assert!(Pak::open_file(tmp.path(), &key).is_err());
+
+        // 7. 範囲外オフセットを指すエントリ（CRC は合わせて open_file を通過させた上で read/entry_reader が拒否）
+        let mut bad_ofs = with_rewritten_index(&bytes, &key, |p| {
+            // 先頭エントリ (game.json) の offset は 4 + 2 + path_len バイト目。
+            let ofs_at = 4 + 2 + "game.json".len();
+            p[ofs_at..ofs_at + 8].copy_from_slice(&999_999u64.to_le_bytes());
+        });
+        let crc = crate::codec::png::crc32(&index_plain_of(&bad_ofs, &key));
+        bad_ofs[40..44].copy_from_slice(&crc.to_le_bytes());
+        let tmp = TempPakFile::write("bad_ofs", &bad_ofs);
+        let pak = Pak::open_file(tmp.path(), &key).unwrap();
+        assert!(pak.read("game.json").is_err());
+        assert!(pak.entry_reader("game.json").is_err());
+        drop(pak);
+
+        // 8. open_file 後にファイルが外部から切り詰められても panic せず Err / EOF を返す。
+        let tmp = TempPakFile::write("trunc_after_open", &bytes);
+        let pak = Pak::open_file(tmp.path(), &key).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path())
+            .unwrap()
+            .set_len(HEADER_LEN as u64)
+            .unwrap();
+        assert!(pak.read("assets/bg/room.png").is_err());
+        let mut r = pak.entry_reader("assets/bg/room.png").unwrap();
+        let mut buf = [0u8; 32];
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn open_file_concurrent_reads_across_threads() {
+        use std::sync::Arc;
+
+        let mut wav_blob = Vec::new();
+        wav_blob.extend_from_slice(b"NFC1");
+        wav_blob.extend_from_slice(&1u16.to_le_bytes());
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(b"PFX!");
+        wav_blob.extend_from_slice(&4u32.to_le_bytes());
+        wav_blob.extend_from_slice(b"SFX!");
+        wav_blob.extend_from_slice(&[0x04, 0x8D, 0x00]);
+        let mut wav_plain = b"PFX!".to_vec();
+        for _ in 0..4 {
+            wav_plain.extend_from_slice(&[0x34, 0x12]);
+        }
+        wav_plain.extend_from_slice(b"SFX!");
+
+        let stored_a: Vec<u8> = (0..8192u32).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
+        let stored_b: Vec<u8> = (0..6000u32).map(|i| (i.wrapping_mul(97) >> 2) as u8).collect();
+        let deflated: Vec<u8> = "concurrent deflate payload ".repeat(400).into_bytes();
+
+        let key = test_key();
+        let (bytes, _) = build_with_special_codec(
+            vec![
+                ("a.png".to_string(), stored_a.clone()),
+                ("b.png".to_string(), stored_b.clone()),
+                ("c.ks".to_string(), deflated.clone()),
+                ("d.wav".to_string(), wav_plain.clone()),
+            ],
+            &key,
+            |path, _| path.ends_with(".wav").then(|| (CODEC_WAV_FLAC, wav_blob.clone())),
+        );
+        let tmp = TempPakFile::write("concurrent", &bytes);
+        let pak = Arc::new(Pak::open_file(tmp.path(), &key).unwrap());
+        let expected = Arc::new((stored_a, stored_b, deflated, wav_plain));
+
+        let mut handles = Vec::new();
+        for tid in 0..8usize {
+            let pak = Arc::clone(&pak);
+            let expected = Arc::clone(&expected);
+            handles.push(std::thread::spawn(move || {
+                for iter in 0..25usize {
+                    match (tid + iter) % 4 {
+                        0 => assert_eq!(pak.read("a.png").unwrap(), expected.0),
+                        1 => assert_eq!(pak.read("b.png").unwrap(), expected.1),
+                        2 => assert_eq!(pak.read("c.ks").unwrap(), expected.2),
+                        _ => assert_eq!(pak.read("d.wav").unwrap(), expected.3),
+                    }
+                    let mut r = pak.entry_reader("a.png").unwrap();
+                    let ofs = ((tid * 337 + iter * 73) % (expected.0.len() - 128)) as u64;
+                    r.seek(SeekFrom::Start(ofs)).unwrap();
+                    let mut buf = [0u8; 128];
+                    r.read_exact(&mut buf).unwrap();
+                    assert_eq!(&buf[..], &expected.0[ofs as usize..ofs as usize + 128]);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

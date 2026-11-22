@@ -161,17 +161,15 @@ impl GameDir {
     /// `root` がディレクトリなら従来通り `Backend::Dir` として開く。ファイル（NPK1 pak
     /// 想定）なら `Backend::Pak` として開く: 鍵は `pak::resolve_engine_key()`
     /// （`KEY_SLOT` パッチ → `NOIRIA_PAK_KEY` 環境変数 → 開発用固定鍵の優先順）で解決し、
-    /// 誤った鍵は `Pak::open` がここで明確なエラーとして返す。
+    /// 誤った鍵は `Pak::open_file` がここで明確なエラーとして返す。
     pub fn open(root: impl Into<PathBuf>) -> Result<(Self, GameConfig)> {
         let root: PathBuf = root.into();
         let root = root
             .canonicalize()
             .with_context(|| format!("ゲームディレクトリが見つかりません: {}", root.display()))?;
         if root.is_file() {
-            let bytes = fs::read(&root)
-                .with_context(|| format!("pak ファイルが読めません: {}", root.display()))?;
             let key = crate::pak::resolve_engine_key().context("pak の鍵解決に失敗しました")?;
-            let pak = Pak::open(bytes, &key)
+            let pak = Pak::open_file(&root, &key)
                 .with_context(|| format!("pak を開けません: {}", root.display()))?;
             let text = pak
                 .read("game.json")
@@ -535,6 +533,45 @@ mod tests {
             case_mismatch(&root, "nope/none.png", &root.join("nope").join("none.png")),
             None
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_pak_file_reads_on_demand_and_enforces_jail() {
+        let root = std::env::temp_dir().join(format!(
+            "noiria_gamedir_pak_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let pak_path = root.join("game.pak");
+
+        let game_json = br#"{"title":"PakTest","id":"pak-test"}"#.to_vec();
+        let key = crate::pak::dev_key();
+        let (pak_bytes, _) = crate::pak::build(
+            vec![
+                ("game.json".to_string(), game_json.clone()),
+                ("scenario/first.ks".to_string(), b"hello pak".to_vec()),
+                ("fonts/a.ttf".to_string(), vec![1, 2, 3, 4]),
+            ],
+            &key,
+        );
+        fs::write(&pak_path, &pak_bytes).unwrap();
+
+        {
+            let (dir, config) = GameDir::open(&pak_path).unwrap();
+            assert_eq!(config.title, "PakTest");
+            assert_eq!(config.id, "pak-test");
+            assert!(dir.exists("scenario/first.ks"));
+            assert_eq!(dir.read_text("scenario/first.ks").unwrap(), "hello pak");
+            assert_eq!(dir.read_bytes("fonts/a.ttf").unwrap(), vec![1, 2, 3, 4]);
+            assert_eq!(dir.list_dir("fonts").unwrap(), vec!["a.ttf".to_string()]);
+            assert!(dir.read_bytes("../secret.bin").is_err());
+        }
+
         let _ = fs::remove_dir_all(&root);
     }
 }

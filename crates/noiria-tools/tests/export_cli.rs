@@ -195,8 +195,7 @@ fn key_in_binary(bytes: &[u8]) -> [u8; 32] {
 /// `dir` の exe が持つ鍵で同じフォルダの `game.pak` が開けること（配布物として整合していること）。
 fn assert_dir_is_consistent(dir: &Path, exe: &str) {
     let key = key_in_binary(&fs::read(dir.join(exe)).unwrap());
-    let pak = fs::read(dir.join("game.pak")).unwrap();
-    noiria_core::pak::Pak::open(pak, &key)
+    noiria_core::pak::Pak::open_file(dir.join("game.pak"), &key)
         .unwrap_or_else(|e| panic!("{} の exe と game.pak の鍵が食い違っています: {e:#}", dir.display()));
 }
 
