@@ -31,11 +31,6 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-# vp9dec は opt-level=3 で rustc のコード生成がスタックオーバーフローする
-# (rustc 1.94.1 の既知問題の踏み抜き)。2 なら安定してビルドできる。
-[profile.release.package.vp9dec]
-opt-level = 2
-
 # 配布ビルド専用プロファイル（W7）。`cargo build --profile dist --no-default-features
 # --features engine-tsint,dist -p noiria-app` で使う。release ベースに軽量化を追加。
 # panic="abort" は事前に catch_unwind 非使用を確認済み（docs/implementation-notes.md
@@ -45,7 +40,3 @@ inherits = "release"
 lto = "thin"
 strip = "symbols"
 panic = "abort"
-
-# vp9dec は dist プロファイルでも同じスタックオーバーフロー回避が必要。
-[profile.dist.package.vp9dec]
-opt-level = 2

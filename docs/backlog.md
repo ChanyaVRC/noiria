@@ -9,6 +9,8 @@
 
 ## 直近の出来事（記録）
 
+- **2026-11-22: B23 画像キャッシュ（対応済み）** — `UiCaches::images`（64 MiB のバイト上限つき LRU キャッシュ）と `load_image_cached` を追加し、`layer_load_image` / `layer_load_image_ex` / `layer_blit_image` でデコード済み `Arc<Pixmap>` を共有。`TextEngine::image_cache` も 16 MiB 上限の LRU とした。
+- **2026-11-22: B8 ストリーミング音声デコード（対応済み）** — `StreamingVorbisSource` と `StreamingWavSource` を実装し、`audio::build_source` の全量 PCM デコードを定数メモリの逐次デコードへ置換。`GameDir::open_reader` 経由でファイル・pak 双方のストリーミング再生・シーク・ループに対応。
 - **2026-11-19: B2 プレイヤー向けシステム UI 層（対応済み）** — システムメニューを刷新（セーブ/ロード/設定タブ、サムネイル・保存日時・章名・本文冒頭つきの 6 枠 × 5 ページ + オート/クイック枠、確認ダイアログ、タイトルへ戻る/終了、未読もスキップ・窓の濃さ・初期設定リセット、キーボード操作）。F5/F9 のトースト、選択肢でのオートセーブ、常設システムボタン（Q.SAVE/Q.LOAD/SAVE/LOAD/AUTO/SKIP/LOG/MENU）、メッセージ窓の frame/color/margin と名前欄の色、話者名・ボイスつきバックログ（セーブ時点の履歴を復元）、選択肢の ↑↓+Enter と hover/click 音。新 op `thumbCapture`/`thumbSave`/`layer.loadSaveThumb`/`dateString`。デモへ適用済み。
 - **2026-11-19: A ホストの出荷品質化 + スクリプト駆動 autotest（対応済み）** — Win32/X11 ウィンドウを
   リサイズ可（アスペクト保持レターボックス、マウス座標の逆変換は `viewport.rs` の純関数）にし、起動時
@@ -98,12 +100,10 @@
 | B5 | pak 内 MP4 再生不可（MF が実ファイルパス要求。`.avi`/`.ivf` 推奨、export 時警告あり） | 中 |
 | B20 | 真の HDR（PQ/HLG）→SDR トーンマップと色忠実性。10/12-bit SDR の RGBA8 表示は 2026-07-26 対応済みだが、現行の公開 `vp9dec::Frame` / IVF には transfer・primaries・mastering metadata が無く、HDR かを判定できない。メタデータを保持するコンテナ/API 経路が前提 | 中 |
 | B7 | IME 対応（`edit`/`input`/`ask`。現状 `WM_CHAR` の確定文字のみ） | 中 |
-| B8 | ストリーミング音声デコード（現状全量デコード。`VorbisStreamDecoder` のパケット基盤は存在） | 中 |
 | B11 | `hch`（縦中横）はプレーンテキストにフォールバック / `hact` はテキスト記録のみ | 中 |
 | B19 | BGM シンセの主観品質チューニング（voice 毎 AM depth 等、指摘があれば） | 小 |
 | B21 | BGM のループポイント指定（現状は曲全体のループのみ。`setbgmlabel` は対象外スタブ） | 中 |
 | B22 | レイヤ単位のトランジション（`[trans layer=]` は全画面トランジションへフォールバック） | 中 |
-| B23 | 画像キャッシュ/プリロード（`[image]` のたびに `GameDir` から読み直してデコード） | 中 |
 | B24 | UI 文字列の多言語化（システムメニュー/確認ダイアログ/トーストは日本語固定） | 中 |
 | B25 | ゲームパッド入力（メニュー/選択肢はキーボード・マウスのみ） | 中 |
 | B26 | CFF/OTF フォント（`.otf`/OTTO の同梱は読み込まず error ログ。TrueType のみ） | 中 |
