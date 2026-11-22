@@ -38,8 +38,8 @@ deno_error = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # 完全自作 TS インタプリタ（独立リポジトリ ChanyaVRC/tsint）。
 # V8/deno_core と並走で選べる第 2 のスクリプトエンジン (T5b)。
-# ローカル sibling で上書きしたい場合は Cargo の `[patch."https://github.com/ChanyaVRC/tsint.git"]` を使う。
-tsint = { git = "https://github.com/ChanyaVRC/tsint.git", branch = "main", optional = true }
+# ローカル sibling で上書きしたい場合は Cargo の `[patch.crates-io]` を使う。
+tsint = { version = "0.1.0", optional = true }
 
 # ウィンドウ/描画/入力は Win32 API 直叩き（winit/softbuffer は不使用）。
 # OS 境界 API（ウィンドウ/音声出力/動画デコードと同格の扱い）。

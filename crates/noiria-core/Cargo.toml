@@ -20,8 +20,8 @@ directories = "6"
 image-webp.workspace = true
 # 自作 VP9 デコーダ（独立リポジトリ ChanyaVRC/vp9dec）。動画 (IVF/VP9) 再生用。
 # 純 Rust 実装・依存クレートゼロなので通常依存として全プラットフォームで使える。
-# ローカル sibling で上書きしたい場合は Cargo の `[patch."https://github.com/ChanyaVRC/vp9dec.git"]` を使う。
-vp9dec = { git = "https://github.com/ChanyaVRC/vp9dec.git", branch = "main" }
+# ローカル sibling で上書きしたい場合は Cargo の `[patch.crates-io]` を使う。
+vp9dec = "0.1.2"
 
 # 動画 (H.264/MP4 等) 再生・音声出力 (WASAPI) 用。OS 内蔵 API を使う
 # OS 境界 API 呼び出しで、ffmpeg/cpal 等の外部ライブラリは使わない。

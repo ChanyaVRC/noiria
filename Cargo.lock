@@ -2725,7 +2725,8 @@ dependencies = [
 [[package]]
 name = "tsint"
 version = "0.1.0"
-source = "git+https://github.com/ChanyaVRC/tsint.git?branch=main#2da2bd6047d9e8aaa6547ee00577c772b4bfeaf9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aad98ec7b4683984d15477fd080688b5b75fe55216ff0b409eaa70764d90e420"
 
 [[package]]
 name = "typenum"
@@ -2811,8 +2812,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vp9dec"
-version = "0.1.1"
-source = "git+https://github.com/ChanyaVRC/vp9dec.git?branch=main#0fcebd75077039366ad3df9088ca2091a9d91247"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dff0f442f5e6132a5de00fb3886a9d2e0c294d1eac15e9d96e48236244fd6dc"
 
 [[package]]
 name = "vsimd"
