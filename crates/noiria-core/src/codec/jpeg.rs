@@ -229,6 +229,16 @@ struct Component {
 const MAX_PIXELS: usize = 1 << 26;
 
 pub fn decode(data: &[u8]) -> Result<DecodedJpeg> {
+    let mut rgba = Vec::new();
+    let (width, height) = decode_into(data, &mut rgba)?;
+    Ok(DecodedJpeg {
+        width,
+        height,
+        rgba,
+    })
+}
+
+pub fn decode_into(data: &[u8], rgba: &mut Vec<u8>) -> Result<(u32, u32)> {
     ensure!(
         data.len() > 4 && data[0] == 0xFF && data[1] == 0xD8,
         "JPEG SOI がありません"
@@ -362,6 +372,7 @@ pub fn decode(data: &[u8]) -> Result<DecodedJpeg> {
                     &dc_tables,
                     &ac_tables,
                     restart_interval,
+                    rgba,
                 );
             }
             _ => {} // APPn / COM 等は無視
@@ -381,7 +392,8 @@ fn decode_scan(
     dc_tables: &[Option<Huffman>],
     ac_tables: &[Option<Huffman>],
     restart_interval: usize,
-) -> Result<DecodedJpeg> {
+    rgba: &mut Vec<u8>,
+) -> Result<(u32, u32)> {
     ensure!(width > 0 && height > 0, "画像サイズが不正");
     ensure!(
         width * height <= MAX_PIXELS,
@@ -478,7 +490,8 @@ fn decode_scan(
     }
 
     // YCbCr → RGBA（クロマは最近傍アップサンプル）
-    let mut rgba = Vec::with_capacity(width * height * 4);
+    rgba.clear();
+    rgba.reserve(width * height * 4);
     if comps.len() == 1 {
         let plane_w = mcus_x * comps[0].h * 8;
         for y in 0..height {
@@ -512,11 +525,7 @@ fn decode_scan(
         }
     }
 
-    Ok(DecodedJpeg {
-        width: width as u32,
-        height: height as u32,
-        rgba,
-    })
+    Ok((width as u32, height as u32))
 }
 
 #[cfg(test)]

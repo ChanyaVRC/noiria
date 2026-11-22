@@ -189,8 +189,8 @@ impl MfVideo {
         })
     }
 
-    /// IMFSample の映像バッファを straight RGBA8 に変換する。
-    fn sample_to_rgba(&self, sample: &IMFSample) -> Result<Vec<u8>> {
+    /// IMFSample の映像バッファを straight RGBA8 として `rgba` に書き込む。
+    fn sample_to_rgba_into(&self, sample: &IMFSample, rgba: &mut Vec<u8>) -> Result<()> {
         // SAFETY: `sample` は有効な COM オブジェクト。
         let buffer = unsafe { sample.ConvertToContiguousBuffer() }
             .context("サンプルの連続バッファ化に失敗")?;
@@ -202,7 +202,7 @@ impl MfVideo {
         let abs_stride = self.stride.unsigned_abs() as usize;
         ensure!(abs_stride >= row_bytes, "動画のストライドが幅より小さい");
 
-        let mut rgba = vec![0u8; row_bytes * h];
+        rgba.resize(row_bytes * h, 0);
         for y in 0..h {
             // 負のストライドはボトムアップ格納を意味する。
             let src_row_index = if self.stride < 0 { h - 1 - y } else { y };
@@ -220,7 +220,7 @@ impl MfVideo {
             }
         }
         // `locked` は `src` を使い終えたここで Drop され、Unlock する。
-        Ok(rgba)
+        Ok(())
     }
 }
 
@@ -291,6 +291,15 @@ impl VideoSource for MfVideo {
     }
 
     fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut rgba = Vec::new();
+        if self.next_frame_into(&mut rgba)? {
+            Ok(Some(rgba))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_frame_into(&mut self, buf: &mut Vec<u8>) -> Result<bool> {
         loop {
             let mut stream_flags: u32 = 0;
             let mut sample: Option<IMFSample> = None;
@@ -309,14 +318,15 @@ impl VideoSource for MfVideo {
             .context("ReadSample に失敗")?;
 
             if stream_flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return Ok(None);
+                return Ok(false);
             }
 
             let Some(sample) = sample else {
                 // ストリームギャップ等でサンプルが無いことがある。継続して次を読む。
                 continue;
             };
-            return self.sample_to_rgba(&sample).map(Some);
+            self.sample_to_rgba_into(&sample, buf)?;
+            return Ok(true);
         }
     }
 

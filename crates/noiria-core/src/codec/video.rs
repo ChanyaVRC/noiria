@@ -6,6 +6,7 @@
 //! 新しいコーデックを追加するときは `VideoSource` を実装して
 //! `open_video_file()` のスニッフィングに 1 分岐足すだけでよい（再生側は不変）。
 
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -28,15 +29,26 @@ pub trait VideoSource: Send {
     fn fps(&self) -> f32;
     /// 次のフレームを straight RGBA8 で返す。終端で Ok(None)。
     fn next_frame(&mut self) -> Result<Option<Vec<u8>>>;
+    /// 次のフレームを `buf` に直接書き込む（バッファ再利用版）。終端で Ok(false)。
+    fn next_frame_into(&mut self, buf: &mut Vec<u8>) -> Result<bool> {
+        match self.next_frame()? {
+            Some(frame) => {
+                *buf = frame;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
     /// 先頭へ巻き戻す（ループ再生用）。
     fn rewind(&mut self) -> Result<()>;
     /// 0-based の表示フレーム位置へ移動する。成功後の `next_frame()` が `target` を返す。
     /// `target == 総表示フレーム数` は EOF 位置、超過はエラー。
     fn seek_frame(&mut self, target: usize) -> Result<()> {
         self.rewind()?;
+        let mut scratch = Vec::new();
         for _ in 0..target {
             ensure!(
-                self.next_frame()?.is_some(),
+                self.next_frame_into(&mut scratch)?,
                 "動画の表示フレーム番号が範囲外です: {target}"
             );
         }
@@ -44,27 +56,51 @@ pub trait VideoSource: Send {
     }
 }
 
-/// AVI コンテナをスニッフィングして開く（MJPEG 専用。自作デコーダ経路）。
-pub fn open_video(data: Vec<u8>) -> Result<Box<dyn VideoSource>> {
-    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"AVI " {
-        return Ok(Box::new(MjpegAvi::parse(data)?));
+fn read_prefix(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
     }
-    if data.len() >= 12 && &data[0..4] == b"DKIF" {
-        if &data[8..12] == b"VP90" {
-            return Ok(Box::new(Vp9Ivf::parse(data)?));
+    Ok(filled)
+}
+
+/// シーク可能なストリームをスニッフィングして開く（AVI/MJPEG・IVF/VP9 専用）。
+pub fn open_video_reader<R: Read + Seek + Send + 'static>(
+    mut reader: R,
+) -> Result<Box<dyn VideoSource>> {
+    let mut head = [0u8; 12];
+    let n = read_prefix(&mut reader, &mut head)?;
+    if n >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"AVI " {
+        reader.seek(SeekFrom::Start(0))?;
+        return Ok(Box::new(MjpegAvi::from_reader(reader)?));
+    }
+    if n >= 12 && &head[0..4] == b"DKIF" {
+        if &head[8..12] == b"VP90" {
+            reader.seek(SeekFrom::Start(0))?;
+            return Ok(Box::new(Vp9Ivf::from_reader(reader)?));
         }
         bail!(
             "VP9 (FourCC=VP90) 以外の IVF は自作デコーダ非対応です: {:?}",
-            &data[8..12]
+            &head[8..12]
         );
     }
-    if data.len() >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
+    if n >= 4 && head[0] == 0x00 && head[1] == 0x00 && head[2] == 0x01 {
         bail!("MPEG-1 は未対応です（ロードマップ参照）");
     }
-    if data.len() >= 12 && &data[4..8] == b"ftyp" {
+    if n >= 12 && &head[4..8] == b"ftyp" {
         bail!("MP4 (H.264/H.265) は未対応です（ロードマップ参照）");
     }
     bail!("不明な動画形式です（対応: AVI/MJPEG, IVF/VP9）");
+}
+
+/// メモリ上の動画コンテナをスニッフィングして開く（AVI/MJPEG・IVF/VP9 専用）。
+pub fn open_video(data: Vec<u8>) -> Result<Box<dyn VideoSource>> {
+    open_video_reader(Cursor::new(data))
 }
 
 /// ファイルパスから動画を開く。先頭バイトでコンテナを判別する:
@@ -73,30 +109,27 @@ pub fn open_video(data: Vec<u8>) -> Result<Box<dyn VideoSource>> {
 /// Windows では OS 内蔵の Media Foundation へフォールバックする。
 /// IVF+VP9 は MF より優先する（自作デコーダが公式コンフォーマンス済みのため）。
 pub fn open_video_file(path: &Path) -> Result<Box<dyn VideoSource>> {
+    let mut f = std::fs::File::open(path)
+        .with_context(|| format!("動画が開けません: {}", path.display()))?;
     let mut head = [0u8; 12];
-    {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path)
-            .with_context(|| format!("動画が開けません: {}", path.display()))?;
-        let n = f.read(&mut head).unwrap_or(0);
-        if n < head.len() {
-            // 12 バイト未満のファイルは何であれ不正
-            bail!("動画ファイルが小さすぎます: {}", path.display());
-        }
+    let n = read_prefix(&mut f, &mut head)
+        .with_context(|| format!("動画が読めません: {}", path.display()))?;
+    if n < head.len() {
+        // 12 バイト未満のファイルは何であれ不正
+        bail!("動画ファイルが小さすぎます: {}", path.display());
     }
 
     if &head[0..4] == b"RIFF" && &head[8..12] == b"AVI " {
-        let data =
-            std::fs::read(path).with_context(|| format!("動画が読めません: {}", path.display()))?;
-        return Ok(Box::new(MjpegAvi::parse(data)?));
+        f.seek(SeekFrom::Start(0))?;
+        return Ok(Box::new(MjpegAvi::from_reader(BufReader::new(f))?));
     }
 
     if &head[0..4] == b"DKIF" {
         if &head[8..12] == b"VP90" {
-            let data = std::fs::read(path)
-                .with_context(|| format!("動画が読めません: {}", path.display()))?;
-            return Ok(Box::new(Vp9Ivf::parse(data)?));
+            f.seek(SeekFrom::Start(0))?;
+            return Ok(Box::new(Vp9Ivf::from_reader(BufReader::new(f))?));
         }
+        drop(f);
         // IVF だが VP9 以外 (VP80 等) は自作デコーダの対象外。
         #[cfg(windows)]
         {
@@ -111,6 +144,7 @@ pub fn open_video_file(path: &Path) -> Result<Box<dyn VideoSource>> {
         }
     }
 
+    drop(f);
     #[cfg(windows)]
     {
         // MP4 (ftyp) / MPEG-1 (000001 スタートコード) / WMV (ASF) 等は
@@ -132,10 +166,11 @@ fn u32le(b: &[u8], at: usize) -> u32 {
 }
 
 /// AVI コンテナに入った Motion JPEG。
-pub struct MjpegAvi {
-    data: Vec<u8>,
+pub struct MjpegAvi<R = Cursor<Vec<u8>>> {
+    reader: R,
     /// (offset, len) — 各フレームの JPEG バイト列
-    frames: Vec<(usize, usize)>,
+    frames: Vec<(u64, usize)>,
+    frame_buf: Vec<u8>,
     width: u32,
     height: u32,
     fps: f32,
@@ -143,10 +178,21 @@ pub struct MjpegAvi {
     cursor: usize,
 }
 
-impl MjpegAvi {
+impl MjpegAvi<Cursor<Vec<u8>>> {
     pub fn parse(data: Vec<u8>) -> Result<Self> {
+        Self::from_reader(Cursor::new(data))
+    }
+}
+
+impl<R: Read + Seek> MjpegAvi<R> {
+    pub fn from_reader(mut reader: R) -> Result<Self> {
+        let file_len = reader.seek(SeekFrom::End(0))?;
+        ensure!(file_len >= 12, "AVI ファイルではありません");
+        reader.seek(SeekFrom::Start(0))?;
+        let mut head = [0u8; 12];
+        reader.read_exact(&mut head)?;
         ensure!(
-            data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"AVI ",
+            &head[0..4] == b"RIFF" && &head[8..12] == b"AVI ",
             "AVI ファイルではありません"
         );
         let mut width = 0u32;
@@ -159,62 +205,75 @@ impl MjpegAvi {
 
         // RIFF チャンクの走査（LIST は再帰的に中を見る）
         #[allow(clippy::too_many_arguments)]
-        fn walk(
-            data: &[u8],
+        fn walk<R: Read + Seek>(
+            reader: &mut R,
+            file_len: u64,
             depth: u32,
-            mut pos: usize,
-            end: usize,
+            mut pos: u64,
+            end: u64,
             width: &mut u32,
             height: &mut u32,
             fps: &mut f32,
-            frames: &mut Vec<(usize, usize)>,
+            frames: &mut Vec<(u64, usize)>,
         ) -> Result<()> {
-            while pos + 8 <= end {
-                let fourcc = &data[pos..pos + 4];
-                let len = u32le(data, pos + 4) as usize;
+            while pos.checked_add(8).is_some_and(|p| p <= end) {
+                reader.seek(SeekFrom::Start(pos))?;
+                let mut hdr = [0u8; 8];
+                reader.read_exact(&mut hdr)?;
+                let fourcc = &hdr[0..4];
+                let len = u32le(&hdr, 4) as u64;
                 let body = pos + 8;
-                ensure!(body + len <= data.len(), "AVI チャンクが範囲外");
+                let body_end = body.checked_add(len).context("AVI チャンクが範囲外")?;
+                ensure!(body_end <= file_len, "AVI チャンクが範囲外");
                 match fourcc {
                     b"LIST" => {
                         ensure!(depth < MAX_LIST_DEPTH, "AVI の LIST の入れ子が深すぎます");
                         // LIST 種別 4 バイトの後に子チャンクが続く
-                        walk(
-                            data,
-                            depth + 1,
-                            body + 4,
-                            body + len,
-                            width,
-                            height,
-                            fps,
-                            frames,
-                        )?;
+                        if len >= 4 {
+                            walk(
+                                reader,
+                                file_len,
+                                depth + 1,
+                                body + 4,
+                                body_end,
+                                width,
+                                height,
+                                fps,
+                                frames,
+                            )?;
+                        }
                     }
                     b"avih" => {
                         ensure!(len >= 40, "avih が短すぎます");
-                        let usec = u32le(data, body);
+                        let mut avih = [0u8; 40];
+                        reader.read_exact(&mut avih)?;
+                        let usec = u32le(&avih, 0);
                         if usec > 0 {
                             *fps = 1_000_000.0 / usec as f32;
                         }
-                        *width = u32le(data, body + 32);
-                        *height = u32le(data, body + 36);
+                        *width = u32le(&avih, 32);
+                        *height = u32le(&avih, 36);
                     }
                     // ストリーム 00 のビデオフレーム (dc=compressed, db=uncompressed扱いも JPEG とみなす)
-                    b"00dc" | b"00db"
-                        if len > 0 => {
-                            frames.push((body, len));
-                        }
+                    b"00dc" | b"00db" if len > 0 => {
+                        let len = usize::try_from(len).context("AVI チャンクが範囲外")?;
+                        frames.push((body, len));
+                    }
                     _ => {}
                 }
-                pos = body + len + (len & 1); // 2 バイト境界へパディング
+                let Some(next) = body_end.checked_add(len & 1) else {
+                    break;
+                };
+                pos = next; // 2 バイト境界へパディング
             }
             Ok(())
         }
-        let end = data.len();
         walk(
-            &data,
+            &mut reader,
+            file_len,
             0,
             12,
-            end,
+            file_len,
             &mut width,
             &mut height,
             &mut fps,
@@ -225,8 +284,9 @@ impl MjpegAvi {
         ensure!(width > 0 && height > 0, "AVI のサイズ情報がありません");
         ensure!(fps > 0.0 && fps <= 240.0, "フレームレートが不正: {fps}");
         Ok(Self {
-            data,
+            reader,
             frames,
+            frame_buf: Vec::new(),
             width,
             height,
             fps,
@@ -239,21 +299,39 @@ impl MjpegAvi {
         self.frames.len()
     }
 
+    fn read_frame_bytes(&mut self, index: usize) -> Result<()> {
+        let (off, len) = *self.frames.get(index).context("フレーム番号が範囲外")?;
+        self.reader
+            .seek(SeekFrom::Start(off))
+            .with_context(|| format!("フレーム {index} へのシークに失敗"))?;
+        self.frame_buf.resize(len, 0);
+        self.reader
+            .read_exact(&mut self.frame_buf)
+            .with_context(|| format!("フレーム {index} の読み込みに失敗"))?;
+        Ok(())
+    }
+
+    pub fn decode_frame_into(&mut self, index: usize, rgba: &mut Vec<u8>) -> Result<()> {
+        self.read_frame_bytes(index)?;
+        let (w, h) = jpeg::decode_into(&self.frame_buf, rgba)
+            .with_context(|| format!("フレーム {index} の JPEG デコードに失敗"))?;
+        ensure!(
+            w == self.width && h == self.height,
+            "フレームサイズが AVI ヘッダと不一致"
+        );
+        Ok(())
+    }
+
     /// 指定インデックスのフレームをランダムアクセスでデコードする
     /// （テスト互換のために残している。再生経路は `next_frame` を使う）。
     pub fn decode_frame(&mut self, index: usize) -> Result<Vec<u8>> {
-        let (off, len) = *self.frames.get(index).context("フレーム番号が範囲外")?;
-        let decoded = jpeg::decode(&self.data[off..off + len])
-            .with_context(|| format!("フレーム {index} の JPEG デコードに失敗"))?;
-        ensure!(
-            decoded.width == self.width && decoded.height == self.height,
-            "フレームサイズが AVI ヘッダと不一致"
-        );
-        Ok(decoded.rgba)
+        let mut rgba = Vec::new();
+        self.decode_frame_into(index, &mut rgba)?;
+        Ok(rgba)
     }
 }
 
-impl VideoSource for MjpegAvi {
+impl<R: Read + Seek + Send> VideoSource for MjpegAvi<R> {
     fn width(&self) -> u32 {
         self.width
     }
@@ -265,12 +343,22 @@ impl VideoSource for MjpegAvi {
     }
 
     fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut rgba = Vec::new();
+        if self.next_frame_into(&mut rgba)? {
+            Ok(Some(rgba))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_frame_into(&mut self, buf: &mut Vec<u8>) -> Result<bool> {
         if self.cursor >= self.frames.len() {
-            return Ok(None);
+            return Ok(false);
         }
         let index = self.cursor;
         self.cursor += 1;
-        self.decode_frame(index).map(Some)
+        self.decode_frame_into(index, buf)?;
+        Ok(true)
     }
 
     fn rewind(&mut self) -> Result<()> {
@@ -344,14 +432,13 @@ const IVF_FRAME_HEADER_SIZE: usize = 12;
 
 /// IVF (VP9) コンテナを自作デコーダ (`vp9dec`) で再生する。
 ///
-/// `vp9dec::ivf::IvfReader` は借用ベース（返す `IvfFrame<'a>` がバッファを借用する）
-/// なので、`data` を所有しつつ同じ構造体にリーダーも保持する自己参照構造になってしまう。
-/// `MjpegAvi` と同様、フレーム位置を `(offset, len)` として事前に一度だけ自前で
-/// 歩いておき、`data: Vec<u8>` と並べて所有する設計にする。
-pub struct Vp9Ivf {
-    data: Vec<u8>,
+/// フレーム位置を `(offset, len)` のインデックスだけ先に歩いておき、
+/// 再生時は `reader` から 1 フレーム分ずつ `frame_buf` へ読み出す。
+pub struct Vp9Ivf<R = Cursor<Vec<u8>>> {
+    reader: R,
     /// (offset, len) — 各 IVF フレームの VP9 ビットストリーム（デコード順）
-    frames: Vec<(usize, usize)>,
+    frames: Vec<(u64, usize)>,
+    frame_buf: Vec<u8>,
     width: u32,
     height: u32,
     fps: f32,
@@ -360,29 +447,40 @@ pub struct Vp9Ivf {
     cursor: usize,
 }
 
-impl Vp9Ivf {
+impl Vp9Ivf<Cursor<Vec<u8>>> {
     pub fn parse(data: Vec<u8>) -> Result<Self> {
+        Self::from_reader(Cursor::new(data))
+    }
+}
+
+impl<R: Read + Seek> Vp9Ivf<R> {
+    pub fn from_reader(mut reader: R) -> Result<Self> {
+        let file_len = reader.seek(SeekFrom::End(0))?;
         ensure!(
-            data.len() >= IVF_FILE_HEADER_SIZE && &data[0..4] == b"DKIF",
+            file_len >= IVF_FILE_HEADER_SIZE as u64,
             "IVF ファイルではありません"
         );
-        let fourcc = &data[8..12];
+        reader.seek(SeekFrom::Start(0))?;
+        let mut hdr = [0u8; IVF_FILE_HEADER_SIZE];
+        reader.read_exact(&mut hdr)?;
+        ensure!(&hdr[0..4] == b"DKIF", "IVF ファイルではありません");
+        let fourcc = &hdr[8..12];
         ensure!(
             fourcc == b"VP90",
             "VP9 (FourCC=VP90) 以外の IVF は自作デコーダ非対応です: {:?}",
             fourcc
         );
 
-        let header_length = u16::from_le_bytes([data[6], data[7]]) as usize;
+        let header_length = u16::from_le_bytes([hdr[6], hdr[7]]) as u64;
         ensure!(
-            (IVF_FILE_HEADER_SIZE..=data.len()).contains(&header_length),
+            (IVF_FILE_HEADER_SIZE as u64..=file_len).contains(&header_length),
             "IVF ヘッダ長が不正です"
         );
 
-        let width = u16::from_le_bytes([data[12], data[13]]) as u32;
-        let height = u16::from_le_bytes([data[14], data[15]]) as u32;
-        let timebase_denominator = u32le(&data, 16);
-        let timebase_numerator = u32le(&data, 20);
+        let width = u16::from_le_bytes([hdr[12], hdr[13]]) as u32;
+        let height = u16::from_le_bytes([hdr[14], hdr[15]]) as u32;
+        let timebase_denominator = u32le(&hdr, 16);
+        let timebase_numerator = u32le(&hdr, 20);
         ensure!(width > 0 && height > 0, "IVF のサイズ情報がありません");
         let fps = if timebase_numerator > 0 {
             timebase_denominator as f32 / timebase_numerator as f32
@@ -391,27 +489,37 @@ impl Vp9Ivf {
         };
         ensure!(fps > 0.0 && fps <= 240.0, "フレームレートが不正: {fps}");
 
-        // フレーム位置を一度だけ歩いて記録する（自前の IVF ウォーカー。
-        // 12 バイトのフレームヘッダ + フレームデータの繰り返し）。
+        // フレーム位置を一度だけ歩いて記録する（12 バイトのフレームヘッダ + フレームデータ）。
         let mut frames = Vec::new();
         let mut pos = header_length;
-        while pos + IVF_FRAME_HEADER_SIZE <= data.len() {
-            let frame_len = u32le(&data, pos) as usize;
-            let data_start = pos + IVF_FRAME_HEADER_SIZE;
+        if pos != IVF_FILE_HEADER_SIZE as u64 {
+            reader.seek(SeekFrom::Start(pos))?;
+        }
+        while pos
+            .checked_add(IVF_FRAME_HEADER_SIZE as u64)
+            .is_some_and(|p| p <= file_len)
+        {
+            let mut fh = [0u8; IVF_FRAME_HEADER_SIZE];
+            reader.read_exact(&mut fh)?;
+            let frame_len = u32le(&fh, 0) as u64;
+            let data_start = pos + IVF_FRAME_HEADER_SIZE as u64;
             let data_end = data_start
                 .checked_add(frame_len)
                 .context("IVF フレーム長が不正")?;
-            ensure!(data_end <= data.len(), "IVF フレームデータが範囲外です");
+            ensure!(data_end <= file_len, "IVF フレームデータが範囲外です");
             if frame_len > 0 {
-                frames.push((data_start, frame_len));
+                let len = usize::try_from(frame_len).context("IVF フレーム長が不正")?;
+                frames.push((data_start, len));
+                reader.seek(SeekFrom::Start(data_end))?;
             }
             pos = data_end;
         }
         ensure!(!frames.is_empty(), "ビデオフレームがありません");
 
         Ok(Self {
-            data,
+            reader,
             frames,
+            frame_buf: Vec::new(),
             width,
             height,
             fps,
@@ -419,9 +527,26 @@ impl Vp9Ivf {
             cursor: 0,
         })
     }
+
+    fn read_chunk(&mut self) -> Result<Option<usize>> {
+        if self.cursor >= self.frames.len() {
+            return Ok(None);
+        }
+        let (off, len) = self.frames[self.cursor];
+        let index = self.cursor;
+        self.cursor += 1;
+        self.reader
+            .seek(SeekFrom::Start(off))
+            .with_context(|| format!("VP9 フレーム {index} へのシークに失敗"))?;
+        self.frame_buf.resize(len, 0);
+        self.reader
+            .read_exact(&mut self.frame_buf)
+            .with_context(|| format!("VP9 フレーム {index} の読み込みに失敗"))?;
+        Ok(Some(index))
+    }
 }
 
-impl VideoSource for Vp9Ivf {
+impl<R: Read + Seek + Send> VideoSource for Vp9Ivf<R> {
     fn width(&self) -> u32 {
         self.width
     }
@@ -433,32 +558,34 @@ impl VideoSource for Vp9Ivf {
     }
 
     fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
-        loop {
-            if self.cursor >= self.frames.len() {
-                return Ok(None);
-            }
-            let (off, len) = self.frames[self.cursor];
-            let index = self.cursor;
-            self.cursor += 1;
-            let frame_data = &self.data[off..off + len];
-            match self.decoder.decode_frame(frame_data) {
+        let mut rgba = Vec::new();
+        if self.next_frame_into(&mut rgba)? {
+            Ok(Some(rgba))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_frame_into(&mut self, buf: &mut Vec<u8>) -> Result<bool> {
+        while let Some(index) = self.read_chunk()? {
+            match self.decoder.decode_frame(&self.frame_buf) {
                 // vp9dec はチャンク（IVF フレーム 1 個）毎に構成フレームの Vec を返し、
                 // 表示フレーム（frame: Some）は高々 1 つ（superframe 内の非表示
                 // altref や SVC 下位レイヤは frame: None / 表示は最終 shown のみ）。
                 Ok(decoded) => {
                     if let Some(frame) = decoded.into_iter().find_map(|df| df.frame) {
-                        let rgba = vp9_frame_to_rgba_bt601(&frame)
+                        vp9_frame_to_rgba_bt601_into(&frame, buf)
                             .with_context(|| format!("VP9 フレーム {index} の RGBA 変換に失敗"))?;
                         self.width = frame.width;
                         self.height = frame.height;
-                        return Ok(Some(rgba));
+                        return Ok(true);
                     }
                     // 非表示フレームのみのチャンク（droppable/altref）はスキップして次へ。
-                    continue;
                 }
                 Err(e) => bail!("VP9 フレーム {index} のデコードに失敗: {e:?}"),
             }
         }
+        Ok(false)
     }
 
     fn rewind(&mut self) -> Result<()> {
@@ -468,9 +595,30 @@ impl VideoSource for Vp9Ivf {
         self.cursor = 0;
         Ok(())
     }
+
+    fn seek_frame(&mut self, target: usize) -> Result<()> {
+        self.rewind()?;
+        let mut shown = 0usize;
+        while shown < target {
+            let Some(index) = self.read_chunk()? else {
+                bail!("動画の表示フレーム番号が範囲外です: {target}");
+            };
+            match self.decoder.decode_frame(&self.frame_buf) {
+                Ok(decoded) => {
+                    if let Some(frame) = decoded.into_iter().find_map(|df| df.frame) {
+                        self.width = frame.width;
+                        self.height = frame.height;
+                        shown += 1;
+                    }
+                }
+                Err(e) => bail!("VP9 フレーム {index} のデコードに失敗: {e:?}"),
+            }
+        }
+        Ok(())
+    }
 }
 
-fn vp9_frame_to_rgba_bt601(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
+fn vp9_frame_to_rgba_bt601_into(frame: &vp9dec::Frame, rgba: &mut Vec<u8>) -> Result<()> {
     match frame.bit_depth {
         8 => {
             ensure!(
@@ -485,13 +633,21 @@ fn vp9_frame_to_rgba_bt601(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
                 "8-bit VP9 フレームの Y/U/V plane はすべて U8 である必要があります"
             );
             validate_vp9_plane_lengths(frame)?;
-            Ok(yuv_to_rgba_bt601(frame))
+            yuv_to_rgba_bt601_into(frame, rgba);
+            Ok(())
         }
-        10 | 12 => yuv_to_rgba_bt601_hbd(frame),
+        10 | 12 => yuv_to_rgba_bt601_hbd_into(frame, rgba),
         bit_depth => {
             bail!("VP9 の bit depth {bit_depth} は RGBA 変換非対応です（対応: 8/10/12-bit）")
         }
     }
+}
+
+#[cfg(test)]
+fn vp9_frame_to_rgba_bt601(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
+    let mut rgba = Vec::new();
+    vp9_frame_to_rgba_bt601_into(frame, &mut rgba)?;
+    Ok(rgba)
 }
 
 fn validate_vp9_plane_lengths(frame: &vp9dec::Frame) -> Result<()> {
@@ -539,12 +695,12 @@ fn validate_vp9_plane_lengths(frame: &vp9dec::Frame) -> Result<()> {
     Ok(())
 }
 
-/// 8-bit YUV を straight alpha の RGBA8 へ変換する（BT.601, limited range）。
+/// 8-bit YUV を straight alpha の RGBA8 へ変換し `rgba` へ書き込む（BT.601, limited range）。
 /// クロマは frame の `subsampling_x/y` に従い最近傍 (`x>>sub_x, y>>sub_y`) で
 /// アップサンプリングするので 4:2:0/4:2:2/4:4:0/4:4:4 のいずれにも対応する
 /// （係数は `vp9dec` の目視検収用 PNG 出力 `examples/decode_to_png.rs` と同じ）。
 /// 呼び出し側で `frame.bit_depth == 8` を保証していること（`as_u8` は 10/12-bit で panic）。
-fn yuv_to_rgba_bt601(frame: &vp9dec::Frame) -> Vec<u8> {
+fn yuv_to_rgba_bt601_into(frame: &vp9dec::Frame, rgba: &mut Vec<u8>) {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let sub_x = frame.subsampling_x;
@@ -555,7 +711,7 @@ fn yuv_to_rgba_bt601(frame: &vp9dec::Frame) -> Vec<u8> {
     let u_plane = frame.u.as_u8();
     let v_plane = frame.v.as_u8();
 
-    let mut rgba = vec![0u8; w * h * 4];
+    rgba.resize(w * h * 4, 0);
     for y in 0..h {
         for x in 0..w {
             let y_val = y_plane[y * w + x] as f32;
@@ -579,10 +735,9 @@ fn yuv_to_rgba_bt601(frame: &vp9dec::Frame) -> Vec<u8> {
             rgba[idx + 3] = 255;
         }
     }
-    rgba
 }
 
-fn yuv_to_rgba_bt601_hbd(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
+fn yuv_to_rgba_bt601_hbd_into(frame: &vp9dec::Frame, rgba: &mut Vec<u8>) -> Result<()> {
     let (y_plane, u_plane, v_plane) = match (&frame.y, &frame.u, &frame.v) {
         (vp9dec::PlaneData::U16(y), vp9dec::PlaneData::U16(u), vp9dec::PlaneData::U16(v)) => {
             (y.as_slice(), u.as_slice(), v.as_slice())
@@ -602,7 +757,7 @@ fn yuv_to_rgba_bt601_hbd(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
     let scale = (1u16 << (frame.bit_depth - 8)) as f32;
 
     // Frame/IVF に伝達関数やマスタリング情報が無いため、PQ/HLG を推測せず決定的な SDR スケーリングに留める。
-    let mut rgba = vec![0u8; w * h * 4];
+    rgba.resize(w * h * 4, 0);
     for y in 0..h {
         for x in 0..w {
             let y_val = y_plane[y * w + x] as f32 / scale;
@@ -626,7 +781,7 @@ fn yuv_to_rgba_bt601_hbd(frame: &vp9dec::Frame) -> Result<Vec<u8>> {
             rgba[idx + 3] = 255;
         }
     }
-    Ok(rgba)
+    Ok(())
 }
 
 fn clamp_u8(v: f32) -> u8 {
@@ -1133,5 +1288,173 @@ mod tests {
                 }
             }
         });
+    }
+
+    fn write_temp_video(tag: &str, ext: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "noiria_video_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("clip.{ext}"));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn open_video_file_mjpeg_avi_playback_rewind_and_seek() {
+        let (w, h) = (32u32, 24u32);
+        let frames: Vec<Vec<u8>> = [20u8, 120, 220]
+            .iter()
+            .map(|&s| make_frame(w, h, s))
+            .collect();
+        let avi = write_mjpeg_avi(w, h, 15, &frames);
+        let mut expected_src = open_video(avi.clone()).unwrap();
+        let mut expected = Vec::new();
+        while let Some(f) = expected_src.next_frame().unwrap() {
+            expected.push(f);
+        }
+        assert_eq!(expected.len(), 3);
+
+        let path = write_temp_video("avi_stream", "avi", &avi);
+        {
+            let mut video = open_video_file(&path).unwrap();
+            assert_eq!((video.width(), video.height()), (w, h));
+            assert!((video.fps() - 15.0).abs() < 0.1);
+
+            for (i, want) in expected.iter().enumerate() {
+                assert_eq!(video.next_frame().unwrap().as_ref(), Some(want), "frame {i}");
+            }
+            assert!(video.next_frame().unwrap().is_none());
+
+            video.rewind().unwrap();
+            assert_eq!(video.next_frame().unwrap().as_ref(), Some(&expected[0]));
+
+            video.seek_frame(2).unwrap();
+            assert_eq!(video.next_frame().unwrap().as_ref(), Some(&expected[2]));
+            assert!(video.next_frame().unwrap().is_none());
+
+            video.seek_frame(1).unwrap();
+            assert_eq!(video.next_frame().unwrap().as_ref(), Some(&expected[1]));
+
+            video.seek_frame(3).unwrap();
+            assert!(video.next_frame().unwrap().is_none());
+            assert!(video.seek_frame(4).is_err());
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn open_video_file_vp9_ivf_playback_rewind_and_seek() {
+        let fixtures: [(&str, &[u8]); 2] = [
+            (
+                "vp9_10bit",
+                include_bytes!("../../tests/fixtures/vp9_p2_10bit_yuv420_16x16_2f.ivf"),
+            ),
+            (
+                "vp9_12bit",
+                include_bytes!("../../tests/fixtures/vp9_p3_12bit_yuv444_16x16_2f.ivf"),
+            ),
+        ];
+        for (tag, bytes) in fixtures {
+            let mut mem = open_video(bytes.to_vec()).unwrap();
+            let mut expected = Vec::new();
+            while let Some(f) = mem.next_frame().unwrap() {
+                expected.push(f);
+            }
+            assert_eq!(expected.len(), 2, "{tag}");
+
+            let path = write_temp_video(tag, "ivf", bytes);
+            {
+                let mut video = open_video_file(&path).unwrap();
+                assert_eq!((video.width(), video.height()), (16, 16), "{tag}");
+
+                for (i, want) in expected.iter().enumerate() {
+                    assert_eq!(
+                        video.next_frame().unwrap().as_ref(),
+                        Some(want),
+                        "{tag} frame {i}"
+                    );
+                }
+                assert!(video.next_frame().unwrap().is_none(), "{tag} EOF");
+
+                video.rewind().unwrap();
+                assert_eq!(
+                    video.next_frame().unwrap().as_ref(),
+                    Some(&expected[0]),
+                    "{tag} rewind"
+                );
+
+                video.seek_frame(1).unwrap();
+                assert_eq!(
+                    video.next_frame().unwrap().as_ref(),
+                    Some(&expected[1]),
+                    "{tag} seek 1"
+                );
+                assert!(video.next_frame().unwrap().is_none(), "{tag} after seek 1");
+
+                video.seek_frame(2).unwrap();
+                assert!(video.next_frame().unwrap().is_none(), "{tag} seek EOF");
+                assert!(video.seek_frame(3).is_err(), "{tag} seek past EOF");
+            }
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn next_frame_into_matches_next_frame_and_reuses_buffer() {
+        let (w, h) = (32u32, 24u32);
+        let avi = write_mjpeg_avi(
+            w,
+            h,
+            12,
+            &[15u8, 128, 240]
+                .iter()
+                .map(|&s| make_frame(w, h, s))
+                .collect::<Vec<_>>(),
+        );
+        let ivf = include_bytes!("../../tests/fixtures/vp9_p2_10bit_yuv420_16x16_2f.ivf").to_vec();
+
+        let cases: [(&str, &str, Vec<u8>); 2] = [("avi_reuse", "avi", avi), ("ivf_reuse", "ivf", ivf)];
+        for (tag, ext, bytes) in cases {
+            let mut ref_src = open_video(bytes.clone()).unwrap();
+            let mut expected = Vec::new();
+            while let Some(f) = ref_src.next_frame().unwrap() {
+                expected.push(f);
+            }
+            assert!(expected.len() >= 2, "{tag}");
+
+            let path = write_temp_video(tag, ext, &bytes);
+            {
+                let mut src = open_video_file(&path).unwrap();
+                let mut buf = Vec::new();
+                assert!(src.next_frame_into(&mut buf).unwrap(), "{tag} frame 0");
+                assert_eq!(buf, expected[0], "{tag} frame 0 bytes");
+                let warm_ptr = buf.as_ptr();
+                let warm_cap = buf.capacity();
+                assert!(warm_cap >= expected[0].len());
+
+                for (i, want) in expected.iter().enumerate().skip(1) {
+                    assert!(src.next_frame_into(&mut buf).unwrap(), "{tag} frame {i}");
+                    assert_eq!(buf, *want, "{tag} frame {i} bytes");
+                    assert_eq!(buf.as_ptr(), warm_ptr, "{tag} frame {i} reallocated");
+                    assert_eq!(buf.capacity(), warm_cap, "{tag} frame {i} capacity changed");
+                }
+                assert!(!src.next_frame_into(&mut buf).unwrap(), "{tag} EOF");
+                assert_eq!(buf.as_ptr(), warm_ptr, "{tag} EOF reallocated");
+                assert_eq!(buf.capacity(), warm_cap, "{tag} EOF capacity changed");
+
+                src.rewind().unwrap();
+                assert!(src.next_frame_into(&mut buf).unwrap(), "{tag} after rewind");
+                assert_eq!(buf, expected[0], "{tag} after rewind bytes");
+                assert_eq!(buf.as_ptr(), warm_ptr, "{tag} rewind reallocated");
+                assert_eq!(buf.capacity(), warm_cap, "{tag} rewind capacity changed");
+            }
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
     }
 }

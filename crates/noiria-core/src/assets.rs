@@ -405,18 +405,27 @@ impl GameDir {
                 let path = self.resolve(rel)?;
                 crate::codec::video::open_video_file(&path)
             }
-            Backend::Pak { pak, .. } => {
-                let key = pak_key(rel)?;
-                let bytes = pak
-                    .read(&key)
+            Backend::Pak { .. } => {
+                let mut reader = self
+                    .open_reader(rel)
                     .with_context(|| format!("動画が読めません: {rel}"))?;
-                if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+                let mut head = [0u8; 12];
+                let mut n = 0;
+                while n < head.len() {
+                    let read = reader.read(&mut head[n..])?;
+                    if read == 0 {
+                        break;
+                    }
+                    n += read;
+                }
+                if n >= 12 && &head[4..8] == b"ftyp" {
                     bail!(
                         "pak 内から MP4 は再生できません（Media Foundation は実ファイルパス前提のため）。\
                          AVI または IVF を使用してください: {rel}"
                     );
                 }
-                crate::codec::video::open_video(bytes)
+                reader.seek(SeekFrom::Start(0))?;
+                crate::codec::video::open_video_reader(std::io::BufReader::new(reader))
             }
         }
     }

@@ -85,6 +85,17 @@ impl Pixmap {
         }
     }
 
+    /// 全画素が不透明 (alpha == 255) な RGBA8 バッファをコピー・乗算なしでそのまま包む。
+    pub fn from_rgba_opaque(width: u32, height: u32, data: Vec<u8>) -> Self {
+        assert_eq!(data.len(), (width as usize) * (height as usize) * 4);
+        debug_assert!(data.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
     /// 不透明色 (straight RGBA) で全面塗りつぶし。
     pub fn fill(&mut self, rgba: [u8; 4]) {
         let a = rgba[3] as u32;
@@ -435,6 +446,16 @@ mod tests {
         // 半透明赤 (255,0,0,128) → premul (128,0,0,128)
         let p = Pixmap::from_rgba_straight(1, 1, &[255, 0, 0, 128]);
         assert_eq!(&p.data, &[128, 0, 0, 128]);
+    }
+
+    #[test]
+    fn from_rgba_opaque_reuses_buffer_and_matches_straight() {
+        let raw = vec![10, 20, 30, 255, 200, 150, 100, 255];
+        let expected = Pixmap::from_rgba_straight(2, 1, &raw);
+        let ptr = raw.as_ptr();
+        let opaque = Pixmap::from_rgba_opaque(2, 1, raw);
+        assert_eq!(opaque, expected);
+        assert_eq!(opaque.data.as_ptr(), ptr);
     }
 
     #[test]

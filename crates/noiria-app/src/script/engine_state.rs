@@ -420,14 +420,47 @@ impl Drop for PlaybackStateGuard {
     }
 }
 
-fn next_video_pixmap(source: &mut dyn VideoSource) -> anyhow::Result<Option<Arc<Pixmap>>> {
-    let Some(rgba) = source.next_frame()? else {
+const MAX_RECYCLE_PIXMAPS: usize = 4;
+
+fn push_recycle(recycle: &mut Vec<Arc<Pixmap>>, pixmap: Arc<Pixmap>) {
+    if recycle.len() >= MAX_RECYCLE_PIXMAPS {
+        recycle.remove(0);
+    }
+    recycle.push(pixmap);
+}
+
+fn next_video_pixmap(
+    source: &mut dyn VideoSource,
+    recycle: &mut Vec<Arc<Pixmap>>,
+) -> anyhow::Result<Option<Arc<Pixmap>>> {
+    // Arc::get_mut は Scene や ComposeBufs のキャッシュが参照を手放した後にだけ Some を返すので、
+    // Arc::ptr_eq ベースの差分検出と衝突せずバッファを再利用できる。
+    let mut reusable = recycle
+        .iter_mut()
+        .position(|p| Arc::get_mut(p).is_some())
+        .map(|i| recycle.swap_remove(i));
+    if let Some(ref mut arc) = reusable {
+        if let Some(pm) = Arc::get_mut(arc) {
+            if !source.next_frame_into(&mut pm.data)? {
+                recycle.push(reusable.unwrap());
+                return Ok(None);
+            }
+            let (w, h) = (source.width(), source.height());
+            assert_eq!(pm.data.len(), (w as usize) * (h as usize) * 4);
+            debug_assert!(pm.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
+            pm.width = w;
+            pm.height = h;
+            return Ok(reusable);
+        }
+    }
+    let mut rgba = Vec::new();
+    if !source.next_frame_into(&mut rgba)? {
         return Ok(None);
-    };
-    Ok(Some(Arc::new(Pixmap::from_rgba_straight(
+    }
+    Ok(Some(Arc::new(Pixmap::from_rgba_opaque(
         source.width(),
         source.height(),
-        &rgba,
+        rgba,
     ))))
 }
 
@@ -486,6 +519,7 @@ fn playback_loop(
     let mut next_due = Instant::now();
     let mut index = initial_index;
     let mut pending_pixmap: Option<Arc<Pixmap>> = None;
+    let mut recycle: Vec<Arc<Pixmap>> = Vec::new();
     let segment_revision = {
         let control = control.lock_unpoisoned();
         control.segment_revision.clone()
@@ -503,7 +537,9 @@ fn playback_loop(
 
         let requested_seek = control.lock_unpoisoned().pending_seek.take();
         if let Some(target) = requested_seek {
-            pending_pixmap = None;
+            if let Some(pm) = pending_pixmap.take() {
+                push_recycle(&mut recycle, pm);
+            }
             pending_boundary_event = None;
             if let Err(e) = source.seek_frame(target) {
                 log::error!("動画フレーム {target} へのシークに失敗: {e:#}");
@@ -534,7 +570,7 @@ fn playback_loop(
         }
 
         if pending_pixmap.is_none() {
-            pending_pixmap = match next_video_pixmap(source.as_mut()) {
+            pending_pixmap = match next_video_pixmap(source.as_mut(), &mut recycle) {
                 Ok(Some(pixmap)) => Some(pixmap),
                 Ok(None) => {
                     let retry = {
@@ -642,7 +678,9 @@ fn playback_loop(
         };
 
         if discard_pending {
-            pending_pixmap = None;
+            if let Some(pm) = pending_pixmap.take() {
+                push_recycle(&mut recycle, pm);
+            }
             pending_boundary_event = None;
             continue;
         }
@@ -655,7 +693,9 @@ fn playback_loop(
             continue;
         }
 
-        pending_pixmap = None;
+        if let Some(pm) = pending_pixmap.take() {
+            push_recycle(&mut recycle, pm);
+        }
         pending_boundary_event = None;
         wake.send(UserEvent::Redraw);
 
@@ -2040,7 +2080,8 @@ impl EngineState {
                     prepared.id
                 ));
             }
-            let pixmap = next_video_pixmap(prepared.source.as_mut()).map_err(|e| e.to_string())?;
+            let pixmap = next_video_pixmap(prepared.source.as_mut(), &mut Vec::new())
+                .map_err(|e| e.to_string())?;
             prepared
                 .source
                 .seek_frame(prepared.initial_index)
@@ -4003,5 +4044,32 @@ mod tests {
         es.layer_set_props(id, "fore", LayerProps { x: Some(3), ..LayerProps::default() }).unwrap();
         assert!(!es.layer_moving());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn next_video_pixmap_reuses_unreferenced_buffer_and_protects_shared_frames() {
+        let mut src = noiria_core::codec::video::open_video(FIXTURE_CLIP_5FRAMES.to_vec()).unwrap();
+        let mut recycle: Vec<Arc<Pixmap>> = Vec::new();
+
+        let f0 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+        let f0_data_ptr = f0.data.as_ptr();
+        let f0_cap = f0.data.capacity();
+        let f0_snapshot = f0.data.clone();
+        let mut held_by_scene = f0.clone();
+        push_recycle(&mut recycle, f0);
+
+        let f1 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&held_by_scene, &f1));
+        assert_ne!(f1.data.as_ptr(), f0_data_ptr);
+        assert_eq!(held_by_scene.data, f0_snapshot);
+
+        held_by_scene = f1.clone();
+        push_recycle(&mut recycle, f1);
+
+        let f2 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+        assert_eq!(f2.data.as_ptr(), f0_data_ptr);
+        assert_eq!(f2.data.capacity(), f0_cap);
+        assert!(!Arc::ptr_eq(&held_by_scene, &f2));
+        assert_ne!(f2.data, f0_snapshot);
     }
 }
