@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe_ext: ".exe"
+            archive_ext: "zip"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe_ext: ""
+            archive_ext: "tar.gz"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve version and verify tag
+        id: meta
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::Failed to read workspace version from Cargo.toml"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/* ]] && [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version v${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Build noiria (dist)
+        run: cargo build --profile dist --no-default-features --features engine-tsint,dist -p noiria-app --locked
+      - name: Build noiria-tools (release)
+        run: cargo build --release -p noiria-tools --bin noiria-pack --bin noiria-export --locked
+      - name: Stage release files
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          EXE_EXT: ${{ matrix.exe_ext }}
+        run: |
+          stage="dist/noiria-${VERSION}-${TARGET}"
+          mkdir -p "$stage"
+          cp "target/dist/noiria${EXE_EXT}" "$stage/"
+          cp "target/release/noiria-pack${EXE_EXT}" "$stage/"
+          cp "target/release/noiria-export${EXE_EXT}" "$stage/"
+          cp README.md LICENSE "$stage/"
+      - name: Package tar.gz
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="noiria-${VERSION}-${TARGET}"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+      - name: Package zip
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $name = "noiria-$env:VERSION-$env:TARGET"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - name: Generate SHA-256 checksum
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          archive="noiria-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+          cd dist
+          sha256sum "$archive" | sed 's/ \*/  /' > "${archive}.sha256"
+          cat "${archive}.sha256"
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: noiria-${{ matrix.target }}
+          path: |
+            dist/noiria-${{ steps.meta.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+            dist/noiria-${{ steps.meta.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Merge checksums
+        shell: bash
+        run: |
+          LC_ALL=C sort release-assets/*.sha256 > release-assets/SHA256SUMS.txt
+          cat release-assets/SHA256SUMS.txt
+      - name: Create GitHub Release (skip if already exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists -- skipping."
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes
+          fi

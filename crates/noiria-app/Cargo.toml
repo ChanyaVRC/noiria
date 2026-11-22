@@ -36,9 +36,10 @@ deno_core = { version = "=0.407.0", optional = true }
 deno_ast = { version = "=0.53.2", features = ["transpiling"], optional = true }
 deno_error = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
-# 完全自作 TS インタプリタ（別リポジトリ、Noiria と同じ BuildSoft 配下に sibling で clone
-# されている前提）。V8/deno_core と並走で選べる第 2 のスクリプトエンジン (T5b)。
-tsint = { path = "../../../tsint", optional = true }
+# 完全自作 TS インタプリタ（独立リポジトリ ChanyaVRC/tsint）。
+# V8/deno_core と並走で選べる第 2 のスクリプトエンジン (T5b)。
+# ローカル sibling で上書きしたい場合は Cargo の `[patch."https://github.com/ChanyaVRC/tsint.git"]` を使う。
+tsint = { git = "https://github.com/ChanyaVRC/tsint.git", branch = "main", optional = true }
 
 # ウィンドウ/描画/入力は Win32 API 直叩き（winit/softbuffer は不使用）。
 # OS 境界 API（ウィンドウ/音声出力/動画デコードと同格の扱い）。

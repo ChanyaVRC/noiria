@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Install clippy
+        run: rustup component add clippy
+      - name: Clippy (noiria-core, noiria-tools)
+        run: cargo clippy -p noiria-core -p noiria-tools --all-targets -- -D warnings
+      - name: Clippy (noiria-app, engine-tsint + dist)
+        run: cargo clippy -p noiria-app --no-default-features --features engine-tsint,dist --all-targets -- -D warnings
+      - name: Clippy (noiria-app, engine-tsint + dev-log)
+        run: cargo clippy -p noiria-app --no-default-features --features engine-tsint,dev-log --all-targets -- -D warnings
+
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Test noiria-core
+        run: cargo test -p noiria-core
+      - name: Test noiria-tools
+        run: cargo test -p noiria-tools
+      - name: Test noiria-app (engine-tsint)
+        run: cargo test -p noiria-app --no-default-features --features engine-tsint
+
+  dist-build:
+    name: dist-build / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Build noiria (dist)
+        run: cargo build --profile dist --no-default-features --features engine-tsint,dist -p noiria-app
+      - name: Build noiria-tools (release)
+        run: cargo build --release -p noiria-tools --bin noiria-pack --bin noiria-export
+      - name: Smoke test noiria (--autotest)
+        shell: bash
+        run: |
+          ./target/dist/noiria games/sample --autotest 4 --autotest-fast --autotest-out ./autotest-out
+          ls -la ./autotest-out
+          test -n "$(find ./autotest-out -maxdepth 1 -name '*.png' -print -quit)"

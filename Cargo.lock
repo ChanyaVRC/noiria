@@ -2725,6 +2725,7 @@ dependencies = [
 [[package]]
 name = "tsint"
 version = "0.1.0"
+source = "git+https://github.com/ChanyaVRC/tsint.git?branch=main#2da2bd6047d9e8aaa6547ee00577c772b4bfeaf9"
 
 [[package]]
 name = "typenum"
@@ -2811,6 +2812,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vp9dec"
 version = "0.1.1"
+source = "git+https://github.com/ChanyaVRC/vp9dec.git?branch=main#0fcebd75077039366ad3df9088ca2091a9d91247"
 
 [[package]]
 name = "vsimd"
