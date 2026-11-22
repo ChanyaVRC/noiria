@@ -7,6 +7,7 @@
 //! V8 側は #[op2] な薄いラッパから、tsint 側はネイティブ関数から、それぞれ
 //! このメソッド群を呼ぶだけにして、挙動をふたつのエンジン間で一致させる。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,7 +39,8 @@ use crate::script::numconv::{
     de_opt_coord, de_opt_i32, de_opt_u32, de_opt_u8, de_time_ms, de_u32, to_u8,
 };
 use crate::script::ui_cache::{
-    load_image_checked, load_scaled_cached, load_thumb_cached, panel_key, Prefetcher, UiCaches,
+    load_image_cached, load_image_checked, load_scaled_cached, load_thumb_cached, panel_key,
+    Prefetcher, UiCaches,
 };
 
 /// エンジン非依存のエラー型。V8 側は `JsErrorBox::generic`、tsint 側は
@@ -925,9 +927,8 @@ impl EngineState {
         path: String,
     ) -> Result<(u32, u32), EngineError> {
         self.log_op(format!("layer_load_image {id} {page} {path}"));
-        let pixmap = load_image_checked(&self.game_dir, &path)?;
+        let pixmap = load_image_cached(&self.ui_cache, &self.game_dir, &path)?;
         let size = (pixmap.width, pixmap.height);
-        let pixmap = Arc::new(pixmap);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
             layer.image_path = Some(path);
@@ -949,22 +950,27 @@ impl EngineState {
             "layer_load_image_ex {id} {page} {path} clip={:?} flipH={} flipV={} gray={}",
             opts.clip, opts.flip_h, opts.flip_v, opts.grayscale
         ));
-        let mut pixmap = load_image_checked(&self.game_dir, &path)?;
-        if let Some(c) = opts.clip {
-            checked_dims(c.w, c.h)?;
-            pixmap = pixmap.extract_region(c.x, c.y, c.w, c.h);
-        }
-        if opts.flip_h {
-            pixmap = pixmap.flip_h();
-        }
-        if opts.flip_v {
-            pixmap = pixmap.flip_v();
-        }
-        if opts.grayscale {
-            pixmap = pixmap.grayscale();
-        }
+        let base = load_image_cached(&self.ui_cache, &self.game_dir, &path)?;
+        let pixmap = if opts.clip.is_none() && !opts.flip_h && !opts.flip_v && !opts.grayscale {
+            base
+        } else {
+            let mut cur: Cow<'_, Pixmap> = Cow::Borrowed(base.as_ref());
+            if let Some(c) = opts.clip {
+                checked_dims(c.w, c.h)?;
+                cur = Cow::Owned(cur.extract_region(c.x, c.y, c.w, c.h));
+            }
+            if opts.flip_h {
+                cur = Cow::Owned(cur.flip_h());
+            }
+            if opts.flip_v {
+                cur = Cow::Owned(cur.flip_v());
+            }
+            if opts.grayscale {
+                cur = Cow::Owned(cur.grayscale());
+            }
+            Arc::new(cur.into_owned())
+        };
         let size = (pixmap.width, pixmap.height);
-        let pixmap = Arc::new(pixmap);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
             layer.image_path = Some(path);
@@ -1358,13 +1364,13 @@ impl EngineState {
         self.log_op(format!(
             "layer_blit_image {id} {page} {path} dx={dx} dy={dy} clip={clip:?}"
         ));
-        let src = load_image_checked(&self.game_dir, path)?;
-        let region = match clip {
+        let src = load_image_cached(&self.ui_cache, &self.game_dir, path)?;
+        let region: Cow<'_, Pixmap> = match clip {
             Some(c) => {
                 checked_dims(c.w, c.h)?;
-                src.extract_region(c.x, c.y, c.w, c.h)
+                Cow::Owned(src.extract_region(c.x, c.y, c.w, c.h))
             }
-            None => src,
+            None => Cow::Borrowed(src.as_ref()),
         };
         self.with_layer(page, id, |layer| {
             let pixmap = layer
@@ -1402,6 +1408,22 @@ impl EngineState {
         self.texts.styles.insert(id, style);
     }
 
+    fn ensure_inline_images(&mut self, segments: &[TextSegment]) {
+        // [graph]（インライン画像, W3）: text.rs は assets への依存を増やさない設計にしたため
+        // （`docs/implementation-notes.md` 2026-07-11 W3 参照）、実ファイル I/O はここで行い、
+        // ロード済みの Pixmap を TextEngine の画像キャッシュへ渡す。
+        for seg in segments {
+            if let Some(path) = &seg.inline_image {
+                if !self.texts.engine.has_image(path) {
+                    match load_image_checked(&self.game_dir, path) {
+                        Ok(pixmap) => self.texts.engine.cache_image(path.clone(), pixmap),
+                        Err(e) => log::warn!("[graph] 画像の読み込みに失敗しました: {path}: {e:#}"),
+                    }
+                }
+            }
+        }
+    }
+
     pub fn text_print(
         &mut self,
         id: u32,
@@ -1412,21 +1434,8 @@ impl EngineState {
         self.log_op(format!(
             "text_print {id} append={append} cps={cps} segs={segments:?}"
         ));
-        // [graph]（インライン画像, W3）: text.rs は assets への依存を増やさない設計にしたため
-        // （`docs/implementation-notes.md` 2026-07-11 W3 参照）、実ファイル I/O はここで行い、
-        // ロード済みの Pixmap を TextEngine の画像キャッシュへ渡す。
-        for seg in &segments {
-            if let Some(path) = &seg.inline_image {
-                if !self.texts.engine.has_image(path) {
-                    match load_image_checked(&self.game_dir, path) {
-                        Ok(pixmap) => self.texts.engine.cache_image(path.clone(), pixmap),
-                        Err(e) => log::warn!("[graph] 画像の読み込みに失敗しました: {path}: {e:#}"),
-                    }
-                }
-            }
-        }
 
-        let (raster, from_glyph) = {
+        let (style, all, from_glyph) = {
             let texts = &mut self.texts;
             let style = texts.styles.entry(id).or_default().clone();
             let entry = texts.segments.entry(id).or_default();
@@ -1438,13 +1447,12 @@ impl EngineState {
                 entry.clear();
                 0
             };
-            let entry = texts.segments.entry(id).or_default();
             entry.extend(segments);
-            let all = entry.clone();
-            let raster = texts.engine.raster_segments(&all, &style);
-            texts.glyph_counts.insert(id, raster.glyphs.len());
-            (raster, from_glyph)
+            (style, entry.clone(), from_glyph)
         };
+        self.ensure_inline_images(&all);
+        let raster = self.texts.engine.raster_segments(&all, &style);
+        self.texts.glyph_counts.insert(id, raster.glyphs.len());
 
         let total = raster.glyphs.len();
         let added = total.saturating_sub(from_glyph);
@@ -1469,14 +1477,12 @@ impl EngineState {
 
     pub fn text_reflow(&mut self, id: u32) -> Result<(), EngineError> {
         self.log_op(format!("text_reflow {id}"));
-        let raster = {
-            let texts = &mut self.texts;
-            let style = texts.styles.entry(id).or_default().clone();
-            let segments = texts.segments.entry(id).or_default().clone();
-            let raster = texts.engine.raster_segments(&segments, &style);
-            texts.glyph_counts.insert(id, raster.glyphs.len());
-            Arc::new(raster)
-        };
+        let style = self.texts.styles.entry(id).or_default().clone();
+        let segments = self.texts.segments.entry(id).or_default().clone();
+        self.ensure_inline_images(&segments);
+        let raster = self.texts.engine.raster_segments(&segments, &style);
+        self.texts.glyph_counts.insert(id, raster.glyphs.len());
+        let raster = Arc::new(raster);
         self.with_layer("fore", id, move |layer| match &mut layer.text {
             Some(text) => text.raster = raster,
             None => {
@@ -4071,5 +4077,100 @@ mod tests {
         assert_eq!(f2.data.capacity(), f0_cap);
         assert!(!Arc::ptr_eq(&held_by_scene, &f2));
         assert_ne!(f2.data, f0_snapshot);
+    }
+
+    #[test]
+    fn layer_load_image_caches_and_shares_arc_pixmap() {
+        let dir = temp_game_dir("image-cache-layer-load-test");
+        let mut img = Pixmap::new(2, 1);
+        img.data[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        img.data[4..8].copy_from_slice(&[0, 0, 255, 255]);
+        save_png(&img, &dir.join("bg.png")).unwrap();
+
+        let es = make_engine_state(&dir);
+        let id1 = es.layer_new("image").unwrap();
+        let id2 = es.layer_new("image").unwrap();
+        let id3 = es.layer_new("image").unwrap();
+        let id4 = es.layer_new("image").unwrap();
+        let id5 = es.layer_new("image").unwrap();
+
+        assert_eq!(es.layer_load_image(id1, "fore", "bg.png".into()).unwrap(), (2, 1));
+        std::fs::remove_file(dir.join("bg.png")).unwrap();
+
+        assert_eq!(es.layer_load_image(id2, "fore", "bg.png".into()).unwrap(), (2, 1));
+        assert_eq!(
+            es.layer_load_image_ex(id3, "fore", "bg.png".into(), ImageLoadOpts::default())
+                .unwrap(),
+            (2, 1)
+        );
+        assert_eq!(
+            es.layer_load_image_ex(
+                id4,
+                "fore",
+                "bg.png".into(),
+                ImageLoadOpts {
+                    flip_h: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            (2, 1)
+        );
+        es.layer_blit_image(id5, "fore", "bg.png", 0, 0, None).unwrap();
+
+        let scene = es.scene.lock().unwrap();
+        let p1 = scene.layer(Page::Fore, id1).unwrap().pixmap.as_ref().unwrap();
+        let p2 = scene.layer(Page::Fore, id2).unwrap().pixmap.as_ref().unwrap();
+        let p3 = scene.layer(Page::Fore, id3).unwrap().pixmap.as_ref().unwrap();
+        let p4 = scene.layer(Page::Fore, id4).unwrap().pixmap.as_ref().unwrap();
+        let p5 = scene.layer(Page::Fore, id5).unwrap().pixmap.as_ref().unwrap();
+
+        assert!(Arc::ptr_eq(p1, p2));
+        assert!(Arc::ptr_eq(p1, p3));
+        assert!(!Arc::ptr_eq(p1, p4));
+        assert_eq!(&p1.data[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&p4.data[0..4], &[0, 0, 255, 255]);
+        assert_eq!(&p4.data[4..8], &[255, 0, 0, 255]);
+        assert_eq!(p5.data, p1.data);
+        drop(scene);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn layer_load_image_evicts_lru_when_images_cache_exceeds_capacity() {
+        let dir = temp_game_dir("image-cache-evict-layer-test");
+        for name in ["a.png", "b.png", "c.png"] {
+            let mut p = Pixmap::new(8, 8);
+            p.fill([10, 20, 30, 255]);
+            save_png(&p, &dir.join(name)).unwrap();
+        }
+
+        let es = make_engine_state(&dir);
+        es.ui_cache.lock().unwrap().images = crate::script::ui_cache::PixmapLru::new(2 * 8 * 8 * 4);
+        let id = es.layer_new("image").unwrap();
+
+        es.layer_load_image(id, "fore", "a.png".into()).unwrap();
+        let a_first = es
+            .scene
+            .lock()
+            .unwrap()
+            .layer(Page::Fore, id)
+            .unwrap()
+            .pixmap
+            .clone()
+            .unwrap();
+        es.layer_load_image(id, "fore", "b.png".into()).unwrap();
+        es.layer_load_image(id, "fore", "a.png".into()).unwrap();
+        es.layer_load_image(id, "fore", "c.png".into()).unwrap();
+
+        let mut cache = es.ui_cache.lock().unwrap();
+        assert_eq!(cache.images.len(), 2);
+        assert_eq!(cache.images.bytes(), 2 * 8 * 8 * 4);
+        assert!(cache.images.get("b.png").is_none());
+        let a_cached = cache.images.get("a.png").unwrap();
+        assert!(Arc::ptr_eq(&a_first, &a_cached));
+        assert!(cache.images.get("c.png").is_some());
+        drop(cache);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

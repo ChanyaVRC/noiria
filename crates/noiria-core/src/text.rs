@@ -35,6 +35,7 @@
 //! 切り出してあり、実フォントのメトリクスに依存しないユニットテストで検証できる。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -218,6 +219,85 @@ const FALLBACK_CHAIN: [&str; 5] = [
 /// せいぜい数十〜百数十グリフなので余裕を持たせる。
 const GLYPH_CACHE_CAPACITY: usize = 1024;
 
+/// インライン画像キャッシュの総バイト数上限（16 MiB）。
+const IMAGE_CACHE_MAX_BYTES: usize = 16 << 20;
+
+/// 総バイト数で上限を持つインライン画像 LRU。`has_image(&self)` の公開 API を維持しつつ
+/// アクセス時刻を更新するため、時刻だけ `AtomicU64` にしている（`TextEngine` の `Sync` も保つ）。
+struct ImageCache {
+    map: HashMap<String, (Pixmap, AtomicU64)>,
+    bytes: usize,
+    cap_bytes: usize,
+    tick: AtomicU64,
+}
+
+impl ImageCache {
+    fn new(cap_bytes: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            bytes: 0,
+            cap_bytes,
+            tick: AtomicU64::new(0),
+        }
+    }
+
+    fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn contains_key(&self, path: &str) -> bool {
+        if let Some((_, t)) = self.map.get(path) {
+            t.store(self.next_tick(), Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get(&self, path: &str) -> Option<&Pixmap> {
+        self.map.get(path).map(|(p, t)| {
+            t.store(self.next_tick(), Ordering::Relaxed);
+            p
+        })
+    }
+
+    fn insert(&mut self, path: String, pixmap: Pixmap) {
+        let sz = pixmap.data.len();
+        if let Some((old, _)) = self.map.remove(&path) {
+            self.bytes -= old.data.len();
+        }
+        if sz > self.cap_bytes {
+            return;
+        }
+        let tick = self.next_tick();
+        self.map.insert(path, (pixmap, AtomicU64::new(tick)));
+        self.bytes += sz;
+        while self.bytes > self.cap_bytes {
+            let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| t.load(Ordering::Relaxed))
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((p, _)) = self.map.remove(&oldest) {
+                self.bytes -= p.data.len();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 pub struct TextEngine {
     registry: &'static registry::FontRegistry,
     /// ゲームローカルフォント（`fonts/*.ttf|ttc`、W1）。既定は空。`load_game_fonts` で
@@ -236,7 +316,7 @@ pub struct TextEngine {
     /// `docs/implementation-notes.md` 2026-07-11 W3 参照）ため、実際のファイル I/O
     /// （`GameDir::load_image`）は呼び出し側（`engine_state::EngineState::text_print`）が
     /// 行い、ロード済みの `Pixmap` をこのキャッシュへ渡すだけにする。
-    image_cache: HashMap<String, Pixmap>,
+    image_cache: ImageCache,
 }
 
 impl Default for TextEngine {
@@ -254,7 +334,7 @@ impl TextEngine {
             fonts: HashMap::new(),
             glyph_fallback_cache: HashMap::new(),
             glyph_missing: HashSet::new(),
-            image_cache: HashMap::new(),
+            image_cache: ImageCache::new(IMAGE_CACHE_MAX_BYTES),
         }
     }
 
@@ -2106,5 +2186,46 @@ mod tests {
         assert!(e.fonts.len() <= 2);
         assert_eq!(first.glyphs.len(), second.glyphs.len());
         assert!(t.elapsed().as_millis() < 500, "2 回目の描画が遅い: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn image_cache_evicts_lru_and_updates_recency_on_has_image_and_render() {
+        let mut e = engine();
+        let one = 8 * 8 * 4;
+        e.image_cache = ImageCache::new(2 * one);
+
+        e.cache_image("a.png".into(), tiny_image(8, 8));
+        e.cache_image("b.png".into(), tiny_image(8, 8));
+        assert_eq!(e.image_cache.len(), 2);
+        assert_eq!(e.image_cache.bytes(), 2 * one);
+
+        assert!(e.has_image("a.png"));
+        e.cache_image("c.png".into(), tiny_image(8, 8));
+        assert_eq!(e.image_cache.len(), 2);
+        assert_eq!(e.image_cache.bytes(), 2 * one);
+        assert!(!e.has_image("b.png"));
+        assert!(e.has_image("a.png"));
+        assert!(e.has_image("c.png"));
+
+        let r = e.raster_segments(
+            &[TextSegment {
+                text: "".into(),
+                inline_image: Some("a.png".into()),
+                ..Default::default()
+            }],
+            &TextStyle::default(),
+        );
+        assert_eq!(r.glyphs.len(), 1);
+        e.cache_image("d.png".into(), tiny_image(8, 8));
+        assert_eq!(e.image_cache.len(), 2);
+        assert_eq!(e.image_cache.bytes(), 2 * one);
+        assert!(!e.has_image("c.png"));
+        assert!(e.has_image("a.png"));
+        assert!(e.has_image("d.png"));
+
+        e.cache_image("a.png".into(), tiny_image(32, 32));
+        assert!(!e.has_image("a.png"));
+        assert_eq!(e.image_cache.len(), 1);
+        assert_eq!(e.image_cache.bytes(), one);
     }
 }

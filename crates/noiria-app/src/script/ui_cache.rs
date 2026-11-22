@@ -1,11 +1,13 @@
-//! モダン UI の描画結果キャッシュ（パネル・サムネイル・縮小画像）。メニューを開くたびに同じ
-//! パネルを塗り直し同じ PNG を復号し直さないためのもの。値は `Arc<Pixmap>` なので、ヒットしたレイヤは
-//! 画素を複製せず共有する（レイヤ側も `Arc<Pixmap>` を持つ）。
+//! デコード済み画像・UI 描画結果のキャッシュ（通常画像・パネル・サムネイル・縮小画像）。
+//! 同じ背景・立ち絵・パネルを毎回ディスク読込・PNG 復号・再描画しないためのもの。値は
+//! `Arc<Pixmap>` なので、ヒットしたレイヤは画素を複製せず共有する（レイヤ側も `Arc<Pixmap>` を持つ）。
 //!
-//! 無効化: パネルは「仕様の数値列そのもの」が鍵なので古くならない。サムネイルは鍵にファイルの
+//! 無効化: 通常画像・縮小画像はゲーム資産が実行中に変わらない前提でパス等を鍵にする。
+//! パネルは「仕様の数値列そのもの」が鍵なので古くならない。サムネイルは鍵にファイルの
 //! 更新時刻と長さを含め、`thumb_save` / `save_delete` では明示的にスロットごと捨てる（同一
 //! タイムスタンプ内の上書きでも古い絵を出さない）。
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,7 +51,11 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         }
     }
 
-    pub fn get(&mut self, k: &K) -> Option<Arc<Pixmap>> {
+    pub fn get<Q>(&mut self, k: &Q) -> Option<Arc<Pixmap>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         self.tick += 1;
         let tick = self.tick;
         self.map.get_mut(k).map(|(p, t)| {
@@ -60,13 +66,14 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
 
     pub fn insert(&mut self, k: K, v: Arc<Pixmap>) {
         let sz = size_of(&v);
+        if let Some((old, _)) = self.map.remove(&k) {
+            self.bytes -= size_of(&old);
+        }
         if sz > self.cap_bytes {
             return;
         }
         self.tick += 1;
-        if let Some((old, _)) = self.map.insert(k, (v, self.tick)) {
-            self.bytes -= size_of(&old);
-        }
+        self.map.insert(k, (v, self.tick));
         self.bytes += sz;
         while self.bytes > self.cap_bytes {
             let Some(oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone())
@@ -91,6 +98,11 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    #[cfg(test)]
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -119,10 +131,13 @@ pub struct ScaledKey {
     pub h: u32,
 }
 
+pub const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
+
 pub struct UiCaches {
     pub panels: PixmapLru<PanelKey>,
     pub thumbs: PixmapLru<ThumbKey>,
     pub scaled: PixmapLru<ScaledKey>,
+    pub images: PixmapLru<String>,
 }
 
 impl UiCaches {
@@ -131,6 +146,7 @@ impl UiCaches {
             panels: PixmapLru::new(64 << 20),
             thumbs: PixmapLru::new(16 << 20),
             scaled: PixmapLru::new(24 << 20),
+            images: PixmapLru::new(IMAGE_CACHE_MAX_BYTES),
         }
     }
 
@@ -191,6 +207,23 @@ pub fn load_thumb_cached(
     if let Some(k) = key {
         cache.lock_unpoisoned().thumbs.insert(k, pixmap.clone());
     }
+    Ok(pixmap)
+}
+
+/// ゲーム資産の画像をデコードして返す（キャッシュにあれば `Arc<Pixmap>` を共有）。
+pub fn load_image_cached(
+    cache: &Mutex<UiCaches>,
+    game_dir: &GameDir,
+    path: &str,
+) -> Result<Arc<Pixmap>, String> {
+    if let Some(p) = cache.lock_unpoisoned().images.get(path) {
+        return Ok(p);
+    }
+    let pixmap = Arc::new(load_image_checked(game_dir, path)?);
+    cache
+        .lock_unpoisoned()
+        .images
+        .insert(path.to_string(), pixmap.clone());
     Ok(pixmap)
 }
 
@@ -485,5 +518,42 @@ mod tests {
     fn panel_key_distinguishes_specs() {
         assert_eq!(panel_key(&[1.0, 2.0]), panel_key(&[1.0, 2.0]));
         assert_ne!(panel_key(&[1.0, 2.0]), panel_key(&[1.0, 2.5]));
+    }
+
+    #[test]
+    fn load_image_cached_hits_cache_and_shares_arc() {
+        let (game_dir, dir) = prefetch_game("image-cache-hit", 1);
+        let cache = Mutex::new(UiCaches::new());
+
+        let first = load_image_cached(&cache, &game_dir, "img/0.png").unwrap();
+        std::fs::remove_file(dir.join("img/0.png")).unwrap();
+        let second = load_image_cached(&cache, &game_dir, "img/0.png").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.lock_unpoisoned().images.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn images_cache_evicts_least_recently_used_over_byte_cap() {
+        let (game_dir, dir) = prefetch_game("image-cache-evict", 3);
+        let mut ui = UiCaches::new();
+        ui.images = PixmapLru::new(2 * 8 * 8 * 4);
+        let cache = Mutex::new(ui);
+
+        let a = load_image_cached(&cache, &game_dir, "img/0.png").unwrap();
+        let _b = load_image_cached(&cache, &game_dir, "img/1.png").unwrap();
+        let a2 = load_image_cached(&cache, &game_dir, "img/0.png").unwrap();
+        assert!(Arc::ptr_eq(&a, &a2));
+
+        let _c = load_image_cached(&cache, &game_dir, "img/2.png").unwrap();
+        let mut guard = cache.lock_unpoisoned();
+        assert_eq!(guard.images.len(), 2);
+        assert_eq!(guard.images.bytes(), 2 * 8 * 8 * 4);
+        assert!(guard.images.get("img/1.png").is_none());
+        assert!(guard.images.get("img/0.png").is_some());
+        assert!(guard.images.get("img/2.png").is_some());
+        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
