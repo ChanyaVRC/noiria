@@ -244,10 +244,10 @@ export class ModernSystemMenu {
       { tab: "settings", label: "CONFIG" },
     ];
     const fs = sc(17, s);
-    const gap = sc(38, s);
-    const closeW = estimateWidth("CLOSE  ×", fs) + sc(8, s);
-    const widths = tabs.map((t) => estimateWidth(t.label, fs) + sc(6, s));
-    let total = closeW + sc(54, s);
+    const gap = sc(30, s);
+    const closeW = Math.ceil(estimateWidth("CLOSE  ×", fs) * 1.32) + sc(14, s);
+    const widths = tabs.map((t) => Math.ceil(estimateWidth(t.label, fs) * 1.32) + sc(10, s));
+    let total = closeW + sc(38, s);
     widths.forEach((w) => {
       total += w + gap;
     });
@@ -274,11 +274,11 @@ export class ModernSystemMenu {
       }),
     );
     // 区切りの縦線 + 閉じる
-    const sepX = x + sc(8, s);
+    const sepX = x + sc(4, s);
     const sep = this.chrome.add(
       new MBox({ x: sepX, y: this.oy + sc(62, s), w: Math.max(1, sc(1, s)), h: sc(24, s) }, Z0 + 1, { panel: { top: MC.lineStrong }, visible: false, opacity: 0 }),
     );
-    this.closeRect = { x: sepX + sc(28, s), y: navY, w: closeW, h: navH };
+    this.closeRect = { x: sepX + sc(24, s), y: navY, w: closeW, h: navH };
     this.closeBox = this.chrome.add(
       new MBox(this.closeRect, Z0 + 1, { fontSize: fs, lineHeight: 1.3, visible: false, opacity: 0 }),
     );
@@ -1267,7 +1267,7 @@ export class ModernBacklog {
       veil.show(true);
       veil.go(0, 0, 255, D_OPEN, EASE_OUT);
       addHeading(this.g, 303, logX, sc(40, s), "LOG", "履歴", D_OPEN, s);
-      const infoW = sc(560, s);
+      const infoW = sc(780, s);
       const info = this.g.add(
         new MBox({ x: sw - logX - infoW, y: sc(62, s), w: infoW, h: sc(30, s) }, 303, { fontSize: sc(14, s), lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
       );

@@ -229,7 +229,7 @@ export class TitleScreen {
           }),
         );
         const line = this.g.add(
-          new MBox({ x: rect.x, y: rect.y + sc(46, s), w: estimateWidth(def.label, itemFs) + sc(14, s), h: sc(2, s) }, Z_TITLE + 3, {
+          new MBox({ x: rect.x, y: rect.y + sc(46, s), w: Math.ceil(estimateWidth(def.label, itemFs) * 1.24) + sc(14, s), h: sc(2, s) }, Z_TITLE + 3, {
             panel: { top: MC.accent, radius: 1 * s },
             crop: 0,
             visible: false,

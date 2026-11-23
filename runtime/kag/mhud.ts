@@ -241,7 +241,7 @@ export class ModernSystemBar {
     const lineH = Math.max(1, sc(1, s));
     this.right = right - sc(32, s);
     this.bottom = windowTop + sc(BAND_H, s) - sc(24, s);
-    const widths = this.items.map((it) => estimateWidth(it.label, sysFont) + sc(2, s));
+    const widths = this.items.map((it) => Math.ceil(estimateWidth(it.label, sysFont) * 1.12) + sc(4, s));
     let total = 0;
     widths.forEach((w) => {
       total += w;
@@ -606,7 +606,7 @@ export class ModernModeBadge {
     if (label === "") return;
     const s = this.s;
     const fs = sc(14, s);
-    const w = estimateWidth(label, fs) + sc(52, s);
+    const w = Math.ceil(estimateWidth(label, fs) * 1.25) + sc(56, s);
     const h = sc(32, s);
     const x = this.screenW - sc(48, s) - w;
     const y = sc(26, s);
