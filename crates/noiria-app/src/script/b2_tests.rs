@@ -491,6 +491,7 @@ const BAR_OPT: Setup = Setup {
     sys_json: None,
     slots: &[],
     prelude: "",
+    screen_size: None,
 };
 
 /// 既定（systemButtons 未指定）ではバーのレイヤを作らない。有効にすると 8 個のボタンが出る。

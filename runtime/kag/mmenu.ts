@@ -22,6 +22,10 @@ import {
   MImage,
   MGroup,
   MC,
+  BASE_W,
+  BASE_H,
+  uiScale,
+  sc,
   D_FAST,
   D_NORM,
   D_SLOW,
@@ -42,10 +46,8 @@ import {
 } from "noiria:kag/mui";
 import { modernConfirm } from "noiria:kag/mhud";
 
-// ---------- レイアウト（1280x720 の設計座標。画面が違えば中央寄せ） ----------
+// ---------- レイアウト（1280x720 の設計座標を画面サイズへ比例拡大、異比率は中央寄せ） ----------
 
-const DESIGN_W = 1280;
-const DESIGN_H = 720;
 const Z0 = 311;
 
 const GRID_X = 72;
@@ -82,8 +84,9 @@ export function fitExcerpt(text: string, size: number, maxW: number): string {
 }
 
 /** セーブ一覧の絵を別スレッドで先に復号しておく（開くたびに待たない）。 */
-export function prefetchSlotThumbs(): void {
-  api.sys.prefetchSaveThumbs(THUMB_W, THUMB_H);
+export function prefetchSlotThumbs(screenW: number = BASE_W, screenH: number = BASE_H): void {
+  const s = uiScale(screenW, screenH);
+  api.sys.prefetchSaveThumbs(sc(THUMB_W, s), sc(THUMB_H, s));
 }
 
 interface Hot {
@@ -144,6 +147,7 @@ export class ModernSystemMenu {
   /** セーブ一覧を現し終えたか（それまでは下線などを不透明度 0 で置く）。 */
   private slotsLive = false;
   private tab: MenuTab = "save";
+  private s = 1;
   private ox = 0;
   private oy = 0;
   private hots: Hot[] = [];
@@ -172,8 +176,9 @@ export class ModernSystemMenu {
   }
 
   async run(initial: MenuTab): Promise<void> {
-    this.ox = Math.floor((this.host.screenW - DESIGN_W) / 2);
-    this.oy = Math.floor((this.host.screenH - DESIGN_H) / 2);
+    this.s = uiScale(this.host.screenW, this.host.screenH);
+    this.ox = Math.floor((this.host.screenW - sc(BASE_W, this.s)) / 2);
+    this.oy = Math.floor((this.host.screenH - sc(BASE_H, this.s)) / 2);
     this.events = new UiEvents();
     try {
       this.buildChrome();
@@ -195,7 +200,7 @@ export class ModernSystemMenu {
   }
 
   private r(x: number, y: number, w: number, h: number): Rect {
-    return { x: this.ox + x, y: this.oy + y, w, h };
+    return { x: this.ox + sc(x, this.s), y: this.oy + sc(y, this.s), w: sc(w, this.s), h: sc(h, this.s) };
   }
 
   // ---------- データ ----------
@@ -228,6 +233,7 @@ export class ModernSystemMenu {
   private buildChrome(): void {
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = this.s;
     const veil = this.chrome.add(makeVeil(sw, sh, 310, 250, 253));
     veil.show(true);
     veil.go(0, 0, 255, D_OPEN, EASE_OUT);
@@ -237,73 +243,81 @@ export class ModernSystemMenu {
       { tab: "load", label: "LOAD" },
       { tab: "settings", label: "CONFIG" },
     ];
-    const FS = 17;
-    const gap = 38;
-    const closeW = estimateWidth("CLOSE  ×", FS) + 8;
-    const widths = tabs.map((t) => estimateWidth(t.label, FS) + 6);
-    let total = closeW + 54;
+    const fs = sc(17, s);
+    const gap = sc(38, s);
+    const closeW = estimateWidth("CLOSE  ×", fs) + sc(8, s);
+    const widths = tabs.map((t) => estimateWidth(t.label, fs) + sc(6, s));
+    let total = closeW + sc(54, s);
     widths.forEach((w) => {
       total += w + gap;
     });
-    let x = 1208 - total;
+    let x = this.ox + sc(1208, s) - total;
+    const navY = this.oy + sc(60, s);
+    const navH = sc(28, s);
+    const padX = sc(12, s);
+    const padY = sc(10, s);
     this.navBoxes = [];
     this.navRects = [];
     tabs.forEach((t, i) => {
-      const rect = this.r(x, 60, widths[i], 28);
-      const b = this.chrome.add(new MBox(rect, Z0 + 1, { fontSize: FS, lineHeight: 1.3, visible: false, opacity: 0 }));
+      const rect = { x, y: navY, w: widths[i], h: navH };
+      const b = this.chrome.add(new MBox(rect, Z0 + 1, { fontSize: fs, lineHeight: 1.3, visible: false, opacity: 0 }));
       this.navBoxes.push(b);
       this.navRects.push(rect);
-      this.hots.push({ key: `tab:${t.tab}`, rect: { x: rect.x - 12, y: rect.y - 10, w: rect.w + 24, h: rect.h + 22 } });
+      this.hots.push({ key: `tab:${t.tab}`, rect: { x: rect.x - padX, y: rect.y - padY, w: rect.w + padX * 2, h: rect.h + sc(22, s) } });
       x += widths[i] + gap;
     });
     this.navLine = this.chrome.add(
-      new MBox({ x: this.navRects[0].x, y: this.navRects[0].y + 30, w: this.navRects[0].w, h: 2 }, Z0 + 1, {
-        panel: { top: MC.accent, radius: 1 },
+      new MBox({ x: this.navRects[0].x, y: this.navRects[0].y + sc(30, s), w: this.navRects[0].w, h: sc(2, s) }, Z0 + 1, {
+        panel: { top: MC.accent, radius: 1 * s },
         visible: false,
         opacity: 0,
       }),
     );
     // 区切りの縦線 + 閉じる
-    const sepX = x + 8;
+    const sepX = x + sc(8, s);
     const sep = this.chrome.add(
-      new MBox(this.r(sepX, 62, 1, 24), Z0 + 1, { panel: { top: MC.lineStrong }, visible: false, opacity: 0 }),
+      new MBox({ x: sepX, y: this.oy + sc(62, s), w: Math.max(1, sc(1, s)), h: sc(24, s) }, Z0 + 1, { panel: { top: MC.lineStrong }, visible: false, opacity: 0 }),
     );
-    this.closeRect = this.r(sepX + 28, 60, closeW, 28);
+    this.closeRect = { x: sepX + sc(28, s), y: navY, w: closeW, h: navH };
     this.closeBox = this.chrome.add(
-      new MBox(this.closeRect, Z0 + 1, { fontSize: FS, lineHeight: 1.3, visible: false, opacity: 0 }),
+      new MBox(this.closeRect, Z0 + 1, { fontSize: fs, lineHeight: 1.3, visible: false, opacity: 0 }),
     );
     this.hots.push({
       key: "close",
-      rect: { x: this.closeRect.x - 12, y: this.closeRect.y - 10, w: this.closeRect.w + 24, h: this.closeRect.h + 22 },
+      rect: { x: this.closeRect.x - padX, y: this.closeRect.y - padY, w: this.closeRect.w + padX * 2, h: this.closeRect.h + sc(22, s) },
     });
-    [sep, this.closeBox].forEach((b) => b.appear(0, -8, D_OPEN));
-    this.navBoxes.forEach((b) => b.appear(0, -8, D_OPEN));
+    const slide = -sc(8, s);
+    [sep, this.closeBox].forEach((b) => b.appear(0, slide, D_OPEN));
+    this.navBoxes.forEach((b) => b.appear(0, slide, D_OPEN));
     this.repaintNav();
   }
 
   private repaintNav(): void {
+    const s = this.s;
+    const fs = sc(17, s);
     const labels = ["SAVE", "LOAD", "CONFIG"];
     const tabs: MenuTab[] = ["save", "load", "settings"];
     this.navBoxes.forEach((b, i) => {
       const active = tabs[i] === this.tab;
       const hot = this.hoverKey === `tab:${tabs[i]}`;
-      b.setText([seg(labels[i], active ? MC.accent : hot ? MC.text : MC.textSub, 17, true)]);
+      b.setText([seg(labels[i], active ? MC.accent : hot ? MC.text : MC.textSub, fs, true)]);
     });
     if (this.closeBox !== null) {
       const hot = this.hoverKey === "close";
-      this.closeBox.setText([seg("CLOSE  ×", hot ? MC.text : MC.textSub, 17, true)]);
+      this.closeBox.setText([seg("CLOSE  ×", hot ? MC.text : MC.textSub, fs, true)]);
     }
     const idx = tabs.indexOf(this.tab);
     if (this.navLine !== null && idx >= 0) {
       const nr = this.navRects[idx];
-      this.navLine.resizePanel(nr.w, 2);
-      this.navLine.go(nr.x, nr.y + 30, 255, D_FAST, EASE_OUT);
+      this.navLine.resizePanel(nr.w, sc(2, s));
+      this.navLine.go(nr.x, nr.y + sc(30, s), 255, D_FAST, EASE_OUT);
     }
   }
 
   private async closeAnim(): Promise<void> {
-    this.content.vanishAll(0, 6, D_CLOSE);
-    this.fixed.vanishAll(0, 6, D_CLOSE);
+    const dy = sc(6, this.s);
+    this.content.vanishAll(0, dy, D_CLOSE);
+    this.fixed.vanishAll(0, dy, D_CLOSE);
     this.chrome.vanishAll(0, 0, D_CLOSE);
     await sleep(D_CLOSE + 10);
   }
@@ -325,11 +339,12 @@ export class ModernSystemMenu {
     this.rows = [];
     this.rowViews = [];
     this.repaintNav();
+    const s = this.s;
     if (tab === "settings") {
-      addHeading(this.fixed, Z0, this.ox + 72, this.oy + 40, "CONFIG", "設定", this.revealMs);
+      addHeading(this.fixed, Z0, this.ox + sc(72, s), this.oy + sc(40, s), "CONFIG", "設定", this.revealMs, s);
       this.buildSettings();
     } else {
-      addHeading(this.fixed, Z0, this.ox + 72, this.oy + 40, tab === "save" ? "SAVE" : "LOAD", tab === "save" ? "セーブ" : "ロード", this.revealMs);
+      addHeading(this.fixed, Z0, this.ox + sc(72, s), this.oy + sc(40, s), tab === "save" ? "SAVE" : "LOAD", tab === "save" ? "セーブ" : "ロード", this.revealMs, s);
       this.page = tab === "save" ? this.host.pages.save : this.host.pages.load;
       this.buildSlots();
     }
@@ -349,35 +364,38 @@ export class ModernSystemMenu {
 
   private buildSlots(): void {
     // ページ切替: ‹ A/Q 1 2 3 4 5 ›
+    const s = this.s;
     const y = 126;
-    const FS = 17;
+    const fs = sc(17, s);
     let x = 72;
     const mk = (key: string, text: string, w: number): void => {
       const rect = this.r(x, y, w, 26);
-      const b = this.content.add(new MBox(rect, Z0 + 1, { fontSize: FS, lineHeight: 1.3, visible: false, opacity: 0, align: "center" }));
-      b.setText([seg(text, MC.textSub, FS, true)]);
+      const b = this.content.add(new MBox(rect, Z0 + 1, { fontSize: fs, lineHeight: 1.3, visible: false, opacity: 0, align: "center" }));
+      b.setText([seg(text, MC.textSub, fs, true)]);
       this.pagerBoxes.push(b);
       this.pagerRects.push(rect);
-      this.hots.push({ key, rect: { x: rect.x - 8, y: rect.y - 6, w: rect.w + 16, h: rect.h + 14 } });
+      this.hots.push({ key, rect: { x: rect.x - sc(8, s), y: rect.y - sc(6, s), w: rect.w + sc(16, s), h: rect.h + sc(14, s) } });
       x += w + 14;
     };
     mk("prev", "‹", 18);
     for (let p = 0; p < PAGE_COUNT; p++) mk(`page:${p}`, this.pagerLabel(p), p === 0 ? 42 : 24);
     mk("next", "›", 18);
+    const lineOffY = sc(28, s);
     this.pagerLine = this.fixed.add(
-      new MBox({ x: 0, y: this.oy + y + 28, w: 24, h: 2 }, Z0 + 1, { panel: { top: MC.accent, radius: 1 }, visible: false, opacity: 0, rest: 255 }),
+      new MBox({ x: 0, y: this.oy + sc(y, s) + lineOffY, w: sc(24, s), h: sc(2, s) }, Z0 + 1, { panel: { top: MC.accent, radius: 1 * s }, visible: false, opacity: 0, rest: 255 }),
     );
+    const hintFs = sc(13, s);
     const hint = this.content.add(
-      new MBox(this.r(560, y + 4, 648, 22), Z0 + 1, { fontSize: 13, lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
+      new MBox(this.r(560, y + 4, 648, 22), Z0 + 1, { fontSize: hintFs, lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
     );
-    hint.setText([seg("←→↑↓ 選択　Enter 決定　PageUp/Down ページ　Del 削除　Tab タブ　Esc 閉じる", withAlpha(MC.textSub, 170), 13)]);
+    hint.setText([seg("←→↑↓ 選択　Enter 決定　PageUp/Down ページ　Del 削除　Tab タブ　Esc 閉じる", withAlpha(MC.textSub, 170), hintFs)]);
 
     for (let i = 0; i < 6; i++) this.buildCard(i);
     // 中身は全部できてから一括で現す（できた順に見えると、枠だけ・サムネイルだけが先に出て「重い」画面に見える）
     this.refreshCards();
     this.repaintPager(false);
     const pr = this.pagerRects[this.page + 1];
-    if (this.pagerLine !== null) this.pagerLine.go(pr.x, pr.y + 28, 255, 0, EASE_OUT);
+    if (this.pagerLine !== null) this.pagerLine.go(pr.x, pr.y + lineOffY, 255, 0, EASE_OUT);
     this.slotsLive = true;
     this.content.appearAll(0, 0, 0);
     this.cards.forEach((c) => this.revealCard(c, 0, 0));
@@ -417,98 +435,117 @@ export class ModernSystemMenu {
   }
 
   private buildCard(i: number): void {
+    const s = this.s;
     const rect = this.cardRect(i);
+    const pad12 = sc(12, s);
+    const thumbW = sc(THUMB_W, s);
+    const thumbH = sc(THUMB_H, s);
     const bg = this.fixed.add(
       new MBox(rect, Z0 + 1, {
         panel: {
-          radius: 8,
+          radius: sc(8, s),
           top: MC.glassTop,
           bottom: MC.glassBottom,
           border: [255, 255, 255, 44],
-          borderW: 1,
-          shadow: { blur: 22, dy: 8, alpha: 0.38 },
+          borderW: s,
+          shadow: { blur: sc(22, s), dy: sc(8, s), alpha: 0.38 },
         },
         visible: false,
         opacity: 0,
       }),
     );
-    const thumbRect = { x: rect.x + 12, y: rect.y + 12, w: THUMB_W, h: THUMB_H };
+    const thumbRect = { x: rect.x + pad12, y: rect.y + pad12, w: thumbW, h: thumbH };
     const img = this.fixed.add(new MImage(thumbRect, Z0 + 2));
     const empty = this.fixed.add(
       new MBox(thumbRect, Z0 + 2, {
-        panel: { radius: 4, top: [8, 10, 24, 170], bottom: [12, 15, 34, 170], border: [255, 255, 255, 12], borderW: 1 },
-        fontSize: 15,
+        panel: { radius: sc(4, s), top: [8, 10, 24, 170], bottom: [12, 15, 34, 170], border: [255, 255, 255, 12], borderW: s },
+        fontSize: sc(15, s),
         lineHeight: 1.3,
         align: "center",
-        marginY: 82,
+        marginY: sc(82, s),
         visible: false,
         opacity: 0,
       }),
     );
+    const scrimH = sc(40, s);
     const scrim = this.fixed.add(
-      new MBox({ x: thumbRect.x, y: thumbRect.y + THUMB_H - 40, w: THUMB_W, h: 40 }, Z0 + 3, {
+      new MBox({ x: thumbRect.x, y: thumbRect.y + thumbH - scrimH, w: thumbW, h: scrimH }, Z0 + 3, {
         panel: { radius: 0, top: [0, 0, 0, 0], bottom: [0, 0, 0, 150] },
         visible: false,
         opacity: 0,
       }),
     );
     const label = this.fixed.add(
-      new MBox({ x: thumbRect.x + 8, y: thumbRect.y + 8, w: 64, h: 22 }, Z0 + 4, {
-        panel: { radius: 4, top: [8, 10, 24, 205], border: [255, 255, 255, 26], borderW: 1 },
-        fontSize: 13,
+      new MBox({ x: thumbRect.x + sc(8, s), y: thumbRect.y + sc(8, s), w: sc(64, s), h: sc(22, s) }, Z0 + 4, {
+        panel: { radius: sc(4, s), top: [8, 10, 24, 205], border: [255, 255, 255, 26], borderW: s },
+        fontSize: sc(13, s),
         lineHeight: 1.3,
         align: "center",
-        marginY: 2,
+        marginY: sc(2, s),
         visible: false,
         opacity: 0,
       }),
     );
+    const dateW = sc(190, s);
     const date = this.fixed.add(
-      new MBox({ x: thumbRect.x + THUMB_W - 10 - 190, y: thumbRect.y + THUMB_H - 25, w: 190, h: 20 }, Z0 + 4, {
-        fontSize: 12,
+      new MBox({ x: thumbRect.x + thumbW - sc(10, s) - dateW, y: thumbRect.y + thumbH - sc(25, s), w: dateW, h: sc(20, s) }, Z0 + 4, {
+        fontSize: sc(12, s),
         lineHeight: 1.3,
         align: "right",
         visible: false,
         opacity: 0,
       }),
     );
+    const textPad = sc(14, s);
     const chap = this.fixed.add(
-      new MBox({ x: rect.x + 14, y: rect.y + 12 + THUMB_H + 10, w: rect.w - 28, h: 24 }, Z0 + 3, { fontSize: 17, lineHeight: 1.3, visible: false, opacity: 0 }),
+      new MBox({ x: rect.x + textPad, y: rect.y + pad12 + thumbH + sc(10, s), w: rect.w - textPad * 2, h: sc(24, s) }, Z0 + 3, {
+        fontSize: sc(17, s),
+        lineHeight: 1.3,
+        visible: false,
+        opacity: 0,
+      }),
     );
     const exc = this.fixed.add(
-      new MBox({ x: rect.x + 14, y: rect.y + 12 + THUMB_H + 34, w: rect.w - 28, h: 20 }, Z0 + 3, { fontSize: 13, lineHeight: 1.3, visible: false, opacity: 0 }),
+      new MBox({ x: rect.x + textPad, y: rect.y + pad12 + thumbH + sc(34, s), w: rect.w - textPad * 2, h: sc(20, s) }, Z0 + 3, {
+        fontSize: sc(13, s),
+        lineHeight: 1.3,
+        visible: false,
+        opacity: 0,
+      }),
     );
     const over = this.fixed.add(
       new MBox(rect, Z0 + 4, {
         panel: {
-          radius: 8,
+          radius: sc(8, s),
           top: [238, 198, 114, 22],
           bottom: [238, 198, 114, 8],
           border: MC.accent,
-          borderW: 1.5,
-          shadow: { blur: 26, dy: 10, alpha: 0.5 },
+          borderW: 1.5 * s,
+          shadow: { blur: sc(26, s), dy: sc(10, s), alpha: 0.5 },
         },
         visible: false,
         opacity: 0,
         rest: 0,
       }),
     );
+    const delSize = sc(26, s);
+    const delFs = sc(18, s);
     const del = this.fixed.add(
-      new MBox({ x: thumbRect.x + THUMB_W - 34, y: thumbRect.y + 8, w: 26, h: 26 }, Z0 + 5, {
-        panel: { radius: 13, top: [10, 12, 28, 220], border: [255, 255, 255, 90], borderW: 1 },
-        fontSize: 18,
+      new MBox({ x: thumbRect.x + thumbW - sc(34, s), y: thumbRect.y + sc(8, s), w: delSize, h: delSize }, Z0 + 5, {
+        panel: { radius: sc(13, s), top: [10, 12, 28, 220], border: [255, 255, 255, 90], borderW: s },
+        fontSize: delFs,
         lineHeight: 1.1,
         align: "center",
-        marginY: 3,
+        marginY: sc(3, s),
         visible: false,
         opacity: 0,
         rest: 0,
       }),
     );
-    del.setText([seg("×", MC.text, 18)]);
+    del.setText([seg("×", MC.text, delFs)]);
     this.cards.push({ rect, bg, over, img, empty, scrim, label, date, chap, exc, del, slot: null, used: false, hasThumb: false, lifted: false });
     this.hots.push({ key: `card:${i}`, rect });
-    this.hots.push({ key: `del:${i}`, rect: { x: thumbRect.x + THUMB_W - 38, y: thumbRect.y + 4, w: 34, h: 34 } });
+    this.hots.push({ key: `del:${i}`, rect: { x: thumbRect.x + thumbW - sc(38, s), y: thumbRect.y + sc(4, s), w: sc(34, s), h: sc(34, s) } });
   }
 
   private slotsHere(): string[] {
@@ -547,29 +584,34 @@ export class ModernSystemMenu {
   private paintCard(i: number): void {
     const c = this.cards[i];
     if (c.slot === null) return;
+    const s = this.s;
     const m = this.metaOf(c.slot);
+    const chapFs = sc(17, s);
+    const excFs = sc(13, s);
+    const emptyFs = sc(15, s);
+    const cardTextW = sc(CARD_TEXT_W, s);
     c.used = m.used;
-    c.label.setText([seg(slotLabel(c.slot), m.used ? MC.accent : withAlpha(MC.textSub, 220), 13, true)]);
-    c.date.setText([seg(m.used ? (m.savedAt !== "" ? m.savedAt : "") : "", MC.text, 12)]);
+    c.label.setText([seg(slotLabel(c.slot), m.used ? MC.accent : withAlpha(MC.textSub, 220), sc(13, s), true)]);
+    c.date.setText([seg(m.used ? (m.savedAt !== "" ? m.savedAt : "") : "", MC.text, sc(12, s))]);
     if (m.used) {
-      c.chap.setText([seg(m.chapter !== "" ? fitWidth(m.chapter, 17, CARD_TEXT_W) : "（無題）", MC.text, 17)]);
-      c.exc.setText([seg(fitExcerpt(m.excerpt, 13, CARD_TEXT_W), withAlpha(MC.textSub, 200), 13)]);
+      c.chap.setText([seg(m.chapter !== "" ? fitWidth(m.chapter, chapFs, cardTextW) : "（無題）", MC.text, chapFs)]);
+      c.exc.setText([seg(fitExcerpt(m.excerpt, excFs, cardTextW), withAlpha(MC.textSub, 200), excFs)]);
     } else {
-      c.chap.setText([seg(c.slot === "auto" ? "選択肢で自動保存されます" : "空きスロット", withAlpha(MC.textDim, 200), 15)]);
+      c.chap.setText([seg(c.slot === "auto" ? "選択肢で自動保存されます" : "空きスロット", withAlpha(MC.textDim, 200), emptyFs)]);
       c.exc.clearText();
     }
     c.hasThumb = m.used && m.thumb && c.img.loadSaveThumb(c.slot);
     if (!c.hasThumb) c.img.clear();
     c.empty.setText([
-      seg(m.used ? "NO IMAGE" : c.slot === "auto" ? "AUTO" : "EMPTY", withAlpha(MC.textDim, 190), 15, true),
+      seg(m.used ? "NO IMAGE" : c.slot === "auto" ? "AUTO" : "EMPTY", withAlpha(MC.textDim, 190), emptyFs, true),
     ]);
     c.bg.setPanel({
-      radius: 8,
+      radius: sc(8, s),
       top: m.used ? MC.glassTop : [18, 22, 48, 96],
       bottom: m.used ? MC.glassBottom : [10, 13, 32, 110],
       border: m.used ? [255, 255, 255, 44] : [255, 255, 255, 14],
-      borderW: 1,
-      shadow: m.used ? { blur: 22, dy: 8, alpha: 0.38 } : { blur: 12, dy: 4, alpha: 0.18 },
+      borderW: s,
+      shadow: m.used ? { blur: sc(22, s), dy: sc(8, s), alpha: 0.38 } : { blur: sc(12, s), dy: sc(4, s), alpha: 0.18 },
     });
     this.visibleCard(c, true);
   }
@@ -607,6 +649,8 @@ export class ModernSystemMenu {
   }
 
   private repaintPager(animate: boolean): void {
+    const s = this.s;
+    const fs = sc(17, s);
     this.pagerBoxes.forEach((b, i) => {
       // 0=prev, 1..PAGE_COUNT=ページ, 最後=next
       let active = false;
@@ -619,13 +663,14 @@ export class ModernSystemMenu {
       }
       const hot = this.hoverKey === key;
       const label = i === 0 ? "‹" : i === this.pagerBoxes.length - 1 ? "›" : this.pagerLabel(i - 1);
-      b.setText([seg(label, active ? MC.accent : hot ? MC.text : MC.textSub, 17, true)]);
+      b.setText([seg(label, active ? MC.accent : hot ? MC.text : MC.textSub, fs, true)]);
     });
     if (this.pagerLine !== null) {
       const r = this.pagerRects[this.page + 1];
-      this.pagerLine.resizePanel(r.w, 2);
-      if (animate) this.pagerLine.go(r.x, r.y + 28, 255, D_OPEN, EASE_OUT);
-      else this.pagerLine.put(r.x, r.y + 28, this.slotsLive ? 255 : 0);
+      const lineY = r.y + sc(28, s);
+      this.pagerLine.resizePanel(r.w, sc(2, s));
+      if (animate) this.pagerLine.go(r.x, lineY, 255, D_OPEN, EASE_OUT);
+      else this.pagerLine.put(r.x, lineY, this.slotsLive ? 255 : 0);
       this.pagerLine.show(true);
     }
   }
@@ -733,11 +778,21 @@ export class ModernSystemMenu {
     mkRow(0, h.hasTitle ? 2 : 1, "quit", "ゲームを終了", "button", [], SYS_TOP);
 
     // グループ見出しと細線
+    const s = this.s;
+    const grpFs = sc(14, s);
+    const grpSubFs = sc(13, s);
+    const lineH = Math.max(1, sc(1, s));
     const group = (col: number, y: number, en: string, jp: string): void => {
       const x = COL_X[col];
-      const t = this.content.add(new MBox(this.r(x, y, 520, 22), Z0, { fontSize: 14, lineHeight: 1.3, visible: false, opacity: 0 }));
-      t.setText([seg(en, MC.accent, 14, true), seg("   " + jp, MC.textSub, 13)]);
-      this.content.add(new MBox(this.r(x, y + 28, 520, 1), Z0, { panel: { top: MC.line }, visible: false, opacity: 0 }));
+      const t = this.content.add(new MBox(this.r(x, y, 520, 22), Z0, { fontSize: grpFs, lineHeight: 1.3, visible: false, opacity: 0 }));
+      t.setText([seg(en, MC.accent, grpFs, true), seg("   " + jp, MC.textSub, grpSubFs)]);
+      this.content.add(
+        new MBox({ x: this.ox + sc(x, s), y: this.oy + sc(y + 28, s), w: sc(520, s), h: lineH }, Z0, {
+          panel: { top: MC.line },
+          visible: false,
+          opacity: 0,
+        }),
+      );
     };
     group(0, 150, "SOUND", "サウンド");
     group(1, 150, "TEXT", "テキスト");
@@ -755,29 +810,31 @@ export class ModernSystemMenu {
   }
 
   private buildRow(row: SettingRow, i: number): RowView {
-    const x0 = row.rect.x + 14;
+    const s = this.s;
+    const x0 = row.rect.x + sc(14, s);
     const y0 = row.rect.y;
     const rh = row.rect.h;
     const focusBg = this.content.add(
       new MBox(row.rect, Z0, {
-        panel: { radius: 6, top: [255, 255, 255, 14], bottom: [255, 255, 255, 6] },
+        panel: { radius: sc(6, s), top: [255, 255, 255, 14], bottom: [255, 255, 255, 6] },
         visible: false,
         opacity: 0,
         rest: 0,
       }),
     );
     const bar = this.content.add(
-      new MBox({ x: row.rect.x, y: y0 + 8, w: 3, h: rh - 16 }, Z0 + 1, {
-        panel: { top: MC.accent, radius: 1.5 },
+      new MBox({ x: row.rect.x, y: y0 + sc(8, s), w: sc(3, s), h: rh - sc(16, s) }, Z0 + 1, {
+        panel: { top: MC.accent, radius: 1.5 * s },
         visible: false,
         opacity: 0,
         rest: 0,
       }),
     );
+    const lblFs = sc(18, s);
     const lbl = this.content.add(
-      new MBox({ x: x0, y: y0 + 14, w: 200, h: 28 }, Z0 + 1, { fontSize: 18, lineHeight: 1.3, visible: false, opacity: 0 }),
+      new MBox({ x: x0, y: y0 + sc(14, s), w: sc(200, s), h: sc(28, s) }, Z0 + 1, { fontSize: lblFs, lineHeight: 1.3, visible: false, opacity: 0 }),
     );
-    lbl.setText([seg(row.label, row.kind === "button" ? MC.text : MC.text, 18)]);
+    lbl.setText([seg(row.label, row.kind === "button" ? MC.text : MC.text, lblFs)]);
     const view: RowView = {
       focusBg,
       bar,
@@ -790,71 +847,76 @@ export class ModernSystemMenu {
       seg: { x: 0, y: 0, w: 0, h: 0 },
     };
     if (row.kind === "slider") {
-      const track = { x: x0 + 214, y: y0 + 26, w: 224, h: 4 };
+      const track = { x: x0 + sc(214, s), y: y0 + sc(26, s), w: sc(224, s), h: sc(4, s) };
+      const trackRad = sc(2, s);
       view.track = track;
       this.content.add(
-        new MBox(track, Z0 + 1, { panel: { top: [255, 255, 255, 46], radius: 2 }, visible: false, opacity: 0 }),
+        new MBox(track, Z0 + 1, { panel: { top: [255, 255, 255, 46], radius: trackRad }, visible: false, opacity: 0 }),
       );
       view.fill = this.content.add(
-        new MBox(track, Z0 + 2, { panel: { top: MC.accent, radius: 2 }, visible: false, opacity: 0, crop: 0 }),
+        new MBox(track, Z0 + 2, { panel: { top: MC.accent, radius: trackRad }, visible: false, opacity: 0, crop: 0 }),
       );
+      const knobSize = sc(16, s);
       view.knob = this.content.add(
-        new MBox({ x: track.x, y: track.y - 6, w: 16, h: 16 }, Z0 + 3, {
-          panel: { radius: 8, top: [250, 252, 255, 255], border: MC.accent, borderW: 2, shadow: { blur: 6, dy: 1, alpha: 0.4 } },
+        new MBox({ x: track.x, y: track.y - sc(6, s), w: knobSize, h: knobSize }, Z0 + 3, {
+          panel: { radius: sc(8, s), top: [250, 252, 255, 255], border: MC.accent, borderW: 2 * s, shadow: { blur: sc(6, s), dy: sc(1, s), alpha: 0.4 } },
           visible: false,
           opacity: 0,
         }),
       );
       view.value = this.content.add(
-        new MBox({ x: x0 + 458, y: y0 + 14, w: 60, h: 28 }, Z0 + 1, { fontSize: 17, lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
+        new MBox({ x: x0 + sc(458, s), y: y0 + sc(14, s), w: sc(60, s), h: sc(28, s) }, Z0 + 1, { fontSize: sc(17, s), lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
       );
-      this.hots.push({ key: `slider:${i}`, rect: { x: track.x - 10, y: track.y - 14, w: track.w + 20, h: track.h + 28 } });
+      this.hots.push({ key: `slider:${i}`, rect: { x: track.x - sc(10, s), y: track.y - sc(14, s), w: track.w + sc(20, s), h: track.h + sc(28, s) } });
     } else if (row.kind === "choice") {
       const n = row.choices.length;
-      const cw = 340;
-      const seg0 = { x: x0 + 178, y: y0 + 11, w: cw, h: 34 };
+      const cw = sc(340, s);
+      const ch = sc(34, s);
+      const seg0 = { x: x0 + sc(178, s), y: y0 + sc(11, s), w: cw, h: ch };
       view.seg = seg0;
       this.content.add(
         new MBox(seg0, Z0 + 1, {
-          panel: { radius: 6, top: [255, 255, 255, 12], border: [255, 255, 255, 44], borderW: 1 },
+          panel: { radius: sc(6, s), top: [255, 255, 255, 12], border: [255, 255, 255, 44], borderW: s },
           visible: false,
           opacity: 0,
         }),
       );
       const sw = Math.floor(cw / n);
+      const p2 = sc(2, s);
       view.pill = this.content.add(
-        new MBox({ x: seg0.x + 2, y: seg0.y + 2, w: sw - 4, h: 30 }, Z0 + 2, {
-          panel: { radius: 5, top: [238, 198, 114, 42], bottom: [238, 198, 114, 26], border: MC.accent, borderW: 1 },
+        new MBox({ x: seg0.x + p2, y: seg0.y + p2, w: sw - p2 * 2, h: ch - p2 * 2 }, Z0 + 2, {
+          panel: { radius: sc(5, s), top: [238, 198, 114, 42], bottom: [238, 198, 114, 26], border: MC.accent, borderW: s },
           visible: false,
           opacity: 0,
         }),
       );
+      const segFs = sc(16, s);
       row.choices.forEach((c, ci) => {
         const b = this.content.add(
-          new MBox({ x: seg0.x + ci * sw, y: seg0.y, w: sw, h: 34 }, Z0 + 3, {
-            fontSize: 16,
+          new MBox({ x: seg0.x + ci * sw, y: seg0.y, w: sw, h: ch }, Z0 + 3, {
+            fontSize: segFs,
             lineHeight: 1.3,
             align: "center",
-            marginY: 6,
+            marginY: sc(6, s),
             visible: false,
             opacity: 0,
           }),
         );
-        b.setText([seg(c.label, MC.textSub, 16)]);
+        b.setText([seg(c.label, MC.textSub, segFs)]);
         view.segs.push(b);
-        this.hots.push({ key: `choice:${i}:${ci}`, rect: { x: seg0.x + ci * sw, y: seg0.y, w: sw, h: 34 } });
+        this.hots.push({ key: `choice:${i}:${ci}`, rect: { x: seg0.x + ci * sw, y: seg0.y, w: sw, h: ch } });
       });
     } else {
       const chev = this.content.add(
-        new MBox({ x: row.rect.x + row.rect.w - 40, y: y0 + 12, w: 24, h: 28 }, Z0 + 1, {
-          fontSize: 22,
+        new MBox({ x: row.rect.x + row.rect.w - sc(40, s), y: y0 + sc(12, s), w: sc(24, s), h: sc(28, s) }, Z0 + 1, {
+          fontSize: sc(22, s),
           lineHeight: 1.1,
           align: "right",
           visible: false,
           opacity: 0,
         }),
       );
-      chev.setText([seg("›", MC.textSub, 24)]);
+      chev.setText([seg("›", MC.textSub, sc(24, s))]);
     }
     return view;
   }
@@ -873,6 +935,13 @@ export class ModernSystemMenu {
   }
 
   private refreshSettings(instant: boolean = false): void {
+    const s = this.s;
+    const valFs = sc(17, s);
+    const pctFs = sc(13, s);
+    const segFs = sc(16, s);
+    const knobHalf = sc(8, s);
+    const knobOffY = sc(6, s);
+    const p2 = sc(2, s);
     this.rows.forEach((row, i) => {
       const v = this.rowViews[i];
       if (row.kind === "slider" && v.fill !== null && v.knob !== null && v.value !== null) {
@@ -880,14 +949,14 @@ export class ModernSystemMenu {
         const w = Math.round((v.track.w * val) / 100);
         v.fill.show(true);
         v.fill.go(v.track.x, v.track.y, 255, instant ? 0 : D_FAST + 40, EASE_OUT, w);
-        v.knob.go(v.track.x + w - 8, v.track.y - 6, 255, instant ? 0 : D_FAST + 40, EASE_OUT);
-        v.value.setText([seg(`${val}`, MC.accent, 17, true), seg("%", MC.textSub, 13)]);
+        v.knob.go(v.track.x + w - knobHalf, v.track.y - knobOffY, 255, instant ? 0 : D_FAST + 40, EASE_OUT);
+        v.value.setText([seg(`${val}`, MC.accent, valFs, true), seg("%", MC.textSub, pctFs)]);
       } else if (row.kind === "choice" && v.pill !== null) {
         const idx = this.choiceIndex(row);
         const sw = Math.floor(v.seg.w / row.choices.length);
-        v.pill.go(v.seg.x + idx * sw + 2, v.seg.y + 2, 255, instant ? 0 : D_NORM, EASE_OUT);
+        v.pill.go(v.seg.x + idx * sw + p2, v.seg.y + p2, 255, instant ? 0 : D_NORM, EASE_OUT);
         v.segs.forEach((b, ci) => {
-          b.setText([seg(row.choices[ci].label, ci === idx ? MC.accent : MC.textSub, 16, ci === idx)]);
+          b.setText([seg(row.choices[ci].label, ci === idx ? MC.accent : MC.textSub, segFs, ci === idx)]);
         });
       }
       const on = this.sel === i;
@@ -1170,6 +1239,9 @@ export class ModernBacklog {
   private thumbY = 0;
   private voiceStarted = false;
   private colW = 0;
+  private s = 1;
+  private logX = LOG_X;
+  private logTop = LOG_TOP;
   /** 組んである最古の履歴の番号（それより古いものは、上へ読み進めたときに足す）。 */
   private first = 0;
 
@@ -1180,62 +1252,71 @@ export class ModernBacklog {
   async run(): Promise<void> {
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = uiScale(sw, sh);
+    this.s = s;
+    const logX = sc(LOG_X, s);
+    const logTop = sc(LOG_TOP, s);
+    const logBottomPad = sc(LOG_BOTTOM_PAD, s);
+    this.logX = logX;
+    this.logTop = logTop;
     const events = new UiEvents();
-    this.viewH = sh - LOG_TOP - LOG_BOTTOM_PAD;
+    this.viewH = sh - logTop - logBottomPad;
     try {
       // 暗幕と見出しを先に出し、重い組版（本文・覆い・スクロールバー）は見えない状態で作ってから一括で現す
       const veil = this.g.add(makeVeil(sw, sh, 300, 255, 255));
       veil.show(true);
       veil.go(0, 0, 255, D_OPEN, EASE_OUT);
-      addHeading(this.g, 303, 72, 40, "LOG", "履歴");
+      addHeading(this.g, 303, logX, sc(40, s), "LOG", "履歴", D_OPEN, s);
+      const infoW = sc(560, s);
       const info = this.g.add(
-        new MBox({ x: sw - 72 - 560, y: 62, w: 560, h: 30 }, 303, { fontSize: 14, lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
+        new MBox({ x: sw - logX - infoW, y: sc(62, s), w: infoW, h: sc(30, s) }, 303, { fontSize: sc(14, s), lineHeight: 1.3, align: "right", visible: false, opacity: 0 }),
       );
       info.setText([
-        seg(`${this.host.entries.length}`, MC.accent, 20, true),
-        seg("   ホイール・↑↓・PageUp/Down でスクロール　♪ はクリックで再生　Esc / 右クリックで閉じる", withAlpha(MC.textSub, 190), 13),
+        seg(`${this.host.entries.length}`, MC.accent, sc(20, s), true),
+        seg("   ホイール・↑↓・PageUp/Down でスクロール　♪ はクリックで再生　Esc / 右クリックで閉じる", withAlpha(MC.textSub, 190), sc(13, s)),
       ]);
-      info.appear(0, -8, D_OPEN);
+      info.appear(0, -sc(8, s), D_OPEN);
       // 本文レイヤ（最新の LOG_FIRST 件だけを組む。上へ読み進めたら足す）
-      this.colW = sw - LOG_X * 2 - 30;
+      this.colW = sw - logX * 2 - sc(30, s);
       this.first = Math.max(0, this.host.entries.length - LOG_FIRST);
       const layer = api.layer.create("text");
       this.layer = layer;
       this.g.add({ free: () => api.layer.free(layer) });
       api.text.style(layer, {
-        fontSize: 20,
+        fontSize: sc(20, s),
         lineHeight: 1.75,
         boxW: this.colW,
-        boxH: 40000,
+        boxH: sc(40000, s),
         marginX: 0,
         marginY: 0,
         color: MC.text,
         outlineWidth: 0,
       });
       this.layout();
-      api.layer.set(layer, { x: LOG_X, y: LOG_TOP, z: 301, visible: true, opacity: 0 }, "fore");
+      api.layer.set(layer, { x: logX, y: logTop, z: 301, visible: true, opacity: 0 }, "fore");
       this.scrollTo(this.maxScroll, false);
       // 上下の覆い（本文のはみ出しを隠し、縁は滑らかに溶ける）
       const top = this.g.add(
-        new MBox({ x: 0, y: 0, w: sw, h: LOG_TOP + 26 }, 302, {
+        new MBox({ x: 0, y: 0, w: sw, h: logTop + sc(26, s) }, 302, {
           panel: { top: [6, 9, 24, 255], bottom: [6, 9, 24, 0], ramp: 0 },
           visible: false,
         }),
       );
-      const solidTop = this.g.add(new MBox({ x: 0, y: 0, w: sw, h: LOG_TOP - 14 }, 302, { panel: { top: [6, 9, 24, 255] }, visible: false }));
+      const solidTop = this.g.add(new MBox({ x: 0, y: 0, w: sw, h: logTop - sc(14, s) }, 302, { panel: { top: [6, 9, 24, 255] }, visible: false }));
+      const botOver = sc(18, s);
       const bottom = this.g.add(
-        new MBox({ x: 0, y: sh - LOG_BOTTOM_PAD - 18, w: sw, h: LOG_BOTTOM_PAD + 18 }, 302, {
-          panel: { top: [6, 9, 24, 0], bottom: [6, 9, 24, 255], ramp: 28 },
+        new MBox({ x: 0, y: sh - logBottomPad - botOver, w: sw, h: logBottomPad + botOver }, 302, {
+          panel: { top: [6, 9, 24, 0], bottom: [6, 9, 24, 255], ramp: sc(28, s) },
           visible: false,
         }),
       );
       [top, solidTop, bottom].forEach((b) => b.show(true));
       // スクロールバー
       const bar = this.g.add(
-        new MBox({ x: sw - 54, y: LOG_TOP, w: 2, h: this.viewH }, 303, { panel: { top: [255, 255, 255, 26], radius: 1 }, visible: false, opacity: 0 }),
+        new MBox({ x: sw - sc(54, s), y: logTop, w: sc(2, s), h: this.viewH }, 303, { panel: { top: [255, 255, 255, 26], radius: 1 * s }, visible: false, opacity: 0 }),
       );
       this.thumb = this.g.add(
-        new MBox({ x: sw - 55, y: LOG_TOP, w: 4, h: 40 }, 304, { panel: { top: withAlpha(MC.accent, 190), radius: 2 }, visible: false, opacity: 0 }),
+        new MBox({ x: sw - sc(55, s), y: logTop, w: sc(4, s), h: sc(40, s) }, 304, { panel: { top: withAlpha(MC.accent, 190), radius: sc(2, s) }, visible: false, opacity: 0 }),
       );
       this.updateThumb(false);
       api.layer.move(layer, { toOpacity: 255, timeMs: D_OPEN, accel: EASE_OUT }, "fore");
@@ -1244,17 +1325,20 @@ export class ModernBacklog {
       this.thumb.put(this.thumb.rect.x, this.thumbY, 0);
       this.thumb.show(true);
       this.thumb.go(this.thumb.rect.x, this.thumbY, 255, D_OPEN, EASE_OUT);
+      const wheelStep = sc(96, s);
+      const keyStep = sc(72, s);
+      const pageOverlap = sc(60, s);
       while (true) {
         const ev = await events.next();
         if (ev.kind === "wheel") {
-          this.scrollTo(this.scroll + ((ev.delta ?? 0) > 0 ? -96 : 96), true);
+          this.scrollTo(this.scroll + ((ev.delta ?? 0) > 0 ? -wheelStep : wheelStep), true);
         } else if (ev.kind === "key") {
           const k = ev.key;
           if (k === "Escape" || k === "h" || k === "H") break;
-          if (k === "ArrowUp") this.scrollTo(this.scroll - 72, true);
-          else if (k === "ArrowDown") this.scrollTo(this.scroll + 72, true);
-          else if (k === "PageUp") this.scrollTo(this.scroll - (this.viewH - 60), true);
-          else if (k === "PageDown") this.scrollTo(this.scroll + (this.viewH - 60), true);
+          if (k === "ArrowUp") this.scrollTo(this.scroll - keyStep, true);
+          else if (k === "ArrowDown") this.scrollTo(this.scroll + keyStep, true);
+          else if (k === "PageUp") this.scrollTo(this.scroll - (this.viewH - pageOverlap), true);
+          else if (k === "PageDown") this.scrollTo(this.scroll + (this.viewH - pageOverlap), true);
           else if (k === "Home") this.scrollTo(0, true);
           else if (k === "End") this.scrollTo(this.maxScroll, true);
         } else if (ev.kind === "click") {
@@ -1283,23 +1367,28 @@ export class ModernBacklog {
 
   /** `first` 番目以降の履歴を 2 カラムで組む。名前は左（アクセント色）、本文は右カラムにインデントして折り返す。 */
   private layout(): void {
+    const s = this.s;
     const colW = this.colW;
+    const ruleFs = sc(9, s);
+    const headFs = sc(18, s);
+    const bodyFs = sc(20, s);
+    const nameW = sc(LOG_NAME_W, s);
     const segs: api.Segment[] = [];
     let bytes = 0;
-    const push = (s: api.Segment): void => {
-      segs.push(s);
-      bytes += utf8Len(s.text);
+    const push = (sg: api.Segment): void => {
+      segs.push(sg);
+      bytes += utf8Len(sg.text);
     };
     const rule = (): void => {
       // for 文より while（tsint は本体が単文の for + 文字列連結で TypeError になる）
-      const n = Math.floor(colW / 9);
+      const n = Math.floor(colW / ruleFs);
       let line = "";
       let k = 0;
       while (k < n) {
         line += "\u2500";
         k++;
       }
-      push(seg(line + "\n", [255, 255, 255, 34], 9));
+      push(seg(line + "\n", [255, 255, 255, 34], ruleFs));
     };
     this.starts = [];
     const shown = this.host.entries.slice(this.first);
@@ -1311,10 +1400,10 @@ export class ModernBacklog {
         return;
       }
       const head = (e.name ? e.name : "") + (e.voice ? (e.name ? "  ♪" : "♪") : "");
-      push(seg(head, MC.accent, 18, true));
-      push({ text: "", color: null, locate: { x: LOG_NAME_W } });
+      push(seg(head, MC.accent, headFs, true));
+      push({ text: "", color: null, locate: { x: nameW } });
       push({ text: "", color: null, indent: true });
-      push(seg(e.text, MC.text, 20));
+      push(seg(e.text, MC.text, bodyFs));
       push({ text: "", color: null, indent: false });
       push(seg("\n", null));
       this.starts.push({ start, end: bytes, entry: e });
@@ -1322,7 +1411,7 @@ export class ModernBacklog {
     api.text.print(this.layer, segs, false, 0);
     const rects = api.text.rects(this.layer);
     const bottom = rects.length > 0 ? rects[rects.length - 1].y + rects[rects.length - 1].h : 0;
-    this.maxScroll = Math.max(0, bottom + 24 - this.viewH);
+    this.maxScroll = Math.max(0, bottom + sc(24, s) - this.viewH);
   }
 
   /** 組んである履歴の先頭近くまで読み進めたら、さらに古い履歴を足して組み直す。レイヤの上に足した高さだけ
@@ -1335,19 +1424,21 @@ export class ModernBacklog {
     const added = this.maxScroll - before;
     this.scroll += added;
     api.layer.cancelMove(this.layer, "fore");
-    api.layer.set(this.layer, { y: LOG_TOP - this.scroll }, "fore");
+    api.layer.set(this.layer, { y: this.logTop - this.scroll }, "fore");
     return added;
   }
 
   private scrollTo(v: number, animate: boolean): void {
     let target = v;
+    // tsint パーサは `target < sc(...) && this.first > 0` の `< ... >` を型引数と誤認するため先に受ける
+    const extendAt = sc(LOG_EXTEND_AT, this.s);
     if (v === 0) {
       while (this.first > 0) this.extendOlder();
-    } else if (target < LOG_EXTEND_AT && this.first > 0) {
+    } else if (target < extendAt && this.first > 0) {
       target += this.extendOlder();
     }
     this.scroll = Math.max(0, Math.min(this.maxScroll, target));
-    const y = LOG_TOP - this.scroll;
+    const y = this.logTop - this.scroll;
     if (animate) api.layer.move(this.layer, { toY: y, toOpacity: 255, timeMs: 150, accel: EASE_OUT }, "fore");
     else api.layer.set(this.layer, { y }, "fore");
     this.updateThumb(animate);
@@ -1355,11 +1446,12 @@ export class ModernBacklog {
 
   private updateThumb(animate: boolean): void {
     if (this.thumb === null) return;
+    const s = this.s;
     const total = this.maxScroll + this.viewH;
-    const h = Math.max(36, Math.round((this.viewH * this.viewH) / Math.max(1, total)));
-    const y = LOG_TOP + Math.round(((this.viewH - h) * this.scroll) / Math.max(1, this.maxScroll));
+    const h = Math.max(sc(36, s), Math.round((this.viewH * this.viewH) / Math.max(1, total)));
+    const y = this.logTop + Math.round(((this.viewH - h) * this.scroll) / Math.max(1, this.maxScroll));
     this.thumbY = y;
-    this.thumb.resizePanel(4, h);
+    this.thumb.resizePanel(sc(4, s), h);
     if (animate) this.thumb.go(this.thumb.rect.x, y, 255, 150, EASE_OUT);
     else this.thumb.put(this.thumb.rect.x, y, 255);
   }
@@ -1367,11 +1459,12 @@ export class ModernBacklog {
   /** 画面上の座標が属する履歴 1 件（グリフ矩形のバイト位置で引く）。 */
   private entryAt(x: number, y: number): BacklogHost["entries"][0] | null {
     const rects = api.text.rects(this.layer);
-    const ox = LOG_X;
-    const oy = LOG_TOP - this.scroll;
+    const ox = this.logX;
+    const oy = this.logTop - this.scroll;
+    const pad = sc(6, this.s);
     for (let i = 0; i < rects.length; i++) {
       const r = rects[i];
-      if (x < ox + r.x - 6 || x > ox + r.x + r.w + 6 || y < oy + r.y - 6 || y > oy + r.y + r.h + 6) continue;
+      if (x < ox + r.x - pad || x > ox + r.x + r.w + pad || y < oy + r.y - pad || y > oy + r.y + r.h + pad) continue;
       for (let k = 0; k < this.starts.length; k++) {
         const g = this.starts[k];
         if (r.byte_start >= g.start && r.byte_start < g.end) return g.entry;

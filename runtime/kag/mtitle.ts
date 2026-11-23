@@ -8,6 +8,10 @@ import {
   MBox,
   MGroup,
   MC,
+  BASE_W,
+  BASE_H,
+  uiScale,
+  sc,
   D_FAST,
   D_NORM,
   D_OPEN,
@@ -96,6 +100,7 @@ export class TitleScreen {
   private g = new MGroup();
   private items: TItem[] = [];
   private focus = -1;
+  private s = 1;
   /** 退場でフェードさせるロゴ類（項目以外）。 */
   private fadeAll: MBox[] = [];
 
@@ -108,8 +113,8 @@ export class TitleScreen {
     const main = it.enabled ? (hot ? MC.accent : MC.text) : withAlpha(MC.textDim, 150);
     const sub = it.enabled ? (hot ? withAlpha(MC.accent, 210) : MC.textSub) : withAlpha(MC.textDim, 130);
     const subText = it.def.action === "continue" && !it.enabled ? "NO DATA" : it.def.sub ?? "";
-    const segs: api.Segment[] = [seg(it.def.label, main, 31, true)];
-    if (subText !== "") segs.push(seg("    " + subText, sub, 15));
+    const segs: api.Segment[] = [seg(it.def.label, main, sc(31, this.s), true)];
+    if (subText !== "") segs.push(seg("    " + subText, sub, sc(15, this.s)));
     return segs;
   }
 
@@ -118,17 +123,28 @@ export class TitleScreen {
     const o = this.opts;
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = uiScale(sw, sh);
+    this.s = s;
+    const ox = Math.floor((sw - sc(BASE_W, s)) / 2);
+    const oy = Math.floor((sh - sc(BASE_H, s)) / 2);
+    const r = (x: number, y: number, w: number, h: number): Rect => ({
+      x: ox + sc(x, s),
+      y: oy + sc(y, s),
+      w: sc(w, s),
+      h: sc(h, s),
+    });
     const events = new UiEvents();
     try {
       // 左側の暗い面（文字の可読性）と下端の暗幕
+      const footH = sc(140, s);
       const shade = this.g.add(
-        new MBox({ x: 0, y: 0, w: 860, h: sh }, Z_TITLE, {
+        new MBox({ x: 0, y: 0, w: ox + sc(860, s), h: sh }, Z_TITLE, {
           panel: { top: [4, 7, 22, 220], bottom: [4, 7, 22, 0], horizontal: true },
           opacity: 0,
         }),
       );
       const foot = this.g.add(
-        new MBox({ x: 0, y: sh - 140, w: sw, h: 140 }, Z_TITLE, {
+        new MBox({ x: 0, y: sh - footH, w: sw, h: footH }, Z_TITLE, {
           panel: { top: [4, 7, 22, 0], bottom: [4, 7, 22, 170] },
           opacity: 0,
         }),
@@ -138,7 +154,7 @@ export class TitleScreen {
       shade.show(true);
       foot.show(true);
       shade.go(0, 0, 255, 320, EASE_OUT);
-      foot.go(0, sh - 140, 255, 320, EASE_OUT);
+      foot.go(0, sh - footH, 255, 320, EASE_OUT);
 
       // ロゴ: 小さな英字の一行 → 淡いグロー → 大きなロゴ → 細いサブタイトル
       const logo: MBox[] = [];
@@ -151,31 +167,35 @@ export class TitleScreen {
         return b;
       };
       const LX = 96;
-      if (o.tagline) addText({ x: LX + 4, y: 92, w: 700, h: 26 }, [seg(o.tagline, withAlpha(MC.accent, 230), 15)], 15);
-      const nameW = estimateWidth(o.name, 80) + 40;
+      const tagFs = sc(15, s);
+      if (o.tagline) addText(r(LX + 4, 92, 700, 26), [seg(o.tagline, withAlpha(MC.accent, 230), tagFs)], tagFs);
+      const logoFs = sc(80, s);
+      const nameW = estimateWidth(o.name, logoFs) + sc(40, s);
+      const logoRect = { x: ox + sc(LX, s), y: oy + sc(122, s), w: nameW + sc(40, s), h: sc(110, s) };
       const glow = (width: number, alpha: number): void => {
         const b = this.g.add(
-          new MBox({ x: LX, y: 122, w: nameW + 40, h: 110 }, Z_TITLE + 1, {
-            fontSize: 80,
+          new MBox(logoRect, Z_TITLE + 1, {
+            fontSize: logoFs,
             lineHeight: 1.25,
             opacity: 0,
-            outlineWidth: width,
+            outlineWidth: sc(width, s),
           }),
         );
-        const s = seg(o.name, [255, 214, 140, 0], 80);
-        s.edgeColor = [255, 206, 120, alpha];
-        b.setText([s]);
+        const sg = seg(o.name, [255, 214, 140, 0], logoFs);
+        sg.edgeColor = [255, 206, 120, alpha];
+        b.setText([sg]);
         logo.push(b);
       };
       glow(14, 9);
       glow(9, 14);
       glow(5, 22);
       glow(2, 34);
-      addText({ x: LX, y: 122, w: nameW + 40, h: 110 }, [seg(o.name, [255, 247, 226, 255], 80, true)], 80);
-      if (o.subtitle) addText({ x: LX + 6, y: 236, w: 700, h: 34 }, [seg(o.subtitle, MC.textSub, 21)], 21);
+      addText(logoRect, [seg(o.name, [255, 247, 226, 255], logoFs, true)], logoFs);
+      const subFs = sc(21, s);
+      if (o.subtitle) addText(r(LX + 6, 236, 700, 34), [seg(o.subtitle, MC.textSub, subFs)], subFs);
       const rule = this.g.add(
-        new MBox({ x: LX + 6, y: 286, w: 64, h: 2 }, Z_TITLE + 2, {
-          panel: { top: MC.accent, radius: 1 },
+        new MBox(r(LX + 6, 286, 64, 2), Z_TITLE + 2, {
+          panel: { top: MC.accent, radius: 1 * s },
           opacity: 0,
         }),
       );
@@ -183,65 +203,80 @@ export class TitleScreen {
 
       // メニュー項目（左に細い縦線を通し、ホバー中の項目だけアクセント色のバーが重なる）
       const spine = this.g.add(
-        new MBox({ x: ITEM_X - 21, y: ITEM_Y0 + 4, w: 1, h: (o.menu.length - 1) * ITEM_PITCH + 46 }, Z_TITLE + 2, {
-          panel: { top: [255, 255, 255, 0], bottom: [255, 255, 255, 0], ramp: 0 },
-          opacity: 0,
-        }),
+        new MBox(
+          { x: ox + sc(ITEM_X - 21, s), y: oy + sc(ITEM_Y0 + 4, s), w: Math.max(1, sc(1, s)), h: sc((o.menu.length - 1) * ITEM_PITCH + 46, s) },
+          Z_TITLE + 2,
+          {
+            panel: { top: [255, 255, 255, 0], bottom: [255, 255, 255, 0], ramp: 0 },
+            opacity: 0,
+          },
+        ),
       );
       spine.setPanel({ top: [255, 255, 255, 70], bottom: [255, 255, 255, 14] });
       logo.push(spine);
       const hasSave = this.host.hasSave();
+      const itemFs = sc(31, s);
       o.menu.forEach((def, i) => {
         const enabled = !(def.action === "continue" && !hasSave);
-        const rect = { x: ITEM_X, y: ITEM_Y0 + i * ITEM_PITCH, w: 460, h: 54 };
+        const rect = r(ITEM_X, ITEM_Y0 + i * ITEM_PITCH, 460, 54);
         const text = this.g.add(
-          new MBox(rect, Z_TITLE + 3, { fontSize: 31, lineHeight: 1.3, opacity: 0, outlineWidth: 1, outlineColor: [0, 0, 0, 110] }),
+          new MBox(rect, Z_TITLE + 3, { fontSize: itemFs, lineHeight: 1.3, opacity: 0, outlineWidth: Math.max(1, sc(1, s)), outlineColor: [0, 0, 0, 110] }),
         );
         const bar = this.g.add(
-          new MBox({ x: ITEM_X - 22, y: rect.y + 10, w: 3, h: 32 }, Z_TITLE + 3, {
-            panel: { top: MC.accent, radius: 1.5 },
+          new MBox({ x: ox + sc(ITEM_X - 22, s), y: rect.y + sc(10, s), w: sc(3, s), h: sc(32, s) }, Z_TITLE + 3, {
+            panel: { top: MC.accent, radius: 1.5 * s },
             opacity: 0,
           }),
         );
         const line = this.g.add(
-          new MBox({ x: ITEM_X, y: rect.y + 46, w: estimateWidth(def.label, 31) + 14, h: 2 }, Z_TITLE + 3, {
-            panel: { top: MC.accent, radius: 1 },
+          new MBox({ x: rect.x, y: rect.y + sc(46, s), w: estimateWidth(def.label, itemFs) + sc(14, s), h: sc(2, s) }, Z_TITLE + 3, {
+            panel: { top: MC.accent, radius: 1 * s },
             crop: 0,
             visible: false,
           }),
         );
-        const it: TItem = { def, text, bar, line, hit: { x: ITEM_X - 30, y: rect.y - 4, w: 520, h: 62 }, enabled };
+        const it: TItem = {
+          def,
+          text,
+          bar,
+          line,
+          hit: { x: ox + sc(ITEM_X - 30, s), y: rect.y - sc(4, s), w: sc(520, s), h: sc(62, s) },
+          enabled,
+        };
         text.setText(this.itemSegs(it, false));
         this.items.push(it);
       });
       if (o.version) {
+        const verFs = sc(14, s);
         const v = this.g.add(
-          new MBox({ x: sw - 640, y: sh - 40, w: 592, h: 24 }, Z_TITLE + 2, {
-            fontSize: 14,
+          new MBox({ x: sw - ox - sc(640, s), y: sh - oy - sc(40, s), w: sc(592, s), h: sc(24, s) }, Z_TITLE + 2, {
+            fontSize: verFs,
             lineHeight: 1.3,
             align: "right",
             opacity: 0,
           }),
         );
-        v.setText([seg(o.version, withAlpha(MC.textSub, 190), 14)]);
+        v.setText([seg(o.version, withAlpha(MC.textSub, 190), verFs)]);
         logo.push(v);
       }
 
       logo.forEach((b) => this.fadeAll.push(b));
       // 登場: ロゴ → メニューの順にフェードイン
       await sleep(180);
+      const logoSlide = sc(16, s);
       for (let i = 0; i < logo.length; i++) {
         logo[i].show(true);
-        logo[i].put(logo[i].rect.x - 16, logo[i].rect.y, 0);
+        logo[i].put(logo[i].rect.x - logoSlide, logo[i].rect.y, 0);
         logo[i].go(logo[i].rect.x, logo[i].rect.y, 255, D_SLOW + 80, EASE_OUT);
         if (i === 2 || i === 4) await sleep(70);
       }
       await sleep(D_NORM);
+      const itemSlide = sc(22, s);
       for (let i = 0; i < this.items.length; i++) {
         const it = this.items[i];
         it.text.show(true);
         it.line.show(true);
-        it.text.put(it.text.rect.x - 22, it.text.rect.y, 0);
+        it.text.put(it.text.rect.x - itemSlide, it.text.rect.y, 0);
         it.text.go(it.text.rect.x, it.text.rect.y, 255, D_SLOW, EASE_OUT);
         await sleep(80);
       }
@@ -299,8 +334,9 @@ export class TitleScreen {
 
   /** 退場: 項目・ロゴ・暗い面をまとめてフェードアウトする。 */
   private fadeOut(): void {
+    const shift = sc(14, this.s);
     this.items.forEach((it, i) => {
-      it.text.go(it.text.rect.x + (i === this.focus ? 14 : 0), it.text.rect.y, 0, D_NORM, EASE_IN);
+      it.text.go(it.text.rect.x + (i === this.focus ? shift : 0), it.text.rect.y, 0, D_NORM, EASE_IN);
       it.bar.go(it.bar.rect.x, it.bar.rect.y, 0, D_NORM, EASE_IN);
       it.line.go(it.line.rect.x, it.line.rect.y, 0, D_NORM, EASE_IN);
     });
@@ -356,11 +392,12 @@ export class TitleScreen {
 
   private paintItem(i: number, hot: boolean): void {
     const it = this.items[i];
+    const shift = sc(14, this.s);
     it.text.setText(this.itemSegs(it, hot));
-    it.text.go(it.text.rect.x + (hot ? 14 : 0), it.text.rect.y, 255, D_FAST + 20, hot ? EASE_OUT : EASE_IN);
+    it.text.go(it.text.rect.x + (hot ? shift : 0), it.text.rect.y, 255, D_FAST + 20, hot ? EASE_OUT : EASE_IN);
     it.bar.go(it.bar.rect.x, it.bar.rect.y, hot ? 255 : 0, D_FAST, hot ? EASE_OUT : EASE_IN);
     // アクセントの線が左から伸びる（外れると縮む）。文字と一緒に右へ寄る
-    it.line.go(it.line.rect.x + (hot ? 14 : 0), it.line.rect.y, 255, D_NORM, hot ? EASE_OUT : EASE_IN, hot ? it.line.rect.w : 0);
+    it.line.go(it.line.rect.x + (hot ? shift : 0), it.line.rect.y, 255, D_NORM, hot ? EASE_OUT : EASE_IN, hot ? it.line.rect.w : 0);
   }
 }
 
@@ -383,8 +420,9 @@ const G_Y0 = 176;
 const G_PER_PAGE = 6;
 
 /** 解放済みの CG のサムネイルを別スレッドで先に作っておく（ギャラリーを開くたびに待たない）。 */
-export function prefetchGalleryThumbs(images: string[]): void {
-  if (images.length > 0) api.sys.prefetchImagesScaled(images, G_THUMB_W, G_THUMB_H);
+export function prefetchGalleryThumbs(images: string[], screenW: number = BASE_W, screenH: number = BASE_H): void {
+  const s = uiScale(screenW, screenH);
+  if (images.length > 0) api.sys.prefetchImagesScaled(images, sc(G_THUMB_W, s), sc(G_THUMB_H, s));
 }
 
 /** 「おまけ」: サムネイルのギャラリー画面。解放済みは CG のサムネイル + 名前、未解放は鍵の枠。クリックで全画面表示、
@@ -396,6 +434,9 @@ export class GalleryScreen {
   private cards: { rect: Rect; over: MBox; entry: GalleryEntry; open: boolean }[] = [];
   private focus = -1;
   private page = 0;
+  private s = 1;
+  private ox = 0;
+  private oy = 0;
 
   constructor(host: GalleryHost, entries: GalleryEntry[]) {
     this.host = host;
@@ -405,22 +446,37 @@ export class GalleryScreen {
   async run(): Promise<void> {
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = uiScale(sw, sh);
+    this.s = s;
+    this.ox = Math.floor((sw - sc(BASE_W, s)) / 2);
+    this.oy = Math.floor((sh - sc(BASE_H, s)) / 2);
     const events = new UiEvents();
     const veil = this.g.add(makeVeil(sw, sh, 310, 250, 253));
     veil.show(true);
     veil.go(0, 0, 255, D_OPEN, EASE_OUT);
-    addHeading(this.g, 311, 72, 40, "GALLERY", "おまけ");
+    addHeading(this.g, 311, this.ox + sc(72, s), this.oy + sc(40, s), "GALLERY", "おまけ", D_OPEN, s);
     const unlockedCount = this.entries.filter((e) => this.host.unlocked(e.flag)).length;
     const count = this.g.add(
-      new MBox({ x: sw - 72 - 360, y: 64, w: 360, h: 30 }, 311, { fontSize: 17, lineHeight: 1.3, align: "right", opacity: 0 }),
+      new MBox({ x: sw - this.ox - sc(72, s) - sc(360, s), y: this.oy + sc(64, s), w: sc(360, s), h: sc(30, s) }, 311, {
+        fontSize: sc(17, s),
+        lineHeight: 1.3,
+        align: "right",
+        opacity: 0,
+      }),
     );
-    count.setText([seg(`${unlockedCount} / ${this.entries.length}`, MC.accent, 20, true), seg("   解放", MC.textSub, 14)]);
+    count.setText([seg(`${unlockedCount} / ${this.entries.length}`, MC.accent, sc(20, s), true), seg("   解放", MC.textSub, sc(14, s))]);
     count.show(true);
     count.go(count.rect.x, count.rect.y, 255, D_OPEN, EASE_OUT);
+    const hintFs = sc(14, s);
     const hint = this.g.add(
-      new MBox({ x: 72, y: sh - 44, w: sw - 144, h: 26 }, 311, { fontSize: 14, lineHeight: 1.3, align: "right", opacity: 0 }),
+      new MBox({ x: this.ox + sc(72, s), y: sh - this.oy - sc(44, s), w: sw - this.ox * 2 - sc(144, s), h: sc(26, s) }, 311, {
+        fontSize: hintFs,
+        lineHeight: 1.3,
+        align: "right",
+        opacity: 0,
+      }),
     );
-    hint.setText([seg("クリックで拡大　←→ 選択　Enter 決定　Esc / 右クリックで戻る", withAlpha(MC.textSub, 190), 14)]);
+    hint.setText([seg("クリックで拡大　←→ 選択　Enter 決定　Esc / 右クリックで戻る", withAlpha(MC.textSub, 190), hintFs)]);
     hint.show(true);
     hint.go(hint.rect.x, hint.rect.y, 255, D_OPEN, EASE_OUT);
     this.buildPage();
@@ -482,70 +538,83 @@ export class GalleryScreen {
   }
 
   private buildPage(): void {
+    const s = this.s;
+    const cardW = sc(G_CARD_W, s);
+    const cardH = sc(G_CARD_H, s);
+    const thumbW = sc(G_THUMB_W, s);
+    const thumbH = sc(G_THUMB_H, s);
+    const gapX = sc(G_GAP, s);
+    const gapY = sc(24, s);
+    const x0 = this.ox + sc(G_X0, s);
+    const y0 = this.oy + sc(G_Y0, s);
+    const pad = sc(12, s);
+    const slide = sc(10, s);
     const start = this.page * G_PER_PAGE;
     const list = this.entries.slice(start, start + G_PER_PAGE);
     const reveals: (() => void)[] = [];
     list.forEach((entry, i) => {
       const col = i % 3;
       const row = Math.floor(i / 3);
-      const rect = { x: G_X0 + col * (G_CARD_W + G_GAP), y: G_Y0 + row * (G_CARD_H + 24), w: G_CARD_W, h: G_CARD_H };
+      const rect = { x: x0 + col * (cardW + gapX), y: y0 + row * (cardH + gapY), w: cardW, h: cardH };
       const open = this.host.unlocked(entry.flag);
       const card = this.g.add(
         new MBox(rect, 312, {
           panel: {
-            radius: 8,
+            radius: sc(8, s),
             top: open ? MC.glassTop : [16, 20, 44, 190],
             bottom: open ? MC.glassBottom : [10, 13, 32, 200],
             border: open ? [255, 255, 255, 46] : [255, 255, 255, 22],
-            borderW: 1,
-            shadow: { blur: 22, dy: 8, alpha: 0.4 },
+            borderW: s,
+            shadow: { blur: sc(22, s), dy: sc(8, s), alpha: 0.4 },
           },
           opacity: 0,
         }),
       );
       const num = i + start + 1 < 10 ? `0${i + start + 1}` : `${i + start + 1}`;
+      const titleFs = sc(17, s);
+      const numFs = sc(13, s);
       const title = this.g.add(
-        new MBox({ x: rect.x + 12, y: rect.y + G_THUMB_H + 20, w: rect.w - 24, h: 54 }, 314, {
-          fontSize: 17,
+        new MBox({ x: rect.x + pad, y: rect.y + thumbH + sc(20, s), w: rect.w - pad * 2, h: sc(54, s) }, 314, {
+          fontSize: titleFs,
           lineHeight: 1.35,
           opacity: 0,
         }),
       );
-      const thumbRect = { x: rect.x + 12, y: rect.y + 12, w: G_THUMB_W, h: G_THUMB_H };
+      const thumbRect = { x: rect.x + pad, y: rect.y + pad, w: thumbW, h: thumbH };
       let thumb: MBox | null = null;
       let img: number | null = null;
       if (open) {
-        title.setText([seg(`NO.${num}`, MC.accent, 13, true), seg("\n", null), seg(entry.title, MC.text, 17)]);
+        title.setText([seg(`NO.${num}`, MC.accent, numFs, true), seg("\n", null), seg(entry.title, MC.text, titleFs)]);
         img = api.layer.create("image");
         this.g.add({ free: () => api.layer.free(img!) });
         try {
-          api.layer.loadImageScaled(img, entry.image, G_THUMB_W, G_THUMB_H, "fore");
+          api.layer.loadImageScaled(img, entry.image, thumbW, thumbH, "fore");
         } catch (e) {
           api.sys.log(`ギャラリー画像を読めません: ${entry.image}: ${e}`, "warn");
         }
         api.layer.set(img, { x: thumbRect.x, y: thumbRect.y, z: 313, visible: true, opacity: 0 }, "fore");
       } else {
-        title.setText([seg(`NO.${num}`, withAlpha(MC.textDim, 200), 13, true), seg("\n", null), seg("？？？", withAlpha(MC.textDim, 220), 17)]);
+        title.setText([seg(`NO.${num}`, withAlpha(MC.textDim, 200), numFs, true), seg("\n", null), seg("？？？", withAlpha(MC.textDim, 220), titleFs)]);
         thumb = this.g.add(
           new MBox(thumbRect, 313, {
-            panel: { radius: 4, top: [8, 10, 24, 235], bottom: [12, 15, 34, 235], border: [255, 255, 255, 20], borderW: 1 },
-            fontSize: 56,
+            panel: { radius: sc(4, s), top: [8, 10, 24, 235], bottom: [12, 15, 34, 235], border: [255, 255, 255, 20], borderW: s },
+            fontSize: sc(56, s),
             lineHeight: 1.2,
             align: "center",
-            marginY: 44,
+            marginY: sc(44, s),
             opacity: 0,
           }),
         );
-        thumb.setText([seg("？", withAlpha(MC.textDim, 170), 52), seg("\nLOCKED", withAlpha(MC.textDim, 150), 13, true)]);
+        thumb.setText([seg("？", withAlpha(MC.textDim, 170), sc(52, s)), seg("\nLOCKED", withAlpha(MC.textDim, 150), numFs, true)]);
       }
       const over = this.g.add(
         new MBox(rect, 315, {
           panel: {
-            radius: 8,
+            radius: sc(8, s),
             top: [238, 198, 114, open ? 22 : 10],
             bottom: [238, 198, 114, open ? 8 : 4],
             border: open ? MC.accent : withAlpha(MC.accent, 130),
-            borderW: 1.5,
+            borderW: 1.5 * s,
           },
           opacity: 0,
         }),
@@ -553,11 +622,11 @@ export class GalleryScreen {
       this.cards.push({ rect, over, entry, open });
       // 出現: 全カードの画像まで読み終えてから一括で（できた順に出すと 1 枚ずつ遅れて見える）
       reveals.push(() => {
-        card.appear(0, 10, D_OPEN);
-        title.appear(0, 10, D_OPEN);
-        if (thumb !== null) thumb.appear(0, 10, D_OPEN);
+        card.appear(0, slide, D_OPEN);
+        title.appear(0, slide, D_OPEN);
+        if (thumb !== null) thumb.appear(0, slide, D_OPEN);
         if (img !== null) {
-          api.layer.set(img, { y: thumbRect.y + 10 }, "fore");
+          api.layer.set(img, { y: thumbRect.y + slide }, "fore");
           api.layer.move(img, { toY: thumbRect.y, toOpacity: 255, timeMs: D_OPEN, accel: EASE_OUT }, "fore");
         }
         over.show(true);
@@ -570,6 +639,7 @@ export class GalleryScreen {
   private async view(events: UiEvents, entry: GalleryEntry): Promise<void> {
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = this.s;
     const v = new MGroup();
     try {
       const black = v.add(makeVeil(sw, sh, 340, 255, 255));
@@ -584,20 +654,22 @@ export class GalleryScreen {
       api.layer.set(img, { x: 0, y: 0, z: 341, visible: true, opacity: 0 }, "fore");
       black.go(0, 0, 255, D_NORM, EASE_OUT);
       api.layer.move(img, { toOpacity: 255, timeMs: D_SLOW + 60, accel: EASE_OUT }, "fore");
+      const capH = sc(64, s);
+      const capFs = sc(16, s);
       const cap = v.add(
-        new MBox({ x: 0, y: sh - 64, w: sw, h: 64 }, 342, {
+        new MBox({ x: 0, y: sh - capH, w: sw, h: capH }, 342, {
           panel: { top: [0, 0, 0, 0], bottom: [0, 0, 0, 150] },
-          fontSize: 16,
+          fontSize: capFs,
           lineHeight: 1.3,
           align: "center",
-          marginY: 26,
+          marginY: sc(26, s),
           opacity: 0,
         }),
       );
-      cap.setText([seg(entry.title, withAlpha(MC.text, 230), 16), seg("　　クリックで戻る", withAlpha(MC.textSub, 190), 13)]);
+      cap.setText([seg(entry.title, withAlpha(MC.text, 230), capFs), seg("　　クリックで戻る", withAlpha(MC.textSub, 190), sc(13, s))]);
       cap.show(true);
       await sleep(D_SLOW + 60);
-      cap.go(0, sh - 64, 255, D_SLOW, EASE_OUT);
+      cap.go(0, sh - capH, 255, D_SLOW, EASE_OUT);
       events.clear();
       while (true) {
         const ev = await events.next();
@@ -605,7 +677,7 @@ export class GalleryScreen {
         if (ev.kind === "key" && (ev.key === "Escape" || ev.key === "Enter" || ev.key === " ")) break;
       }
       api.layer.move(img, { toOpacity: 0, timeMs: D_NORM, accel: EASE_IN }, "fore");
-      cap.go(0, sh - 64, 0, D_NORM, EASE_IN);
+      cap.go(0, sh - capH, 0, D_NORM, EASE_IN);
       black.go(0, 0, 0, D_NORM, EASE_IN);
       await sleep(D_NORM + 20);
     } finally {

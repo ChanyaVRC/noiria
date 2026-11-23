@@ -8,7 +8,10 @@
 // V8/tsint がバイト一致する）。
 
 import * as api from "noiria:api";
+import { BASE_W, BASE_H, uiScale, sc } from "noiria:kag/ui";
 import type { Rect } from "noiria:kag/ui";
+
+export { BASE_W, BASE_H, uiScale, sc };
 
 // ---------- 配色・時間 ----------
 
@@ -362,6 +365,7 @@ export class MHoverBox {
   readonly base: MBox;
   private over: MBox;
   private bar: MBox | null;
+  private barSlide: number;
   private on = false;
 
   constructor(
@@ -370,13 +374,15 @@ export class MHoverBox {
     baseOpts: MBoxOpts,
     overPanel: PanelStyle,
     barW: number = 0,
+    s: number = 1,
   ) {
     this.base = new MBox(rect, z, baseOpts);
     this.over = new MBox(rect, z + 1, { panel: overPanel, visible: true, opacity: 0, persist: baseOpts.persist });
+    this.barSlide = sc(6, s);
     this.bar =
       barW > 0
         ? new MBox({ x: rect.x, y: rect.y, w: barW, h: rect.h }, z + 2, {
-            panel: { top: MC.accent, radius: Math.min(2, barW / 2) },
+            panel: { top: MC.accent, radius: Math.min(2 * s, barW / 2) },
             opacity: 0,
             persist: baseOpts.persist,
           })
@@ -397,7 +403,7 @@ export class MHoverBox {
     const r = this.base.rect;
     this.over.go(r.x, r.y, on ? 255 : 0, ms, on ? EASE_OUT : EASE_IN);
     if (this.bar !== null) {
-      this.bar.go(on ? r.x : r.x - 6, r.y, on ? 255 : 0, ms, on ? EASE_OUT : EASE_IN);
+      this.bar.go(on ? r.x : r.x - this.barSlide, r.y, on ? 255 : 0, ms, on ? EASE_OUT : EASE_IN);
     }
   }
 
@@ -426,7 +432,7 @@ export class MHoverBox {
     this.over.put(r.x, r.y, 0);
     this.over.show(true);
     if (this.bar !== null) {
-      this.bar.put(r.x - 6, r.y, 0);
+      this.bar.put(r.x - this.barSlide, r.y, 0);
       this.bar.show(true);
     }
     this.on = false;
@@ -486,15 +492,18 @@ export function makeVeil(screenW: number, screenH: number, z: number, alphaTop: 
 }
 
 /** 画面の見出し: 大きな英字 + 小さな和文ラベル（例: SAVE / セーブ）と、その下の短いアクセントバー。 */
-export function addHeading(g: MGroup, z: number, x: number, y: number, en: string, jp: string, ms: number = D_OPEN): void {
-  const big = new MBox({ x, y, w: 560, h: 70 }, z, { fontSize: 52, lineHeight: 1.2, color: MC.text, opacity: 0 });
-  big.setText([seg(en, MC.text, 52, true)]);
+export function addHeading(g: MGroup, z: number, x: number, y: number, en: string, jp: string, ms: number = D_OPEN, s: number = 1): void {
+  const bigFs = sc(52, s);
+  const smallFs = sc(20, s);
+  const slide = sc(14, s);
+  const big = new MBox({ x, y, w: sc(560, s), h: sc(70, s) }, z, { fontSize: bigFs, lineHeight: 1.2, color: MC.text, opacity: 0 });
+  big.setText([seg(en, MC.text, bigFs, true)]);
   g.add(big);
-  const jx = x + estimateWidth(en, 52) + 22;
-  const small = new MBox({ x: jx, y: y + 26, w: 300, h: 30 }, z, { fontSize: 20, lineHeight: 1.3, color: MC.textSub, opacity: 0 });
-  small.setText([seg(jp, MC.textSub, 20)]);
+  const jx = x + estimateWidth(en, bigFs) + sc(22, s);
+  const small = new MBox({ x: jx, y: y + sc(26, s), w: sc(300, s), h: sc(30, s) }, z, { fontSize: smallFs, lineHeight: 1.3, color: MC.textSub, opacity: 0 });
+  small.setText([seg(jp, MC.textSub, smallFs)]);
   g.add(small);
-  const bar = new MBox({ x: x + 3, y: y + 72, w: 44, h: 3 }, z, { panel: { top: MC.accent, radius: 1.5 }, opacity: 0 });
+  const bar = new MBox({ x: x + sc(3, s), y: y + sc(72, s), w: sc(44, s), h: sc(3, s) }, z, { panel: { top: MC.accent, radius: 1.5 * s }, opacity: 0 });
   g.add(bar);
   [big, small, bar].forEach((b) => {
     if (ms <= 0) {
@@ -502,7 +511,7 @@ export function addHeading(g: MGroup, z: number, x: number, y: number, en: strin
       b.show(true);
       return;
     }
-    b.put(b.rect.x - 14, b.rect.y, 0);
+    b.put(b.rect.x - slide, b.rect.y, 0);
     b.show(true);
     b.go(b.rect.x, b.rect.y, 255, ms, EASE_OUT);
   });

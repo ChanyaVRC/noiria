@@ -9,7 +9,7 @@ import { ButtonManager, applyEditKey } from "noiria:kag/buttons";
 import { AnimManager } from "noiria:kag/anim";
 import { SystemMenu, makeExcerpt } from "noiria:kag/menu";
 import type { MenuHost, SettingKey } from "noiria:kag/menu";
-import { UiBox, UiEvents, UI_COLORS, SystemBar, Toast, confirmDialog, SYS_BUTTON_ORDER } from "noiria:kag/ui";
+import { UiBox, UiEvents, UI_COLORS, SystemBar, Toast, confirmDialog, SYS_BUTTON_ORDER, BASE_H, uiScale, sc } from "noiria:kag/ui";
 import type { SysButtonId } from "noiria:kag/ui";
 import {
   ModernNameTag,
@@ -19,11 +19,7 @@ import {
   ModernModeBadge,
   ChoiceScreen,
   modernConfirm,
-  BAND_H,
-  COL_W,
-  BAND_FONT,
-  BAND_TEXT_TOP,
-  BAND_TEXT_BOTTOM,
+  bandMetrics,
   bandPanel,
   setGlyphPaused,
 } from "noiria:kag/mhud";
@@ -219,10 +215,10 @@ const NAME_PLATE_MAX_WIDTH = 220;
  * 幅 = 左右マージン×2 + 文字数×フォントサイズ（等幅近似）を [MIN, MAX] にクランプ。
  * 純関数（単体テスト対象）。
  */
-export function namePlateWidth(name: string, fontSize: number, marginX: number): number {
+export function namePlateWidth(name: string, fontSize: number, marginX: number, s: number = 1): number {
   const chars = codePointCount(name);
   const w = marginX * 2 + chars * fontSize;
-  return Math.max(NAME_PLATE_MIN_WIDTH, Math.min(NAME_PLATE_MAX_WIDTH, Math.ceil(w)));
+  return Math.max(sc(NAME_PLATE_MIN_WIDTH, s), Math.min(sc(NAME_PLATE_MAX_WIDTH, s), Math.ceil(w)));
 }
 
 /**
@@ -236,13 +232,16 @@ export function computeNamePlateCfg(
   msg: MessageConfig,
   name: string,
   style?: { color?: api.RGBA },
+  s: number = 1,
 ): NamePlateConfig {
   const fontSize = Math.round(msg.fontSize * NAME_PLATE_FONT_RATIO);
-  const height = Math.ceil(fontSize * MSG_LINE_HEIGHT) + NAME_PLATE_MARGIN_Y * 2;
-  const width = namePlateWidth(name, fontSize, NAME_PLATE_MARGIN_X);
+  const marginX = sc(NAME_PLATE_MARGIN_X, s);
+  const marginY = sc(NAME_PLATE_MARGIN_Y, s);
+  const height = Math.ceil(fontSize * MSG_LINE_HEIGHT) + marginY * 2;
+  const width = namePlateWidth(name, fontSize, marginX, s);
   return {
-    left: msg.left + 16,
-    top: msg.top - height + NAME_PLATE_OVERLAP,
+    left: msg.left + sc(16, s),
+    top: msg.top - height + sc(NAME_PLATE_OVERLAP, s),
     width,
     height,
     radius: Math.round(msg.radius * 0.7),
@@ -253,8 +252,8 @@ export function computeNamePlateCfg(
       Math.min(255, msg.color[3] + 30),
     ],
     fontSize,
-    marginX: NAME_PLATE_MARGIN_X,
-    marginY: NAME_PLATE_MARGIN_Y,
+    marginX,
+    marginY,
   };
 }
 
@@ -771,37 +770,40 @@ export class KagPlayer {
   private computeMsgCfg(): MessageConfig {
     const o = this.msgOverrides;
     if (this.modern) {
+      const bm = bandMetrics(this.screenW, this.screenH);
+      const bandH = o.height ?? bm.bandH;
       return {
         left: o.left ?? 0,
-        top: o.top ?? this.screenH - (o.height ?? BAND_H),
+        top: o.top ?? this.screenH - bandH,
         width: o.width ?? this.screenW,
-        height: o.height ?? BAND_H,
+        height: bandH,
         radius: 0,
         color: o.color ?? [6, 9, 24, 236],
-        fontSize: o.fontSize ?? BAND_FONT,
-        marginX: o.marginX ?? Math.floor((this.screenW - COL_W) / 2),
-        marginY: o.marginY ?? BAND_TEXT_TOP,
+        fontSize: o.fontSize ?? bm.bandFont,
+        marginX: o.marginX ?? Math.floor((this.screenW - bm.colW) / 2),
+        marginY: o.marginY ?? bm.textTop,
         rows: o.rows ?? 4,
         fontFamily: o.fontFamily,
         marginR: o.marginR,
-        marginB: o.marginB ?? BAND_TEXT_BOTTOM,
+        marginB: o.marginB ?? bm.textBottom,
         frame: o.frame,
       };
     }
-    const fontSize = o.fontSize ?? 26;
-    const marginY = o.marginY ?? 18;
+    const s = uiScale(this.screenW, this.screenH);
+    const fontSize = o.fontSize ?? sc(26, s);
+    const marginY = o.marginY ?? sc(18, s);
     const rows = o.rows ?? 4;
     const height = o.height ?? Math.ceil(fontSize * MSG_LINE_HEIGHT * rows) + marginY * 2;
-    const left = o.left ?? 40;
+    const left = o.left ?? sc(40, s);
     return {
       left,
-      top: o.top ?? this.screenH - MSG_BOTTOM_GAP - height,
+      top: o.top ?? this.screenH - sc(MSG_BOTTOM_GAP, s) - height,
       width: o.width ?? this.screenW - left * 2,
       height,
-      radius: o.radius ?? 14,
+      radius: o.radius ?? sc(14, s),
       color: o.color ?? [10, 12, 30, 195],
       fontSize,
-      marginX: o.marginX ?? 30,
+      marginX: o.marginX ?? sc(30, s),
       marginY,
       rows,
       fontFamily: o.fontFamily,
@@ -875,20 +877,22 @@ export class KagPlayer {
     this.loadSettings();
     if (this.settings.msgOpacity !== 100) this.refreshMessageWindows();
 
+    const s = uiScale(this.screenW, this.screenH);
     if (this.modern) {
-      this.modernGlyph = new ModernGlyph(200);
+      this.modernGlyph = new ModernGlyph(200, s);
       const m0 = this.msgLayers[0].cfg;
       this.modernName = new ModernNameTag(
         m0.left + m0.marginX,
         m0.top,
         m0.width - m0.marginX - (m0.marginR ?? m0.marginX),
         this.namePlateOpt.textColor ?? MC.accent,
+        s,
       );
     }
     if (this.sysBarOpt !== null) {
       this.sysBar = this.modern
-        ? new ModernSystemBar(this.sysBarOpt.items, 106)
-        : new SystemBar(this.sysBarOpt, 106);
+        ? new ModernSystemBar(this.sysBarOpt.items, 106, s)
+        : new SystemBar(this.sysBarOpt, 106, s);
       this.layoutSysBar();
     }
 
@@ -935,7 +939,8 @@ export class KagPlayer {
     const m = ml.cfg;
     const framed = this.prepareFrame(ml);
     if (this.modern && !framed) {
-      api.layer.panel(ml.layerId, { w: m.width, h: m.height, ...bandPanel(this.windowColor(m.color)) }, "fore");
+      const bm = bandMetrics(this.screenW, this.screenH);
+      api.layer.panel(ml.layerId, { w: m.width, h: m.height, ...bandPanel(this.windowColor(m.color), bm.ramp) }, "fore");
     } else {
       api.layer.msgbox(ml.layerId, m.width, m.height, m.radius, framed ? TRANSPARENT : this.windowColor(m.color), "fore");
     }
@@ -1127,7 +1132,7 @@ export class KagPlayer {
     }
     if (this.cur.nameLabel === null) return;
     const id = this.ensureNameLayer();
-    const cfg = computeNamePlateCfg(this.cur.cfg, this.cur.nameLabel, this.namePlateOpt);
+    const cfg = computeNamePlateCfg(this.cur.cfg, this.cur.nameLabel, this.namePlateOpt, uiScale(this.screenW, this.screenH));
     api.layer.msgbox(id, cfg.width, cfg.height, cfg.radius, this.windowColor(cfg.color), "fore");
     api.layer.set(id, { x: cfg.left, y: cfg.top }, "fore");
     const plateStyle: api.TextStyle = {
@@ -1365,9 +1370,9 @@ export class KagPlayer {
     }
     this.running = true;
     if (this.modern) {
-      prefetchSlotThumbs();
+      prefetchSlotThumbs(this.screenW, this.screenH);
       const sf = vars.sf as Record<string, unknown>;
-      prefetchGalleryThumbs(this.galleryOpt.filter((e) => !!sf[e.flag]).map((e) => e.image));
+      prefetchGalleryThumbs(this.galleryOpt.filter((e) => !!sf[e.flag]).map((e) => e.image), this.screenW, this.screenH);
     }
     void this.modeIndicatorLoop();
 
@@ -2092,11 +2097,12 @@ export class KagPlayer {
    * （「ペン位置追従」、W7）。rects が空（本文なし）の場合はメッセージウィンドウ左上
    * マージン位置へフォールバックする。 */
   private updateGlyphPosition(id: number): void {
+    const s = uiScale(this.screenW, this.screenH);
     let x: number;
     let y: number;
     if (this.glyphCfg.fix) {
-      x = this.glyphCfg.left ?? this.cur.cfg.left + this.cur.cfg.width - 40;
-      y = this.glyphCfg.top ?? this.cur.cfg.top + this.cur.cfg.height - 40;
+      x = this.glyphCfg.left ?? this.cur.cfg.left + this.cur.cfg.width - sc(40, s);
+      y = this.glyphCfg.top ?? this.cur.cfg.top + this.cur.cfg.height - sc(40, s);
     } else {
       const rects = api.text.rects(this.cur.layerId);
       const originX = this.cur.cfg.left + this.cur.cfg.marginX;
@@ -2120,14 +2126,15 @@ export class KagPlayer {
     if (this.modernGlyph !== null && !this.glyphCfg.path) {
       if (!visible) this.modernGlyph.hide();
       else if (this.msgVisible && this.cur.visible) {
+        const s = uiScale(this.screenW, this.screenH);
         const rects = api.text.rects(this.cur.layerId);
         const m = this.cur.cfg;
         const originX = m.left + m.marginX;
         const originY = m.top + m.marginY;
         const last = rects.length > 0 ? rects[rects.length - 1] : null;
         const lineH = Math.round(m.fontSize * 1.6);
-        const x = last === null ? originX : originX + last.x + last.w + 4;
-        const y = last === null ? originY : originY + last.y + Math.round((lineH - 28) / 2) - 18;
+        const x = last === null ? originX : originX + last.x + last.w + sc(4, s);
+        const y = last === null ? originY : originY + last.y + Math.round((lineH - sc(28, s)) / 2) - sc(18, s);
         this.modernGlyph.show(x, y);
       }
       return;
@@ -2263,24 +2270,27 @@ export class KagPlayer {
     if (this.uiLock) return;
     this.lockUi();
     try {
-      const w = 640;
-      const h = 220;
+      const s = uiScale(this.screenW, this.screenH);
+      const w = sc(640, s);
+      const h = sc(220, s);
       const left = Math.floor((this.screenW - w) / 2);
       const top = Math.floor((this.screenH - h) / 2);
+      const mx = sc(24, s);
+      const my = sc(16, s);
       const id = api.layer.create("text");
       api.layer.set(id, { x: left, y: top, z: 320, visible: true }, "fore");
       api.text.style(id, {
-        fontSize: 22,
-        boxW: w - 48,
-        boxH: h - 32,
-        marginX: 24,
-        marginY: 16,
+        fontSize: sc(22, s),
+        boxW: w - mx * 2,
+        boxH: h - my * 2,
+        marginX: mx,
+        marginY: my,
         lineHeight: 1.6,
       });
       const accent: api.RGBA = [255, 216, 120, 255];
       let buffer = initial;
       const redraw = (): void => {
-        api.layer.msgbox(id, w, h, 12, [12, 12, 28, 240], "fore");
+        api.layer.msgbox(id, w, h, sc(12, s), [12, 12, 28, 240], "fore");
         api.text.print(
           id,
           [
@@ -2737,9 +2747,11 @@ export class KagPlayer {
     return true;
   }
 
-  /** 今の画面をセーブのサムネイルとして撮る。モダン UI は大きいカード用に大きめ（384x216）に撮る。 */
+  /** 今の画面をセーブのサムネイルとして撮る。モダン UI は大きいカード用に大きめ（384x216 * scale）に撮る。 */
   private captureThumb(): void {
-    if (this.modern) api.sys.thumbCapture(384, 216);
+    const s = uiScale(this.screenW, this.screenH);
+    if (this.modern) api.sys.thumbCapture(sc(384, s), sc(216, s));
+    else if (s !== 1) api.sys.thumbCapture(sc(240, s), sc(135, s));
     else api.sys.thumbCapture();
   }
 
@@ -2780,13 +2792,15 @@ export class KagPlayer {
   /** 画面上部に約 1.2 秒だけ出す通知（待ちを妨げない）。 */
   toast(text: string): void {
     if (this.modern) {
-      if (this.modernToast === null) this.modernToast = new ModernToast(this.screenW);
+      if (this.modernToast === null) this.modernToast = new ModernToast(this.screenW, this.screenH);
       this.modernToast.show(text);
       return;
     }
-    if (this.toastUi === null) this.toastUi = new Toast(this.screenW);
+    if (this.toastUi === null) this.toastUi = new Toast(this.screenW, this.screenH);
+    const s = uiScale(this.screenW, this.screenH);
+    const oy = Math.floor((this.screenH - sc(BASE_H, s)) / 2);
     // メニュー/履歴の表示中は上端のタブと重ならない位置（カードとフッタの間）に出す。
-    this.toastUi.show(text, 1200, this.uiLock ? 606 : 22);
+    this.toastUi.show(text, 1200, this.uiLock ? oy + sc(606, s) : sc(22, s));
   }
 
   async load(slot: string): Promise<boolean> {
@@ -3074,8 +3088,9 @@ export class KagPlayer {
 
   private layoutSysBar(): void {
     if (this.sysBar === null) return;
+    const s = uiScale(this.screenW, this.screenH);
     const m = this.msgLayers[0].cfg;
-    this.sysBar.layout(m.left + m.width - 16, m.top);
+    this.sysBar.layout(m.left + m.width - sc(16, s), m.top);
     this.updateSysBarVisibility();
   }
 
@@ -3231,31 +3246,38 @@ export class KagPlayer {
 
   /** 履歴の本文オーバーレイ（最初に作る = 従来どおり最初に確保されるレイヤ）と、見出し・スクロールバー。 */
   private ensureBacklogLayers(): void {
+    const s = uiScale(this.screenW, this.screenH);
+    const font = sc(KagPlayer.BACKLOG_FONT, s);
+    const top = sc(KagPlayer.BACKLOG_TOP, s);
+    const left = sc(KagPlayer.BACKLOG_LEFT, s);
     if (this.backlogLayer === null) {
       this.backlogLayer = this.createOverlay([6, 8, 18, 250], 300, {
-        fontSize: KagPlayer.BACKLOG_FONT,
+        fontSize: font,
         lineHeight: KagPlayer.BACKLOG_LINE,
-        boxW: this.screenW - KagPlayer.BACKLOG_LEFT * 2 - 20,
-        boxH: this.screenH - KagPlayer.BACKLOG_TOP - 30,
-        marginX: KagPlayer.BACKLOG_LEFT,
-        marginY: KagPlayer.BACKLOG_TOP,
+        boxW: this.screenW - left * 2 - sc(20, s),
+        boxH: this.screenH - top - sc(30, s),
+        marginX: left,
+        marginY: top,
       });
     }
     if (this.backlogHeader === null) {
-      this.backlogHeader = new UiBox({ x: 0, y: 14, w: this.screenW, h: 40 }, 301, {
-        fontSize: 20,
+      this.backlogHeader = new UiBox({ x: 0, y: sc(14, s), w: this.screenW, h: sc(40, s) }, 301, {
+        fontSize: sc(20, s),
         lineHeight: 1.2,
-        marginX: KagPlayer.BACKLOG_LEFT,
-        marginY: 8,
+        marginX: left,
+        marginY: sc(8, s),
         color: UI_COLORS.accent,
       });
+      const barW = sc(8, s);
+      const barRad = sc(4, s);
+      const barX = this.screenW - sc(34, s);
       this.backlogBar = new UiBox(
-        { x: this.screenW - 34, y: KagPlayer.BACKLOG_TOP, w: 8, h: this.screenH - KagPlayer.BACKLOG_TOP - 40 },
+        { x: barX, y: top, w: barW, h: this.screenH - top - sc(40, s) },
         301,
-        { radius: 4, bg: UI_COLORS.track },
+        { radius: barRad, bg: UI_COLORS.track },
       );
-      this.backlogThumb = new UiBox({ x: this.screenW - 34, y: KagPlayer.BACKLOG_TOP, w: 8, h: 24 }, 302, {
-        radius: 4,
+      this.backlogThumb = new UiBox({ x: barX, y: top, w: barW, h: sc(24, s) }, 302, {
+        radius: barRad,
         bg: UI_COLORS.fill,
       });
       this.setBacklogChrome(false);
@@ -3274,9 +3296,12 @@ export class KagPlayer {
 
   /** 履歴 1 件のおおよその行数（名前行 + 本文の折り返し + 区切りの空行）。収まるかの目安で、最終判定は実測。 */
   private backlogEntryLines(e: BacklogEntry): number {
+    const s = uiScale(this.screenW, this.screenH);
+    const font = sc(KagPlayer.BACKLOG_FONT, s);
+    const left = sc(KagPlayer.BACKLOG_LEFT, s);
     const perLine = Math.max(
       10,
-      Math.floor((this.screenW - KagPlayer.BACKLOG_LEFT * 2 - 40) / KagPlayer.BACKLOG_FONT) - 2,
+      Math.floor((this.screenW - left * 2 - sc(40, s)) / font) - 2,
     );
     let n = e.name ? 1 : 0;
     for (const line of e.text.split("\n")) n += Math.max(1, Math.ceil(codePointCount(line) / perLine));
@@ -3289,11 +3314,14 @@ export class KagPlayer {
     count: number;
     ranges: { start: number; end: number; entry: BacklogEntry }[];
   } {
+    const s = uiScale(this.screenW, this.screenH);
+    const font = sc(KagPlayer.BACKLOG_FONT, s);
+    const top = sc(KagPlayer.BACKLOG_TOP, s);
     const layer = this.backlogLayer!;
     const total = this.backlog.length;
     const end = total - this.backlogOffset;
-    const lineAdvance = KagPlayer.BACKLOG_FONT * KagPlayer.BACKLOG_LINE;
-    const capacity = Math.floor((this.screenH - KagPlayer.BACKLOG_TOP - 30) / lineAdvance);
+    const lineAdvance = font * KagPlayer.BACKLOG_LINE;
+    const capacity = Math.floor((this.screenH - top - sc(30, s)) / lineAdvance);
     let first = end;
     let used = 0;
     while (first > 0) {
@@ -3346,8 +3374,9 @@ export class KagPlayer {
       ]);
     }
     if (this.backlogBar && this.backlogThumb) {
+      const s = uiScale(this.screenW, this.screenH);
       const track = this.backlogBar.rect;
-      const h = Math.max(24, Math.round((track.h * (end - first)) / Math.max(1, total)));
+      const h = Math.max(sc(24, s), Math.round((track.h * (end - first)) / Math.max(1, total)));
       const y = track.y + Math.round(((track.h - h) * first) / Math.max(1, total - (end - first)));
       this.backlogThumb.rect.h = h;
       this.backlogThumb.setBg(UI_COLORS.fill);
@@ -3362,11 +3391,13 @@ export class KagPlayer {
     y: number,
   ): BacklogEntry | null {
     if (this.backlogLayer === null) return null;
+    const s = uiScale(this.screenW, this.screenH);
     const rects = api.text.rects(this.backlogLayer);
-    const ox = KagPlayer.BACKLOG_LEFT;
-    const oy = KagPlayer.BACKLOG_TOP;
+    const ox = sc(KagPlayer.BACKLOG_LEFT, s);
+    const oy = sc(KagPlayer.BACKLOG_TOP, s);
+    const pad = sc(6, s);
     for (const r of rects) {
-      if (x < ox + r.x - 6 || x > ox + r.x + r.w + 6 || y < oy + r.y - 6 || y > oy + r.y + r.h + 6) continue;
+      if (x < ox + r.x - pad || x > ox + r.x + r.w + pad || y < oy + r.y - pad || y > oy + r.y + r.h + pad) continue;
       for (const g of view.ranges) {
         if (r.byte_start >= g.start && r.byte_start < g.end) return g.entry;
       }
@@ -3395,24 +3426,25 @@ export class KagPlayer {
       const cur = this.mode.skip ? "▶▶ スキップ中" : this.mode.auto ? "▷ オート" : "";
       if (cur !== shown && this.modern) {
         shown = cur;
-        if (this.modeBadge === null) this.modeBadge = new ModernModeBadge(this.screenW);
+        if (this.modeBadge === null) this.modeBadge = new ModernModeBadge(this.screenW, this.screenH);
         this.modeBadge.set(this.mode.skip ? "SKIP" : this.mode.auto ? "AUTO" : "");
       } else if (cur !== shown) {
         shown = cur;
         if (this.indicatorLayer === null) {
+          const s = uiScale(this.screenW, this.screenH);
           this.indicatorLayer = api.layer.create("text");
           api.text.style(this.indicatorLayer, {
-            fontSize: 22,
-            boxW: 240,
-            boxH: 40,
+            fontSize: sc(22, s),
+            boxW: sc(240, s),
+            boxH: sc(40, s),
             marginX: 0,
             marginY: 0,
             color: [255, 216, 120, 255],
-            outlineWidth: 2,
+            outlineWidth: sc(2, s),
           });
           api.layer.set(
             this.indicatorLayer,
-            { x: this.screenW - 250, y: 14, z: 250, visible: false },
+            { x: this.screenW - sc(250, s), y: sc(14, s), z: 250, visible: false },
             "fore",
           );
         }

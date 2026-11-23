@@ -11,6 +11,17 @@ export interface Rect {
   h: number;
 }
 
+export const BASE_W = 1280;
+export const BASE_H = 720;
+
+export function uiScale(screenW: number, screenH: number): number {
+  return Math.max(0.5, Math.min(screenW / BASE_W, screenH / BASE_H));
+}
+
+export function sc(v: number, s: number): number {
+  return Math.round(v * s);
+}
+
 export function inRect(r: Rect, x: number, y: number): boolean {
   return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
@@ -134,8 +145,12 @@ export class UiBox {
 /** 画像レイヤ 1 枚（セーブのサムネイル表示用）。 */
 export class UiImage {
   readonly id: number;
+  private w: number;
+  private h: number;
 
-  constructor(x: number, y: number, z: number) {
+  constructor(x: number, y: number, z: number, w = 0, h = 0) {
+    this.w = w;
+    this.h = h;
     this.id = api.layer.create("image");
     api.layer.set(this.id, { x, y, z, visible: true }, "fore");
   }
@@ -143,7 +158,8 @@ export class UiImage {
   /** セーブ領域のサムネイルを読む。無い/壊れていれば false（表示は空になる）。 */
   loadSaveThumb(slot: string): boolean {
     try {
-      api.layer.loadSaveThumb(this.id, slot, "fore");
+      if (this.w > 0 && this.h > 0) api.layer.loadSaveThumb(this.id, slot, "fore", this.w, this.h);
+      else api.layer.loadSaveThumb(this.id, slot, "fore");
       return true;
     } catch {
       api.layer.clearImage(this.id, "fore");
@@ -234,43 +250,46 @@ export async function confirmDialog(
   opts: ConfirmOpts = {},
 ): Promise<boolean> {
   const group = new UiGroup();
+  const s = uiScale(screenW, screenH);
   try {
-    const w = 640;
-    const h = 232;
+    const w = sc(640, s);
+    const h = sc(232, s);
     const left = Math.floor((screenW - w) / 2);
     const top = Math.floor((screenH - h) / 2);
     group.add(new UiBox({ x: 0, y: 0, w: screenW, h: screenH }, 330, { bg: [0, 0, 0, 150] }));
     const panel = group.add(
       new UiBox({ x: left, y: top, w, h }, 331, {
-        radius: 14,
+        radius: sc(14, s),
         bg: [20, 24, 50, 252],
-        fontSize: 24,
+        fontSize: sc(24, s),
         lineHeight: 1.6,
         align: "center",
-        marginX: 28,
-        marginY: 28,
+        marginX: sc(28, s),
+        marginY: sc(28, s),
       }),
     );
     panel.setText([{ text: text || "?", color: UI_COLORS.text }]);
-    const btnW = 188;
-    const btnH = 52;
-    const by = top + h - btnH - 26;
+    const btnW = sc(188, s);
+    const btnH = sc(52, s);
+    const gap = sc(16, s);
+    const by = top + h - btnH - sc(26, s);
+    const cx = left + Math.floor(w / 2);
     const yes = group.add(
-      new UiBox({ x: left + w / 2 - btnW - 16, y: by, w: btnW, h: btnH }, 332, {
-        radius: 10,
+      new UiBox({ x: cx - btnW - gap, y: by, w: btnW, h: btnH }, 332, {
+        radius: sc(10, s),
         bg: UI_COLORS.button,
-        fontSize: 24,
+        fontSize: sc(24, s),
         align: "center",
-        marginY: 12,
+        marginY: sc(12, s),
       }),
     );
     const no = group.add(
-      new UiBox({ x: left + w / 2 + 16, y: by, w: btnW, h: btnH }, 332, {
-        radius: 10,
+      new UiBox({ x: cx + gap, y: by, w: btnW, h: btnH }, 332, {
+        radius: sc(10, s),
         bg: UI_COLORS.button,
-        fontSize: 24,
+        fontSize: sc(24, s),
         align: "center",
-        marginY: 12,
+        marginY: sc(12, s),
       }),
     );
     yes.setText([{ text: opts.yesLabel ?? "はい", color: UI_COLORS.accent }]);
@@ -316,23 +335,26 @@ export class Toast {
   private box: UiBox | null = null;
   private gen = 0;
   private screenW: number;
-  private fontSize = 22;
+  private s: number;
+  private fontSize: number;
 
-  constructor(screenW: number) {
+  constructor(screenW: number, screenH: number = BASE_H) {
     this.screenW = screenW;
+    this.s = uiScale(screenW, screenH);
+    this.fontSize = sc(22, this.s);
   }
 
-  show(text: string, ms = 1200, y = 22): void {
+  show(text: string, ms = 1200, y = sc(22, this.s)): void {
     this.hide();
     const gen = ++this.gen;
-    const w = Math.min(this.screenW - 80, text.length * this.fontSize + 56);
-    const h = 44;
+    const w = Math.min(this.screenW - sc(80, this.s), text.length * this.fontSize + sc(56, this.s));
+    const h = sc(44, this.s);
     const box = new UiBox({ x: Math.floor((this.screenW - w) / 2), y, w, h }, 400, {
-      radius: 10,
+      radius: sc(10, this.s),
       bg: [18, 22, 48, 236],
       fontSize: this.fontSize,
       align: "center",
-      marginY: 8,
+      marginY: sc(8, this.s),
     });
     box.setText([{ text, color: UI_COLORS.text }]);
     this.box = box;
@@ -387,23 +409,25 @@ const BAR_GAP = 6;
 const BAR_BOTTOM_GAP = 4;
 
 /** ボタン 1 個の幅（ラベル長に比例、下限あり）。純関数。 */
-export function sysButtonWidth(label: string): number {
-  return Math.max(48, label.length * 9 + 22);
+export function sysButtonWidth(label: string, s: number = 1): number {
+  return sc(Math.max(48, label.length * 9 + 22), s);
 }
 
 /** 右揃えで並べたときの各ボタン矩形。right は最右ボタンの右端、bottom はバー下端。純関数。 */
-export function layoutSystemBar(items: SysButtonId[], right: number, bottom: number): Rect[] {
-  const widths = items.map((id) => sysButtonWidth(SYS_BUTTON_LABELS[id]));
+export function layoutSystemBar(items: SysButtonId[], right: number, bottom: number, s: number = 1): Rect[] {
+  const widths = items.map((id) => sysButtonWidth(SYS_BUTTON_LABELS[id], s));
+  const gap = sc(BAR_GAP, s);
+  const h = sc(BAR_BUTTON_H, s);
   let total = 0;
   widths.forEach((w) => {
     total += w;
   });
-  total += BAR_GAP * Math.max(0, items.length - 1);
+  total += gap * Math.max(0, items.length - 1);
   let x = right - total;
-  const y = bottom - BAR_BUTTON_H;
+  const y = bottom - h;
   return widths.map((w) => {
-    const r = { x, y, w, h: BAR_BUTTON_H };
-    x += w + BAR_GAP;
+    const r = { x, y, w, h };
+    x += w + gap;
     return r;
   });
 }
@@ -412,13 +436,15 @@ export function layoutSystemBar(items: SysButtonId[], right: number, bottom: num
 export class SystemBar {
   private style: SystemBarStyle;
   private z: number;
+  private s: number;
   private items: { id: SysButtonId; box: UiBox | null; active: boolean; hover: boolean }[] = [];
   private rects: Rect[] = [];
   private shown = false;
 
-  constructor(style: SystemBarStyle, z: number) {
+  constructor(style: SystemBarStyle, z: number, s: number = 1) {
     this.style = style;
     this.z = z;
+    this.s = s;
     this.items = style.items.map((id) => ({ id, box: null, active: false, hover: false }));
   }
 
@@ -429,17 +455,18 @@ export class SystemBar {
 
   /** 窓の上辺 top の直上・右端 right に合わせて置き直す。 */
   layout(right: number, windowTop: number): void {
-    this.rects = layoutSystemBar(this.style.items, right, windowTop - BAR_BOTTOM_GAP);
+    const s = this.s;
+    this.rects = layoutSystemBar(this.style.items, right, windowTop - sc(BAR_BOTTOM_GAP, s), s);
     this.items.forEach((it, i) => {
       const r = this.rects[i];
       if (it.box === null) {
         const box = new UiBox(r, this.z, {
-          radius: 6,
+          radius: sc(6, s),
           bg: this.colorOf(it),
-          fontSize: 15,
+          fontSize: sc(15, s),
           lineHeight: 1.2,
           align: "center",
-          marginY: 5,
+          marginY: sc(5, s),
           outlineWidth: 0,
           persist: true,
         });

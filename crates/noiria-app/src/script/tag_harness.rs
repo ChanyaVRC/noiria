@@ -145,6 +145,8 @@ pub(crate) struct Setup<'a> {
     /// `main.ts` の `new KagPlayer` の前に挿入する TS（import 文を含めてよい）。純関数の検証を
     /// `api.sys.log(...)` 経由で op_log に出し、V8/tsint の両方で同じ結果になることを見る。
     pub prelude: &'a str,
+    /// `game.json` の `(width, height)`。未指定は `(1280, 720)`。
+    pub screen_size: Option<(u32, u32)>,
 }
 
 /// 1 手ぶんの入力/確認。`Click`/`RightClick`/`Key`/`KeyUp` は直前までのスクリプト動作が
@@ -186,10 +188,11 @@ fn write_scenario(dir: &std::path::Path, ks_body: &str, setup: Setup) {
     std::fs::write(dir.join("scenario/test.ks"), body).unwrap();
 }
 
-fn write_game_json(dir: &std::path::Path, id: &str) {
+fn write_game_json(dir: &std::path::Path, id: &str, screen_size: Option<(u32, u32)>) {
+    let (w, h) = screen_size.unwrap_or((1280, 720));
     std::fs::write(
         dir.join("game.json"),
-        format!(r#"{{"title":"t","id":"{id}","main":"main.ts","width":1280,"height":720}}"#),
+        format!(r#"{{"title":"t","id":"{id}","main":"main.ts","width":{w},"height":{h}}}"#),
     )
     .unwrap();
 }
@@ -276,7 +279,7 @@ fn run_engine_steps(engine: Engine, ks_body: &str, setup: Setup, steps: &[Step])
             .unwrap()
             .as_nanos()
     );
-    write_game_json(dir.path(), &id);
+    write_game_json(dir.path(), &id, setup.screen_size);
     write_scenario(dir.path(), ks_body, setup);
     write_common_fixtures(dir.path());
     if let Some(json) = setup.sys_json {

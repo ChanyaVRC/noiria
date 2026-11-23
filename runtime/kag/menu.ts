@@ -3,7 +3,7 @@
 // MenuHost インターフェース越し。tsint 互換構文のみ。
 
 import * as api from "noiria:api";
-import { UiBox, UiImage, UiGroup, UiEvents, UI_COLORS, inRect, confirmDialog } from "noiria:kag/ui";
+import { UiBox, UiImage, UiGroup, UiEvents, UI_COLORS, inRect, confirmDialog, BASE_W, BASE_H, uiScale, sc } from "noiria:kag/ui";
 import type { Rect } from "noiria:kag/ui";
 
 export type MenuTab = "save" | "load" | "settings";
@@ -171,10 +171,8 @@ export interface MenuHost {
   pages: { save: number; load: number };
 }
 
-// ---------- レイアウト（1280x720 の設計座標。画面が違えば中央寄せ） ----------
+// ---------- レイアウト（1280x720 の設計座標を画面サイズへ比例拡大、異比率は中央寄せ） ----------
 
-const DESIGN_W = 1280;
-const DESIGN_H = 720;
 const Z = 311;
 
 const CARD_W = 568;
@@ -212,6 +210,7 @@ export class SystemMenu {
   private frame = new UiGroup();
   private content = new UiGroup();
   private tab: MenuTab = "save";
+  private s = 1;
   private ox = 0;
   private oy = 0;
   private hots: Hot[] = [];
@@ -240,8 +239,9 @@ export class SystemMenu {
 
   /** メニューを開いて、閉じられるまで待つ。呼び出し側が uiLock の取得/解放とサムネイルの事前取得を行う。 */
   async run(initial: MenuTab): Promise<void> {
-    this.ox = Math.floor((this.host.screenW - DESIGN_W) / 2);
-    this.oy = Math.floor((this.host.screenH - DESIGN_H) / 2);
+    this.s = uiScale(this.host.screenW, this.host.screenH);
+    this.ox = Math.floor((this.host.screenW - sc(BASE_W, this.s)) / 2);
+    this.oy = Math.floor((this.host.screenH - sc(BASE_H, this.s)) / 2);
     this.events = new UiEvents();
     try {
       this.loadMetas();
@@ -289,7 +289,7 @@ export class SystemMenu {
   // ---------- 骨組み（背景・タブ・閉じる・フッタ） ----------
 
   private r(x: number, y: number, w: number, h: number): Rect {
-    return { x: this.ox + x, y: this.oy + y, w, h };
+    return { x: this.ox + sc(x, this.s), y: this.oy + sc(y, this.s), w: sc(w, this.s), h: sc(h, this.s) };
   }
 
   private addHot(key: string, rect: Rect, box: UiBox | null): void {
@@ -300,6 +300,7 @@ export class SystemMenu {
     this.hots = [];
     const sw = this.host.screenW;
     const sh = this.host.screenH;
+    const s = this.s;
     this.frame.add(new UiBox({ x: 0, y: 0, w: sw, h: sh }, 310, { bg: UI_COLORS.overlay }));
     const tabs: { tab: MenuTab; label: string }[] = [
       { tab: "save", label: "セーブ" },
@@ -310,7 +311,7 @@ export class SystemMenu {
     tabs.forEach((t, i) => {
       const rect = this.r(60 + i * 160, 22, 150, 46);
       const box = this.frame.add(
-        new UiBox(rect, Z, { radius: 10, bg: UI_COLORS.tab, fontSize: 24, align: "center", marginY: 9 }),
+        new UiBox(rect, Z, { radius: sc(10, s), bg: UI_COLORS.tab, fontSize: sc(24, s), align: "center", marginY: sc(9, s) }),
       );
       box.setText([{ text: t.label, color: UI_COLORS.text }]);
       this.tabBoxes.push(box);
@@ -318,7 +319,7 @@ export class SystemMenu {
     });
     const closeRect = this.r(1100, 22, 120, 46);
     const closeBox = this.frame.add(
-      new UiBox(closeRect, Z, { radius: 10, bg: UI_COLORS.button, fontSize: 22, align: "center", marginY: 10 }),
+      new UiBox(closeRect, Z, { radius: sc(10, s), bg: UI_COLORS.button, fontSize: sc(22, s), align: "center", marginY: sc(10, s) }),
     );
     closeBox.setText([{ text: "閉じる", color: UI_COLORS.text }]);
     this.addHot("close", closeRect, closeBox);
@@ -329,14 +330,14 @@ export class SystemMenu {
     this.footer.forEach((id, i) => {
       const rect = this.r(60 + i * 216, 650, 204, 44);
       const box = this.frame.add(
-        new UiBox(rect, Z, { radius: 10, bg: UI_COLORS.button, fontSize: 21, align: "center", marginY: 8 }),
+        new UiBox(rect, Z, { radius: sc(10, s), bg: UI_COLORS.button, fontSize: sc(21, s), align: "center", marginY: sc(8, s) }),
       );
       box.setText([{ text: id === "title" ? "タイトルへ戻る" : "ゲームを終了", color: UI_COLORS.text }]);
       this.addHot(`foot:${id}`, rect, box);
     });
 
     const hint = this.frame.add(
-      new UiBox(this.r(560, 660, 660, 28), Z, { fontSize: 16, align: "right", lineHeight: 1.2 }),
+      new UiBox(this.r(560, 660, 660, 28), Z, { fontSize: sc(16, s), align: "right", lineHeight: 1.2 }),
     );
     hint.setText([
       { text: "↑↓←→ 選択　Enter 決定　Tab タブ切替　PageUp/Down ページ　Esc 閉じる", color: UI_COLORS.dim },
@@ -427,9 +428,13 @@ export class SystemMenu {
 
   private buildSlots(): void {
     // ページ選択の列
+    const s = this.s;
     const by = 84;
+    const pageRad = sc(8, s);
+    const pageFs = sc(20, s);
+    const pageMy = sc(6, s);
     const prev = this.content.add(
-      new UiBox(this.r(60, by, 44, 36), Z, { radius: 8, bg: UI_COLORS.button, fontSize: 20, align: "center", marginY: 6 }),
+      new UiBox(this.r(60, by, 44, 36), Z, { radius: pageRad, bg: UI_COLORS.button, fontSize: pageFs, align: "center", marginY: pageMy }),
     );
     prev.setText([{ text: "＜", color: UI_COLORS.text }]);
     this.addHot("prev", prev.rect, prev);
@@ -437,7 +442,7 @@ export class SystemMenu {
     for (let p = 0; p < PAGE_COUNT; p++) {
       const w = p === 0 ? 96 : 64;
       const box = this.content.add(
-        new UiBox(this.r(px, by, w, 36), Z, { radius: 8, bg: UI_COLORS.tab, fontSize: 20, align: "center", marginY: 6 }),
+        new UiBox(this.r(px, by, w, 36), Z, { radius: pageRad, bg: UI_COLORS.tab, fontSize: pageFs, align: "center", marginY: pageMy }),
       );
       box.setText([{ text: p === 0 ? "A / Q" : String(p), color: UI_COLORS.text }]);
       this.pageBoxes.push(box);
@@ -445,40 +450,44 @@ export class SystemMenu {
       px += w + 8;
     }
     const next = this.content.add(
-      new UiBox(this.r(px, by, 44, 36), Z, { radius: 8, bg: UI_COLORS.button, fontSize: 20, align: "center", marginY: 6 }),
+      new UiBox(this.r(px, by, 44, 36), Z, { radius: pageRad, bg: UI_COLORS.button, fontSize: pageFs, align: "center", marginY: pageMy }),
     );
     next.setText([{ text: "＞", color: UI_COLORS.text }]);
     this.addHot("next", next.rect, next);
 
     // カード 6 枚（ページ 0 は先頭 2 枚だけ使う）
+    const thumbW = sc(THUMB_W, s);
+    const thumbH = sc(THUMB_H, s);
+    const imgW = s === 1 ? 0 : thumbW;
+    const imgH = s === 1 ? 0 : thumbH;
     for (let i = 0; i < SLOTS_PER_PAGE; i++) {
       const rect = this.cardRect(i);
       const bg = this.content.add(
         new UiBox(rect, Z, {
-          radius: 10,
+          radius: sc(10, s),
           bg: UI_COLORS.panel,
-          fontSize: 18,
+          fontSize: sc(18, s),
           lineHeight: 1.28,
-          marginX: THUMB_W + 22,
-          marginR: 12,
-          marginY: 9,
+          marginX: thumbW + sc(22, s),
+          marginR: sc(12, s),
+          marginY: sc(9, s),
         }),
       );
-      const thumbRect = { x: rect.x + 8, y: rect.y + 5, w: THUMB_W, h: THUMB_H };
-      const thumb = this.content.add(new UiImage(thumbRect.x, thumbRect.y, Z + 1));
+      const thumbRect = { x: rect.x + sc(8, s), y: rect.y + sc(5, s), w: thumbW, h: thumbH };
+      const thumb = this.content.add(new UiImage(thumbRect.x, thumbRect.y, Z + 1, imgW, imgH));
       const ph = this.content.add(
         new UiBox(thumbRect, Z + 1, {
-          radius: 4,
+          radius: sc(4, s),
           bg: [12, 14, 30, 255],
-          fontSize: 16,
+          fontSize: sc(16, s),
           align: "center",
-          marginY: 56,
+          marginY: sc(56, s),
           color: UI_COLORS.dim,
         }),
       );
-      const delRect = { x: rect.x + rect.w - 64, y: rect.y + 8, w: 56, h: 26 };
+      const delRect = { x: rect.x + rect.w - sc(64, s), y: rect.y + sc(8, s), w: sc(56, s), h: sc(26, s) };
       const del = this.content.add(
-        new UiBox(delRect, Z + 2, { radius: 6, bg: UI_COLORS.danger, fontSize: 15, lineHeight: 1.2, align: "center", marginY: 4 }),
+        new UiBox(delRect, Z + 2, { radius: sc(6, s), bg: UI_COLORS.danger, fontSize: sc(15, s), lineHeight: 1.2, align: "center", marginY: sc(4, s) }),
       );
       del.setText([{ text: "削除", color: UI_COLORS.text }]);
       this.cards.push({ bg, thumb, ph, del, rect, slot: null });
@@ -638,15 +647,26 @@ export class SystemMenu {
       { key: "msgOpacity", label: "メッセージ窓の濃さ", kind: "slider", choices: [] },
       { key: "reset", label: "初期設定に戻す", kind: "button", choices: [] },
     ];
+    const s = this.s;
+    const rowRad = sc(10, s);
+    const btnRad = sc(8, s);
+    const lblFs = sc(22, s);
+    const btnFs = sc(20, s);
+    const lblMy = sc(12, s);
+    const btnMy = sc(8, s);
+    const trackRad = sc(6, s);
+    const knobW = sc(12, s);
+    const knobH = sc(30, s);
+    const knobOffY = sc(7, s);
     this.rows.forEach((row, i) => {
       const y = 118 + i * 62;
       const bg = this.content.add(
-        new UiBox(this.r(60, y, 1160, 52), Z, { radius: 10, bg: [26, 32, 62, 150] }),
+        new UiBox(this.r(60, y, 1160, 52), Z, { radius: rowRad, bg: [26, 32, 62, 150] }),
       );
       this.rowBgs.push(bg);
       this.addHot(`row:${i}`, this.r(60, y, 1160, 52), null);
       const label = this.content.add(
-        new UiBox(this.r(84, y, 300, 52), Z + 1, { fontSize: 22, marginY: 12 }),
+        new UiBox(this.r(84, y, 300, 52), Z + 1, { fontSize: lblFs, marginY: lblMy }),
       );
       label.setText([{ text: row.label, color: UI_COLORS.text }]);
       this.rowLabels.push(label);
@@ -654,27 +674,27 @@ export class SystemMenu {
       this.trackRects.push({ x: 0, y: 0, w: 0, h: 0 });
       if (row.kind === "slider") {
         const dec = this.content.add(
-          new UiBox(this.r(400, y + 6, 40, 40), Z + 1, { radius: 8, bg: UI_COLORS.button, fontSize: 20, align: "center", marginY: 8 }),
+          new UiBox(this.r(400, y + 6, 40, 40), Z + 1, { radius: btnRad, bg: UI_COLORS.button, fontSize: btnFs, align: "center", marginY: btnMy }),
         );
         dec.setText([{ text: "＜", color: UI_COLORS.text }]);
         this.addHot(`arrow:${i}:-1`, dec.rect, dec);
         const track = this.r(462, y + 18, 420, 16);
         this.trackRects[i] = track;
-        this.content.add(new UiBox(track, Z + 1, { radius: 6, bg: UI_COLORS.track }));
-        const fill = this.content.add(new UiBox({ x: track.x, y: track.y, w: track.w, h: track.h }, Z + 2, { radius: 6, bg: UI_COLORS.fill }));
+        this.content.add(new UiBox(track, Z + 1, { radius: trackRad, bg: UI_COLORS.track }));
+        const fill = this.content.add(new UiBox({ x: track.x, y: track.y, w: track.w, h: track.h }, Z + 2, { radius: trackRad, bg: UI_COLORS.fill }));
         this.rowFills.push(fill);
         const knob = this.content.add(
-          new UiBox({ x: track.x, y: track.y - 7, w: 12, h: 30 }, Z + 3, { radius: 5, bg: UI_COLORS.accent }),
+          new UiBox({ x: track.x, y: track.y - knobOffY, w: knobW, h: knobH }, Z + 3, { radius: sc(5, s), bg: UI_COLORS.accent }),
         );
         this.rowKnobs.push(knob);
         const inc = this.content.add(
-          new UiBox(this.r(902, y + 6, 40, 40), Z + 1, { radius: 8, bg: UI_COLORS.button, fontSize: 20, align: "center", marginY: 8 }),
+          new UiBox(this.r(902, y + 6, 40, 40), Z + 1, { radius: btnRad, bg: UI_COLORS.button, fontSize: btnFs, align: "center", marginY: btnMy }),
         );
         inc.setText([{ text: "＞", color: UI_COLORS.text }]);
         this.addHot(`arrow:${i}:1`, inc.rect, inc);
-        const val = this.content.add(new UiBox(this.r(960, y, 120, 52), Z + 1, { fontSize: 22, marginY: 12 }));
+        const val = this.content.add(new UiBox(this.r(960, y, 120, 52), Z + 1, { fontSize: lblFs, marginY: lblMy }));
         this.rowValueBoxes.push(val);
-        this.addHot(`slider:${i}`, { x: track.x - 8, y: track.y - 12, w: track.w + 16, h: track.h + 24 }, null);
+        this.addHot(`slider:${i}`, { x: track.x - sc(8, s), y: track.y - sc(12, s), w: track.w + sc(16, s), h: track.h + sc(24, s) }, null);
       } else {
         this.rowFills.push(null as unknown as UiBox);
         this.rowKnobs.push(null as unknown as UiBox);
@@ -685,7 +705,7 @@ export class SystemMenu {
           row.choices.forEach((c, ci) => {
             const rect = this.r(400 + ci * (bw + 10), y + 6, bw, 40);
             const box = this.content.add(
-              new UiBox(rect, Z + 1, { radius: 8, bg: UI_COLORS.button, fontSize: 20, align: "center", marginY: 8 }),
+              new UiBox(rect, Z + 1, { radius: btnRad, bg: UI_COLORS.button, fontSize: btnFs, align: "center", marginY: btnMy }),
             );
             box.setText([{ text: c.label, color: UI_COLORS.text }]);
             this.choiceBoxes[i].push(box);
@@ -694,7 +714,7 @@ export class SystemMenu {
         } else {
           const rect = this.r(400, y + 6, 240, 40);
           const box = this.content.add(
-            new UiBox(rect, Z + 1, { radius: 8, bg: UI_COLORS.danger, fontSize: 20, align: "center", marginY: 8 }),
+            new UiBox(rect, Z + 1, { radius: btnRad, bg: UI_COLORS.danger, fontSize: btnFs, align: "center", marginY: btnMy }),
           );
           box.setText([{ text: "初期設定に戻す", color: UI_COLORS.text }]);
           this.addHot("reset", rect, box);
@@ -710,6 +730,10 @@ export class SystemMenu {
   }
 
   private refreshSettings(): void {
+    const s = this.s;
+    const knobW = sc(12, s);
+    const knobHalf = Math.floor(knobW / 2);
+    const knobOffY = sc(7, s);
     this.rows.forEach((row, i) => {
       if (row.kind === "slider") {
         const v = this.sliderValue(row);
@@ -723,7 +747,7 @@ export class SystemMenu {
         } else {
           fill.show(false);
         }
-        this.rowKnobs[i].setPos(track.x + Math.max(0, Math.min(track.w - 12, w - 6)), track.y - 7);
+        this.rowKnobs[i].setPos(track.x + Math.max(0, Math.min(track.w - knobW, w - knobHalf)), track.y - knobOffY);
         this.rowValueBoxes[i].setText([{ text: `${v}%`, color: UI_COLORS.accent }]);
       }
       const selected = this.zone === "content" && this.sel === i;

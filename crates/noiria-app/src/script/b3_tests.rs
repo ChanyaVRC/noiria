@@ -501,3 +501,81 @@ fn b3_modern_backlog_lays_out_only_the_latest_entries_until_you_scroll_up() {
         assert!(prints[1].contains("LN000") && prints[1].contains("LN099"), "{e}: 組み直しは全履歴を含む");
     });
 }
+
+// =====================================================================
+// 解像度スケーリング（Full HD 1920x1080 等）
+// =====================================================================
+
+const SCALE_PRELUDE: &str = r#"
+import * as api from "noiria:api";
+import { BASE_W, BASE_H, uiScale, sc } from "noiria:kag/mui";
+import { bandMetrics, bandPanel } from "noiria:kag/mhud";
+const j = (v: unknown) => JSON.stringify(v);
+api.sys.log("FHD_S=" + j([BASE_W, BASE_H, uiScale(1280, 720), uiScale(1920, 1080), uiScale(640, 360), uiScale(320, 180), sc(26, 1.5), sc(320, 1.5)]));
+api.sys.log("FHD_B=" + j(bandMetrics(1920, 1080)));
+api.sys.log("FHD_P=" + j(bandPanel([6, 9, 24, 236], bandMetrics(1920, 1080).ramp)));
+"#;
+
+/// `uiScale` / `sc` / `bandMetrics` / `bandPanel(color, ramp)` が V8/tsint 両エンジンで一致する。
+#[test]
+fn b3_ui_scale_and_band_metrics_agree_on_both_engines() {
+    let setup = Setup {
+        prelude: SCALE_PRELUDE,
+        ..Setup::default()
+    };
+    on_both("A[l]", setup, &[Step::Sleep(500), NEXT], |log, e| {
+        let want = [
+            "FHD_S=[1280,720,1,1.5,0.5,0.5,39,480]",
+            r#"FHD_B={"s":1.5,"bandH":480,"colW":1320,"bandFont":39,"textTop":156,"textBottom":69,"ramp":192}"#,
+            r#"FHD_P={"top":[6,9,24,0],"bottom":[6,9,24,236],"ramp":192}"#,
+        ];
+        for w in want {
+            assert!(
+                log.iter().any(|l| l == &format!("log info {w}")),
+                "{e}: `{w}` が出ていない: {log:#?}"
+            );
+        }
+    });
+}
+
+/// 1920x1080 (`s = 1.5`) でモダン UI の帯・選択肢ボタン・セーブメニューのカード/サムネイルが 1.5 倍で描画・クリックできる。
+#[test]
+fn b3_modern_ui_scales_cleanly_at_1920x1080() {
+    on_both(
+        CHOICE_BODY,
+        Setup {
+            player_opts: MODERN,
+            screen_size: Some((1920, 1080)),
+            ..Setup::default()
+        },
+        &[
+            Step::Sleep(1300),
+            Step::KeyNow("Escape"),
+            Step::Sleep(1000),
+            Step::ClickNow(378.0, 442.0), // カード 0 の中心: 1.5 * (252, 295)
+            Step::Sleep(700),
+            Step::KeyNow("Escape"),
+            Step::Sleep(700),
+            Step::ClickNow(960.0, 543.0), // 2 択の 2 つ目: 1.5 * (640, 362)
+            Step::Sleep(1000),
+            NEXT,
+        ],
+        |log, e| {
+            assert!(
+                log.iter().any(|l| l.contains("layer_panel") && l.contains("1920x480")),
+                "{e}: 1920x480 の帯が描かれていない: {log:#?}"
+            );
+            assert!(
+                log.iter().any(|l| l.contains("layer_panel") && l.contains("1080x96")),
+                "{e}: 1080x96 の選択肢ボタンが描かれていない: {log:#?}"
+            );
+            assert_log_contains(log, "prefetch_save_thumbs 504x284");
+            assert_log_contains(log, "thumb_capture 576x324");
+            assert!(
+                log.iter().any(|l| l.contains("layer_load_save_thumb") && l.contains("save1 504x284")),
+                "{e}: FHD セーブカードのサムネイルが 504x284 になっていない: {log:#?}"
+            );
+            assert_log_contains(log, &printed("GOT_B"));
+        },
+    );
+}
