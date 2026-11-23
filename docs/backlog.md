@@ -1,16 +1,21 @@
 # Backlog
 
 未着手・保留の作業項目を優先度順に記録する。完了済みの経緯は `implementation-notes.md`、
-仕様の互換範囲は `kag-tag-compat.md` を参照。動画デコーダ (vp9dec) 側の backlog は
-`../../vp9dec/docs/backlog.md`（SIMD 最適化・profile 1-3 対応など）。
+仕様の互換範囲は `kag-tag-compat.md` を参照。動画デコーダ (`vp9dec` `0.1.2`) 側の backlog は
+独立リポジトリ [ChanyaVRC/vp9dec](https://github.com/ChanyaVRC/vp9dec) を参照。
 
 各項目の根拠（ドキュメント節・コード位置）は 2026-07-17 のリポジトリ走査で確認済み。
 根拠のない項目は載せていない。
 
 ## 直近の出来事（記録）
 
-- **2026-11-22: B23 画像キャッシュ（対応済み）** — `UiCaches::images`（64 MiB のバイト上限つき LRU キャッシュ）と `load_image_cached` を追加し、`layer_load_image` / `layer_load_image_ex` / `layer_blit_image` でデコード済み `Arc<Pixmap>` を共有。`TextEngine::image_cache` も 16 MiB 上限の LRU とした。
-- **2026-11-22: B8 ストリーミング音声デコード（対応済み）** — `StreamingVorbisSource` と `StreamingWavSource` を実装し、`audio::build_source` の全量 PCM デコードを定数メモリの逐次デコードへ置換。`GameDir::open_reader` 経由でファイル・pak 双方のストリーミング再生・シーク・ループに対応。
+- **2026-11-22: 独立リポジトリ化・crates.io 依存移行・CI/CD・`v0.1.0` リリース（対応済み）** — `tsint = "0.1.0"` / `vp9dec = "0.1.2"` を crates.io 依存へ切り替え（sibling リポジトリ不要）、MIT ライセンス・`.github/workflows/ci.yml`（clippy `-D warnings` / Ubuntu・Windows テスト / `dist` ビルド + `--autotest`）・`.github/workflows/release.yml`（Windows `.zip` / Linux `.tar.gz` + `SHA256SUMS.txt`）を整備。公式サイト・Markdown Wiki（<https://chanyavrc.github.io/noiria-site/>）を公開。
+- **2026-11-22: `vp9dec` `opt-level=3` 化 & AVX2 SIMD（対応済み）** — `Cargo.toml` の `vp9dec` `opt-level=2` 固定を撤廃（`ChanyaVRC/vp9dec#14`）。`vp9dec 0.1.2` は AVX2 イントラ予測（DC/V/H/TM）およびロスレス 4x4 WHT SIMD（`ChanyaVRC/vp9dec#13`）も搭載。
+- **2026-11-22: CPU コンポジタ SIMD + スケーラ再利用（対応済み、`#5`）** — `pixmap.rs` に x86_64 AVX2/SSE2/SSSE3 カーネル（`blit_over_clipped` / `lerp_from` / `universal_from` / `to_bgrx_u32` / `from_rgba_straight`、スカラー実装とビット完全一致）を追加し、`scale.rs` の `scale_bilinear` に永続ワーカープールと `AxisCache` を導入。1280×720 の 4 レイヤ通常合成が ~2.4 ms → **0.174 ms/frame**（約 14 倍高速化）。
+- **2026-11-22: B23 画像キャッシュ（対応済み、`#4`）** — `UiCaches::images`（64 MiB のバイト上限つき LRU キャッシュ）と `load_image_cached` を追加し、`layer_load_image` / `layer_load_image_ex` / `layer_blit_image` でデコード済み `Arc<Pixmap>` を共有。`TextEngine::image_cache` も 16 MiB 上限の LRU とした。
+- **2026-11-22: ストリーミング動画 + バッファ再利用（対応済み、`#3`）** — `codec/video.rs` の AVI/IVF+VP9 を `Read + Seek` フレーム単位読み込みへ刷新し、`next_frame_into`・`Pixmap::from_rgba_opaque`・`Arc<Pixmap>` リサイクルによりフレーム毎の RGBA 確保を排除。
+- **2026-11-22: B8 ストリーミング音声デコード（対応済み、`#2`）** — `StreamingVorbisSource` と `StreamingWavSource` を実装し、`audio::build_source` の全量 PCM デコードを定数メモリの逐次デコードへ置換。`GameDir::open_reader` 経由でファイル・pak 双方のストリーミング再生・シーク・ループに対応。
+- **2026-11-22: File-backed `Pak`（対応済み、`#1`）** — `pak.rs` / `assets.rs` に位置指定 I/O（Windows `seek_read` / Unix `read_at`）によるオンデマンド読み込み（`Pak::open_file`）を導入し、`.pak` アーカイブ全体を RAM に常駐させない方式へ移行。
 - **2026-11-19: B2 プレイヤー向けシステム UI 層（対応済み）** — システムメニューを刷新（セーブ/ロード/設定タブ、サムネイル・保存日時・章名・本文冒頭つきの 6 枠 × 5 ページ + オート/クイック枠、確認ダイアログ、タイトルへ戻る/終了、未読もスキップ・窓の濃さ・初期設定リセット、キーボード操作）。F5/F9 のトースト、選択肢でのオートセーブ、常設システムボタン（Q.SAVE/Q.LOAD/SAVE/LOAD/AUTO/SKIP/LOG/MENU）、メッセージ窓の frame/color/margin と名前欄の色、話者名・ボイスつきバックログ（セーブ時点の履歴を復元）、選択肢の ↑↓+Enter と hover/click 音。新 op `thumbCapture`/`thumbSave`/`layer.loadSaveThumb`/`dateString`。デモへ適用済み。
 - **2026-11-19: A ホストの出荷品質化 + スクリプト駆動 autotest（対応済み）** — Win32/X11 ウィンドウを
   リサイズ可（アスペクト保持レターボックス、マウス座標の逆変換は `viewport.rs` の純関数）にし、起動時
@@ -119,7 +124,7 @@
 
 ## vp9dec 連携（参照）
 
-- 動画シーム（`codec/video.rs`）は VP9 統合済み: `open_video_file()` が
-  `DKIF`+`VP90` を検出して `Vp9Ivf`（自作デコーダ）を MF より優先。
-- HD 実用（1080p30）には vp9dec 側の SIMD 最適化（vp9dec backlog P1、進行中）が前提。
-  完了後、エンジン内で HD seek・区間ループの性能と実再生品質を検証する。
+- 動画シーム（`codec/video.rs`）は VP9 統合済み: `open_video_file()` / `open_video_reader()` が
+  `DKIF`+`VP90` を検出して `Vp9Ivf`（独立クレート [`vp9dec`](https://crates.io/crates/vp9dec) `0.1.2`）を MF より優先。
+- `vp9dec 0.1.2` で AVX2 イントラ予測（DC/V/H/TM）・ロスレス 4x4 WHT SIMD（`vp9dec#13`）が導入され、`noiria` 側も `opt-level=2` 固定を撤廃して `opt-level=3` ビルドへ移行済み（`vp9dec#14`）。
+- 残りの最適化（インター予測・ループフィルタ等の SIMD 拡充）と HD（1080p30）での seek・区間ループ・実再生品質の検証は継続課題。

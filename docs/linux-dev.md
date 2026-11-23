@@ -19,10 +19,15 @@ PATH interop が絡む相性問題、W2 で発見）。**必ず `bash scripts/ws
 
 - WSL2 + Ubuntu（`wsl --install` 等で導入済みのこと）
 - WSL 内に rustup 済みの Rust ツールチェイン（`rustc`/`cargo` が通ること）
-- リポジトリ 3 つが Windows 側 `C:\Users\<you>\Documents\BuildSoft\` 配下に並んでいること
-  （`noiria` / `tsint` / `vp9dec`）。WSL からは `/mnt/c/Users/<you>/Documents/BuildSoft/...`
-  で同じファイルを直接参照できる（`Cargo.toml` の `path = "../../../vp9dec"` 等の相対パス
-  依存は WSL 側でもそのまま解決される。**tsint/vp9dec リポジトリ自体は変更しない**）
+- `noiria` リポジトリ単体でビルド可能。[`tsint`](https://crates.io/crates/tsint) (`0.1.0`) および [`vp9dec`](https://crates.io/crates/vp9dec) (`0.1.2`) は **crates.io から自動取得されるため、sibling リポジトリの clone は不要**。
+  ローカルで `tsint` / `vp9dec` を同時に編集・検証したい場合のみ、任意の位置に clone したうえで `.cargo/config.toml`（または `Cargo.toml`）に `[patch.crates-io]` を追加して上書きする:
+
+  ```toml
+  # .cargo/config.toml（ローカル同時編集時のみ）
+  [patch.crates-io]
+  tsint = { path = "../tsint" }
+  vp9dec = { path = "../vp9dec" }
+  ```
 
 ## 最小手順
 
@@ -34,8 +39,15 @@ cd /mnt/c/Users/<you>/Documents/BuildSoft/noiria
 # WSL 内の ext4 (=$HOME 配下) に逃がす。ソース自体は /mnt/c を直接参照する。
 export CARGO_TARGET_DIR=$HOME/.noiria-target
 
+# 全クレートテスト（V8 含む）
 cargo test --workspace
-cargo run -p noiria-app -- games/sample --autotest 24 --autotest-out $HOME/noiria-autotest
+
+# V8 抜きの高速テスト（CI の .github/workflows/ci.yml と同構成）
+cargo test -p noiria-core
+cargo test -p noiria-tools
+cargo test -p noiria-app --no-default-features --features engine-tsint
+
+cargo run -p noiria-app --no-default-features --features engine-tsint -- games/sample --engine tsint --autotest 24 --autotest-out $HOME/noiria-autotest
 ```
 
 まとめて実行したい場合は `scripts/wsl-test.sh` を使う（`cargo test` → `--autotest`
@@ -57,16 +69,18 @@ cp -r "$HOME/noiria-autotest" "/mnt/c/Users/<you>/Documents/BuildSoft/noiria/tar
 
 ## 日本語フォント（重要）
 
-`--autotest` のスクリーンショットで日本語が描画されるには、Linux 側に CJK フォントが
+`--autotest` のスクリーンショットで日本語が描画されるには、Linux 側に **TrueType (`glyf`) アウトラインの CJK フォント**が
 必要（W1 で `font/registry.rs` が per-OS のシステムフォントディレクトリ
 [`/usr/share/fonts`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts`] を
 再帰走査し、`Noto Sans CJK JP` → `Noto Sans JP` → `TakaoGothic` → `IPAGothic` →
 `VL Gothic` の順にフォールバックする）。
 
+> **重要**: `noiria-core` の自作フォントパーサは TrueType (`glyf`) 専用であり、CFF (`'OTTO'`) アウトライン形式のフォントはスキップする。Ubuntu 標準の `fonts-noto-cjk` パッケージは CFF (`'OTTO'`) 形式の `.ttc`/`.otf` を配布しているため **読み込めない**。Linux/Ubuntu では TrueType (`glyf`) 版の `ipag.ttf`（`IPAGothic`）を含む **`fonts-ipafont-gothic`** を使うこと（GitHub Actions の `.github/workflows/ci.yml` でもこれを使用している）。
+
 推奨（sudo が使える場合）:
 
 ```bash
-sudo apt update && sudo apt install -y fonts-noto-cjk
+sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-ipafont-gothic
 ```
 
 sudo が使えない/インストールできない環境では、**ゲームローカルフォント**機能
@@ -78,9 +92,7 @@ mkdir -p games/sample/fonts
 cp /mnt/c/Windows/Fonts/YuGothM.ttc games/sample/fonts/
 ```
 
-**注意**: フォントは再配布ライセンス上コミットしない。検証が終わったら削除すること
-（`rm -rf games/sample/fonts`）。`.gitignore` は現状無いので、コミット前に手動で
-確認すること。
+**注意**: フォントは再配布ライセンス上コミットしない（`.gitignore` で `games/*/fonts/` を除外済みだが、検証が終わったら念のため削除しておくこと: `rm -rf games/sample/fonts`）。
 
 ## システムフォントが 1 件も見つからない場合
 

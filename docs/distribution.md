@@ -7,26 +7,42 @@ Windows/Linux 両ターゲット向けに作る手順。`docs/implementation-not
 
 ## 全体の流れ
 
+配布用のベースバイナリ（Windows `noiria.exe` / Linux `noiria`）は、**GitHub Releases のプリビルドを使う方法**と**ローカルで自前ビルドする方法**の 2 通りがある。
+
 ```
-1. Windows 側で dist ビルド（Windows exe）
-2. WSL 側で dist ビルド（Linux バイナリ）
-3. noiria-export でゲームを export（両方のビルド済みバイナリへ KEY_SLOT パッチ + pack）
+方法 A（推奨・ビルド不要）:
+  1. GitHub Releases から Windows (.zip) / Linux (.tar.gz) のプリビルドを取得
+  2. noiria-export でゲームを export（--bin-windows / --bin-linux を指定）
+
+方法 B（ローカル自前ビルド）:
+  1. Windows 側で dist ビルド（Windows exe）
+  2. WSL 側で dist ビルド（Linux バイナリ）
+  3. noiria-export でゲームを export（両方のビルド済みバイナリへ KEY_SLOT パッチ + pack）
 ```
 
 export はクロスコンパイルしない。KEY_SLOT バイナリパッチ方式（`docs/implementation-notes.md`
 2026-07-12 W6/W7 参照）なので、**ビルド済みバイナリはゲームごとの再ビルドが不要**
-— 手順 1・2 は最初に 1 回行えば、以後は何本ゲームを export してもそのまま使い回せる
+— プリビルドの取得またはローカルのビルドを最初に 1 回行えば、以後は何本ゲームを export してもそのまま使い回せる
 （tsint のランタイム TS モジュールは全ゲーム共通の埋め込みなので、Rust 側の再ビルドは
 ゲーム固有ではない）。
 
-## 1. Windows 側で dist ビルド
+### GitHub Releases（CI/CD 自動ビルド）
+
+`.github/workflows/release.yml` が `v*` タグ（`v0.1.0`+）のプッシュ時に Windows (`x86_64-pc-windows-msvc`, `.zip`) と Linux (`x86_64-unknown-linux-gnu`, `.tar.gz`) のプリビルドアーカイブ（`noiria` dist バイナリ・`noiria-pack`・`noiria-export`）と `SHA256SUMS.txt` を自動ビルドし、[GitHub Releases](https://github.com/ChanyaVRC/noiria/releases) へ公開する。
+
+アーカイブを展開したら、同梱の `noiria-export` に両 OS の `noiria` バイナリを渡すだけでゲームを配布形式にできる（ローカルに Rust 環境や WSL が無くても Windows/Linux 両対応の配布物を作れる）。
+
+## 1. Windows 側で dist ビルド（ローカルビルド時）
+
+`tsint` (`0.1.0`)・`vp9dec` (`0.1.2`) は crates.io から自動取得されるため、sibling リポジトリの clone は不要（ローカル同時編集したい場合のみ `.cargo/config.toml` や `Cargo.toml` の `[patch.crates-io]` を使用）。
 
 ```powershell
 cargo build --profile dist --no-default-features --features engine-tsint,dist -p noiria-app
 ```
 
 `target\dist\noiria.exe` が生成される（V8 抜き、`[profile.dist]`
-= release + `lto=thin` + `strip=symbols` + `panic=abort` の軽量ビルド）。
+= release (`opt-level=3`) + `lto=thin` + `strip=symbols` + `panic=abort` の軽量ビルド。
+以前 `Cargo.toml` にあった `vp9dec` の `opt-level=2` 固定は撤廃済みで、`vp9dec 0.1.2` も `opt-level=3` + AVX2 SIMD で最適化される）。
 
 ## 2. WSL 側で dist ビルド（Linux バイナリ）
 
@@ -147,6 +163,8 @@ CLI の `--exclude <glob>`** の和集合。glob は `*`（`/` を跨がない�
 
 ## 検証（このリポジトリでの自動検証の範囲）
 
+- `.github/workflows/ci.yml`: GitHub Actions 上で毎 push / PR に対して Linux clippy (`-D warnings`)、Ubuntu/Windows のテストマトリクス（`noiria-core` / `noiria-tools` / `noiria-app` `engine-tsint`）、Ubuntu/Windows の `dist` ビルド + `--autotest` スモーク検証を自動実行する。
+- `.github/workflows/release.yml`: `v*` タグで Windows `.zip` / Linux `.tar.gz` と `SHA256SUMS.txt` を `--locked` で再現ビルド・公開する。
 - `scripts/feature-build-matrix.ps1`: default / engine-v8 のみ / engine-tsint+dist の
   3 通りが `cargo build` で通ることを確認し、各構成の `cargo clippy -- -D warnings`（依存 crate 分も含む）が警告 0 であることも要求する（警告があればその構成は失敗）。
   `env_logger` は `dev-log` feature（`engine-v8` が有効にする）の optional 依存で、dist ビルドの依存グラフには載らない。
@@ -206,10 +224,11 @@ DEFLATE/stored にフォールバックする）。
 
 ## 既知の制約
 
-- export はクロスコンパイルしない。Linux 版を出力するには、Linux バイナリを事前に
-  WSL（または実 Linux 環境）でビルドしておく必要がある。
+- export はクロスコンパイルしない。Linux 版を出力するには、事前に [GitHub Releases](https://github.com/ChanyaVRC/noiria/releases) の Linux プリビルドを用意するか、WSL（または実 Linux 環境）で `dist` バイナリをビルドしておく必要がある。
 - 動画は `.mp4`（Media Foundation 依存）が pak 内から再生できない。`.avi`/`.ivf`
   (VP9/MJPEG、自作デコーダ) を推奨（`docs/implementation-notes.md` 2026-07-12 W6 参照）。
+  なお、`Pak::open_file` の file-backed オンデマンド読み込みとストリーミング音声 (B8) / ストリーミング動画により、
+  `game.pak` 全体やデコード済み音声を RAM に常駐させず再生できる。
 - アイコン: ウィンドウ/タスクバー（Win32 `WM_SETICON` / X11 `_NET_WM_ICON`、ゲームの `icon.png`
   またはエンジン既定）は対応済み。Explorer 上の exe ファイルアイコンはエンジン既定（`build.rs` が
   埋め込む）のままで、ゲーム毎の差し替え（PE `.rsrc` パッチ）は未実装（`docs/backlog.md` B1）。

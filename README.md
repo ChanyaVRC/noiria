@@ -1,6 +1,13 @@
 # Noiria
 
-**TypeScript で動くノベルゲームエンジン**。コアは Rust 製。
+**TypeScript で動くノベルゲームエンジン**。コアは Rust 製（MIT ライセンス）。
+
+- **公式サイト / Markdown Wiki**: <https://chanyavrc.github.io/noiria-site/>（ソース: [ChanyaVRC/noiria-site](https://github.com/ChanyaVRC/noiria-site)）
+- **GitHub リポジトリ**: <https://github.com/ChanyaVRC/noiria>
+- **バイナリ配布（GitHub Releases `v0.1.0`+）**: <https://github.com/ChanyaVRC/noiria/releases>（Windows `.zip` / Linux `.tar.gz` + `SHA256SUMS.txt`）
+- **独立クレート（crates.io）**:
+  - `tsint` (`0.1.0`): [GitHub](https://github.com/ChanyaVRC/tsint) / [crates.io](https://crates.io/crates/tsint) / [Docs](https://chanyavrc.github.io/tsint/)
+  - `vp9dec` (`0.1.2`): [GitHub](https://github.com/ChanyaVRC/vp9dec) / [crates.io](https://crates.io/crates/vp9dec) / [Docs](https://chanyavrc.github.io/vp9dec/)
 
 ```text
 ┌────────────────────────────────────────────────┐
@@ -14,19 +21,24 @@
 ├────────────────────────────────────────────────┤
 │ ネイティブコア (Rust)                           │
 │   V8(deno_core) / tsint(自作TSインタプリタ) /   │
-│   レイヤCPU合成 / テキスト / トランジション /   │
-│   オーディオ / セーブIO                         │
+│   SIMD CPU合成 / テキスト / トランジション /    │
+│   ストリーミング音声・動画 / File-backed Pak    │
 └────────────────────────────────────────────────┘
 ```
 
 ## 実行
 
+本リポジトリ単体でビルド・実行できる（`tsint` / `vp9dec` は crates.io から自動取得されるため、sibling リポジトリの clone は不要）。ビルド済みの実行ファイル・パッキングツールは [GitHub Releases](https://github.com/ChanyaVRC/noiria/releases) からも取得できる。
+
 ```powershell
 # サンプルアセットの生成（初回のみ）
 cargo run -p noiria-tools -- games/sample/assets
 
-# サンプルゲームの起動
+# サンプルゲームの起動（既定は V8 + tsint 同梱）
 cargo run -p noiria-app -- games/sample
+
+# V8 抜きで高速ビルド・起動（tsint のみ）
+cargo run -p noiria-app --no-default-features --features engine-tsint -- games/sample --engine tsint
 
 # デモ（恋愛アドベンチャー「星待ちの放課後」、3 エンド）の起動
 cargo run -p noiria-app -- games/demo
@@ -142,20 +154,24 @@ repeat 20 { click 1150 600 ; wait 400 } （1 行完結の繰り返し。入れ�
 
 Noiria は 2 つのスクリプトエンジンを選んで実行できる。
 
-- **`v8`（既定）**: `deno_core`/V8。既存の実績あるパス。
-- **`tsint`**: 完全自作の TypeScript インタプリタ（別リポジトリ [`tsint`](../tsint)、BuildSoft 配下に
-  sibling で clone されている前提。`Cargo.toml` の `tsint = { path = "../../../tsint" }`）。
+- **`v8`（開発ビルド既定）**: `deno_core`/V8。既存の実績あるパス。
+- **`tsint`（配布ビルド既定）**: 完全自作の TypeScript インタプリタ（独立クレート `tsint = "0.1.0"`、[GitHub](https://github.com/ChanyaVRC/tsint) / [crates.io](https://crates.io/crates/tsint) / [Docs](https://chanyavrc.github.io/tsint/)）。crates.io から自動取得されるため sibling リポジトリの clone は不要（ローカルで同時編集したい場合のみ `.cargo/config.toml` や `Cargo.toml` の `[patch.crates-io]` で上書きする）。
   tokio 非依存の単一 OS スレッド上で、自前のタイマーヒープ + 入力ポーリングによる
   駆動ループで非同期 ops（`sys.wait`/`trans.wait`/`audio.waitEnd`/入力ポンプ）を回す。
+  `tsint 0.1.0` では O(1) ハイブリッド `PropMap`・反復 undo-trail 正規表現・非キャプチャローカル変数の非ボックス化・trial-deletion 循環参照回収 GC を備える。
 
-`game.json` の `"engine"` フィールド（`"v8"` | `"tsint"`、省略時は `"v8"`）か、CLI の `--engine` 引数
+`game.json` の `"engine"` フィールド（`"v8"` | `"tsint"`、省略時は開発ビルド `"v8"` / `dist` ビルド `"tsint"`）か、CLI の `--engine` 引数
 （`game.json` より優先）で選ぶ。`game.json` の任意フィールド `"pack": {"exclude": [glob...]}` は配布 pak に入れないファイルの指定（`docs/distribution.md` 参照、エンジンは読まない）。ops の実装（`script/engine_state.rs`）は両エンジンで共用しており、
 挙動は一致する（V8 側は `#[op2]` の薄いラッパ、tsint 側は `globalThis.Deno.core.ops` へ生やした
 ネイティブ関数から、同じ `EngineState` メソッドを呼ぶ）。
 
 ```powershell
+# tsint で実行（V8 + tsint 同梱ビルド）
 cargo run -p noiria-app -- games/sample --engine tsint
 cargo run -p noiria-app -- games/sample --engine tsint --autotest 16 --autotest-out target/autotest-tsint
+
+# V8 を除外した高速・軽量ビルド（tsint のみ）
+cargo run -p noiria-app --no-default-features --features engine-tsint -- games/sample --engine tsint
 ```
 
 両エンジンで同一シナリオを `--autotest` 実行し、出力 PNG を比較することで並走検証できる。
@@ -166,28 +182,29 @@ cargo run -p noiria-app -- games/sample --engine tsint --autotest 16 --autotest-
 
 ## 構成
 
-| パス | 内容 |
+| パス / クレート | 内容 |
 | --- | --- |
-| `crates/noiria-core` | ウィンドウ/スクリプトエンジン非依存の純ロジック（合成・テキスト・音声・セーブ）。ヘッドレステスト可能 |
-| `crates/noiria-app` | 実行バイナリ。Win32 API 直叩き (`win32.rs`) + スクリプトエンジン 2 種（`script/`: V8/deno_core と tsint、`--engine` で選択） |
-| `crates/noiria-tools` | プレースホルダアセット生成 (`gen-assets`) |
+| `crates/noiria-core` | ウィンドウ/スクリプトエンジン非依存の純ロジック（SIMD CPU 合成・テキスト・ストリーミング音声/動画・File-backed Pak・セーブ）。ヘッドレステスト可能 |
+| `crates/noiria-app` | 実行バイナリ。Win32 直叩き (`win32.rs`) / X11 コアプロトコル自作 (`x11/`) + スクリプトエンジン 2 種（`script/`: V8/deno_core と tsint、`--engine` で選択） |
+| `crates/noiria-tools` | プレースホルダアセット生成 (`gen-assets`/`gen-demo-assets`)・配布パック/エクスポート (`noiria-pack`/`noiria-export`) |
 | `runtime/` | エンジン同梱の TypeScript ライブラリ（バイナリに埋め込み。両エンジンで共用） |
-| `games/sample/` | 日本語サンプルゲーム |
-| `../tsint`（別リポジトリ） | 完全自作 TypeScript インタプリタ。`--engine tsint` で選択（`script/tsint_engine.rs` が統合点） |
+| `games/sample/` / `games/demo/` | タグ網羅サンプル / モダン UI 搭載 3 エンド恋愛 ADV デモ「星待ちの放課後」 |
+| [`tsint`](https://github.com/ChanyaVRC/tsint) (`0.1.0`, crates.io) | 完全自作 TypeScript インタプリタ。`--engine tsint` / `dist` ビルドで使用（`script/tsint_engine.rs` が統合点） |
+| [`vp9dec`](https://github.com/ChanyaVRC/vp9dec) (`0.1.2`, crates.io) | 完全自作純 Rust VP9 デコーダ（AVX2 SIMD 搭載）。IVF/VP9 動画再生に使用（`codec/video.rs` が統合点） |
 
 ## スレッドモデル
 
-- **メインスレッド**: Win32 メッセージループ (`win32.rs`)。`RegisterClassW` + `CreateWindowExW` でウィンドウを作り、`MsgWaitForMultipleObjects` + `PeekMessage` でメッセージをドレインする（アニメ中は約16msタイムアウト、アイドル時は無限待機）。`Arc<Mutex<Scene>>` を毎周期合成して `StretchDIBits` で present。トランジション完了時のページスワップもここ。
+- **メインスレッド**: Windows は Win32 メッセージループ (`win32.rs`)、Linux は X11 コアプロトコル自作 (`x11/`)。Windows では `RegisterClassW` + `CreateWindowExW` でウィンドウを作り、`MsgWaitForMultipleObjects` + `PeekMessage` でメッセージをドレインする（アニメ中は約16msタイムアウト、アイドル時は無限待機）。`Arc<Mutex<Scene>>` を毎周期合成して `StretchDIBits`（X11 は `PutImage`）で present。トランジション完了時のページスワップもここ。
 - **スクリプトスレッド**: `--engine` で選んだ実装が 1 本の OS スレッド上で動く。
-  - `v8`（既定）: tokio(current-thread) + V8。TypeScript を deno_ast でその場変換して実行。
-  - `tsint`: 完全自作インタプリタ（別リポジトリ [`tsint`](../tsint)）。tokio を使わず、自前の駆動ループ
+  - `v8`（開発既定）: tokio(current-thread) + V8。TypeScript を deno_ast でその場変換して実行。
+  - `tsint`（配布既定）: 完全自作インタプリタ（[`tsint`](https://github.com/ChanyaVRC/tsint) `0.1.0`）。tokio を使わず、自前の駆動ループ
     （タイマーヒープ + 入力の非ブロッキングポーリング + トランジション/オーディオのポーリング）で
     非同期 ops を回す（`script/tsint_engine.rs`）。
   
   どちらも ops（`script/engine_state.rs` の `EngineState` メソッド）で Scene を書き換え、
-  `WakeSink::Win32`（チャンネル送信 + `PostMessageW(WM_APP)`）でメインループを起こす。
-- **オーディオコマンドスレッド** (`noiria-audio`): `AudioCmd` を受けて WAV / OGG(Vorbis) を自作デコーダ（`codec/wav.rs` / `codec/ogg.rs`+`codec/vorbis/`）で全デコードし、`mixer::Mixer`（純 Rust・自作リサンプラ/フェード）へ渡す。BGM/SE/Voice の 3 チャンネル。MP3/FLAC は対応を打ち切っており、読み込もうとするとエラーログを出して無音継続する（panic しない）。
-- **オーディオ描画スレッド** (`noiria-audio-render`): `wasapi_out.rs`（WASAPI 共有モード・イベント駆動、OS 境界 API 直叩き）が `Mixer::mix_into` を呼んでデバイスバッファを埋める。COM オブジェクトはこのスレッド内で開いて使い切る（`codec/mf_video.rs` と同じアパートメント規約）。デバイスが無い環境ではコマンドを読み捨てて無音続行する。
+  `WakeSink`（Win32 はチャンネル送信 + `PostMessageW(WM_APP)`、X11 はチャンネル送信）でメインループを起こす。
+- **オーディオコマンドスレッド** (`noiria-audio`): `AudioCmd` を受けて WAV / OGG(Vorbis) を自作ストリーミングデコーダ（`StreamingWavSource` / `StreamingVorbisSource`、`codec/wav.rs`・`codec/ogg.rs`+`codec/vorbis/`）で定数メモリ・オンデマンド逐次デコードし、`mixer::Mixer`（純 Rust・自作リサンプラ/フェード）へ供給する（`GameDir::open_reader` 経由でディスク・file-backed `.pak` 双方に対応）。BGM/SE/Voice の 3 チャンネル。MP3/FLAC は対応を打ち切っており、読み込もうとするとエラーログを出して無音継続する（panic しない）。
+- **オーディオ描画スレッド** (`noiria-audio-render`): Windows は `wasapi_out.rs`（WASAPI 共有モード・イベント駆動、OS 境界 API 直叩き）、Linux は `alsa_out.rs`（`libasound` を `dlopen` 実行時ロード）が `Mixer::mix_into` を呼んでデバイスバッファを埋める。Windows の COM オブジェクトはこのスレッド内で開いて使い切る（`codec/mf_video.rs` と同じアパートメント規約）。デバイスが無い環境ではコマンドを読み捨てて無音続行する。
 
 ## シナリオ (.ks) 対応タグ
 
@@ -251,17 +268,18 @@ B4 で `[videoevent frame=N]`、`[videosegloop start=N end=M]` と各 cancel タ
 `[wp for=loop|period|prepare|segLoop]` を追加した。period event は 1 回発火型、
 区間ループは `[start,end)`。`for=` を省略した `[wp]` は任意の動画イベントを待つ。
 **AVI (Motion JPEG) を完全自作デコーダで再生**する（JPEG ベースラインデコーダ + AVI/RIFF パーサ、`codec/jpeg.rs` / `codec/video.rs`）。
-**VP9 (IVF コンテナ) も完全自作デコーダで再生**する（別リポジトリ [`vp9dec`](../vp9dec) を `path` 依存として取り込み、`codec/video.rs` の `Vp9Ivf` が `VideoSource` を実装。WebM 公式コンフォーマンスベクタで全フレーム MD5 一致済み）。
+**VP9 (IVF コンテナ) も完全自作デコーダで再生**する（crates.io の独立クレート [`vp9dec`](https://crates.io/crates/vp9dec) `0.1.2`、[GitHub](https://github.com/ChanyaVRC/vp9dec) / [Docs](https://chanyavrc.github.io/vp9dec/)。`codec/video.rs` の `Vp9Ivf` が `VideoSource` を実装。WebM 公式コンフォーマンスベクタで全フレーム MD5 一致済み、AVX2 イントラ予測 DC/V/H/TM・ロスレス 4x4 WHT SIMD 搭載、`opt-level=3` ビルド）。
+AVI / IVF+VP9 とも `Read + Seek` でフレーム単位のストリーミング読み込みを行い、`next_frame_into`・`Pixmap::from_rgba_opaque`・`Arc<Pixmap>` リサイクルによってフレーム毎の大容量 RGBA 確保を排除している。
 MP4 (H.264 等、および VP9 以外の IVF) は Windows 上では OS 内蔵の Media Foundation にフォールバックする（`codec/mf_video.rs`。ウィンドウ/音声出力と同格の OS 境界 API 呼び出しで、ffmpeg 等の外部ライブラリは使わない）。
-`VideoSource` トレイトはシーケンシャル読み出し (`next_frame`/`rewind`) と
+`VideoSource` トレイトはシーケンシャル読み出し (`next_frame`/`next_frame_into`/`rewind`) と
 0-based 表示フレームへの `seek_frame` を提供する。MJPEG は索引へ直接移動し、
-VP9/MF は rewind + 表示フレーム単位の decode-forward で同じ厳密シーク契約を満たす。
-コーデックの追加は `VideoSource` トレイト実装 + `open_video_file()` への 1 分岐で済む設計。
+VP9/MF は rewind + 表示フレーム単位の decode-forward（VP9 seek 中は YUV→RGBA 変換を省略）で同じ厳密シーク契約を満たす。
+コーデックの追加は `VideoSource` トレイト実装 + `open_video_file()` / `open_video_reader()` への 1 分岐で済む設計。
 
 | コーデック | 状態 |
 | --- | --- |
-| MJPEG (AVI) | **自作済み・稼働中** |
-| VP9 (IVF) | **自作済み・稼働中**（別リポジトリ [`vp9dec`](../vp9dec)、WebM 公式コンフォーマンスベクタで全フレーム MD5 一致済み）。IVF コンテナのみ対応（MP4 に包まれた VP9 や、IVF でも VP9 以外の FourCC は非対応）。MF フォールバックは MP4 等の他コンテナ形式用 |
+| MJPEG (AVI) | **自作済み・稼働中**（`Read + Seek` ストリーミング + バッファ再利用） |
+| VP9 (IVF) | **自作済み・稼働中**（独立クレート [`vp9dec`](https://github.com/ChanyaVRC/vp9dec) `0.1.2`、crates.io 公開済み、WebM 公式コンフォーマンスベクタで全フレーム MD5 一致・AVX2 SIMD 搭載）。IVF コンテナのみ対応（MP4 に包まれた VP9 や、IVF でも VP9 以外の FourCC は非対応）。MF フォールバックは MP4 等の他コンテナ形式用 |
 | MPEG-1 | 完全自作デコーダは未対応（次の自作候補。JPEG で作った IDCT/ハフマンを再利用可能、数千行規模）。Windows では Media Foundation が対応していれば再生可（環境依存） |
 | H.264 (MP4) | **対応（OS 内蔵デコーダ, Media Foundation 経由）**。フル自作は数万行規模で非現実的なため、Windows のみ OS 境界 API にフォールバックする |
 
@@ -271,11 +289,11 @@ VP9/MF は rewind + 表示フレーム単位の decode-forward で同じ厳密�
 
 | フォーマット | 状態 |
 | --- | --- |
-| WAV | **自作済み・稼働中**（`codec/wav.rs`。PCM 8/16/24bit + float32） |
-| OGG (Vorbis) | **自作済み・稼働中**（`codec/ogg.rs` + `codec/vorbis/`。クリーンルーム実装、Xiph の Vorbis I 仕様書と Ogg 仕様 (RFC 3533) のみ参照） |
+| WAV | **自作済み・稼働中**（`codec/wav.rs`。PCM 8/16/24bit + float32、`StreamingWavSource` による定数メモリ逐次デコード） |
+| OGG (Vorbis) | **自作済み・稼働中**（`codec/ogg.rs` + `codec/vorbis/`。クリーンルーム実装、Xiph の Vorbis I 仕様書と Ogg 仕様 (RFC 3533) のみ参照、`StreamingVorbisSource` による定数メモリ逐次デコード） |
 | MP3 / FLAC | **非対応（打ち切り）**。読み込もうとすると `音声を再生できません ...: MP3/FLAC は非対応になりました。WAV か OGG (Vorbis) を使ってください` とエラーログを出し、panic せず無音のまま続行する |
 
-WAV・OGG(Vorbis) とも `audio.rs` の `build_source()` がファイル全体を一度にデコードして `mixer::BufferSource`（巻き戻し可能なメモリ上バッファ）に載せ、ループは `mixer::Mixer` 側で行う。ノベルゲームの BGM は長くても 1 分未満・数MB程度のため全デコードで実用上問題ないという判断で、ストリーミングデコードは将来の最適化候補としてコードコメントに残してある（`codec::vorbis::VorbisStreamDecoder` はパケット単位デコードに対応済みなので土台はある）。
+WAV・OGG(Vorbis) とも `audio.rs` の `build_source()` が `StreamingWavSource` / `StreamingVorbisSource` を組み立て、`GameDir::open_reader` 経由でディスクファイルおよび file-backed `.pak` エントリから**定数メモリでオンデマンド逐次デコード**する（B8、2026-11-22 完了）。長尺の BGM でも全 PCM を RAM に展開せず、シーク（`positionMs` 復元）およびシームレスループ再生に対応する。
 
 ## セーブデータ
 
@@ -293,38 +311,58 @@ WAV・OGG(Vorbis) とも `audio.rs` の `build_source()` がファイル全体�
 | ~~JPEG デコード~~ | `codec/jpeg.rs` | **自作済み・稼働中**（ベースライン。動画 MJPEG に加え、静止画 assets 経路 (`assets::load_image_rgba`) にも接続済み。PNG/JPEG 以外の形式は明確なエラーを返す） | 済 |
 | WebP (VP8L ロスレス) デコード/エンコード | `codec/webp.rs` | **外部依存（隔離・将来自作置換候補）**: `image-webp`（image-rs 公式の純 Rust クレート、`#![forbid(unsafe_code)]`、C 依存なし）を 1 モジュールに隔離して使用（公開 API は `decode_rgba`/`encode_lossless` の 2 関数のみ、`image_webp` の型は外へ漏らさない）。`assets::decode_image_bytes` は拡張子ではなく RIFF/WEBP マジックバイトで判定。`noiria-pack`/`noiria-export` が `.png` エントリを WebP ロスレスへ変換し、元 PNG より小さい場合だけ pak に採用する（パス・拡張子は `.png` のまま。`--no-webp` で無効化可）。推移依存は `byteorder-lite`/`quick-error` の純 Rust 2 パッケージのみ | 隔離済（自作 VP8L は将来候補） |
 | ~~動画 (MJPEG/AVI)~~ | `codec/video.rs` | **自作済み・稼働中**（`VideoSource` トレイトが追加コーデックの差し込み口） | 済 |
-| ~~動画 (VP9/IVF)~~ | `codec/video.rs` (`Vp9Ivf`) + 別リポジトリ [`vp9dec`](../vp9dec) | **自作済み・稼働中**（WebM 公式コンフォーマンスベクタで全フレーム MD5 一致済み。`path` 依存として取り込み、純 Rust・依存クレートゼロなので自作化ロードマップの精神と矛盾しない） | 済 |
+| ~~動画 (VP9/IVF)~~ | `codec/video.rs` (`Vp9Ivf`) + [`vp9dec`](https://github.com/ChanyaVRC/vp9dec) (`0.1.2`, crates.io) | **自作済み・稼働中**（WebM 公式コンフォーマンスベクタで全フレーム MD5 一致・AVX2 イントラ予測/4x4 WHT SIMD 搭載、`opt-level=3` ビルド。純 Rust・依存クレートゼロで crates.io 公開済み） | 済 |
 | `windows` (Media Foundation) | `codec/mf_video.rs` | H.264/MP4 等（および VP9 以外の IVF）の動画再生・(テスト用) エンコード専用。**OS 境界 API**（ウィンドウ/音声出力と同格の扱い、ユーザー承認済み）であり自作化ロードマップの対象外。ffmpeg 等の外部ライブラリではない | — |
-| ~~`rodio` + cpal~~ | `audio.rs` (`AudioCmd` 境界) | **音声デコード 自作済み・稼働中（WAV+OGG/Vorbis。MP3/FLAC は打ち切り）**。音声出力は WASAPI 直叩き + 自作ミキサ/リサンプラ（`wasapi_out.rs` が OS 境界 API、`mixer.rs` が純 Rust・OS 非依存の 3ch ミキサ＋線形補間リサンプラ＋チャンネル変換＋フェード）。**Vorbis デコーダ自作済み**（`codec/ogg.rs` + `codec/vorbis/`。クリーンルーム実装、Xiph の Vorbis I 仕様書 (<https://xiph.org/vorbis/doc/Vorbis_I_spec.html>) と Ogg 仕様 (RFC 3533) のみ参照、libvorbis/lewton 等の既存実装は不参照。Ogg ページング・CRC32・コードブック(カノニカルハフマン+VQ lookup 0/1/2)・Floor type 1・Residue type 0/1/2・channel coupling・逆 MDCT+Vorbis 窓+オーバーラップ加算を実装。V1 で rodio 0.22 (バックエンドは symphonia-codec-vorbis) をテスト内の参照デコーダとして使い、実 OGG ファイル (mono 2 本・stereo 1 本、`tests/vectors_audio/`) でクロスチェックし相関 1.0・最大誤差 1e-7 オーダーで一致することを確認済み）。**V2: `audio.rs` の `build_source()` を自作デコーダ経由に置き換え、`rodio`/`symphonia` 系クレート (15 パッケージ) を依存から完全削除済み**（`cargo tree` で rodio/symphonia が消えたことを確認済み。MP3/FLAC は対応打ち切り、読み込もうとするとエラーログを出して無音継続。`tests/vorbis_crosscheck.rs` は rodio 参照デコーダが使えなくなったため、削除前に rodio で取得した参照スナップショット (チャンネル数・サンプルレート・全体 RMS・1 秒毎チャンク RMS) を定数として焼き込んだ回帰テストに切り替え） | 済 |
-| ~~`cosmic-text`~~ | `text.rs` (`RasterText` 境界) | **自作済み・稼働中**（TTF/TTC パーサ + AA ラスタライザ + レイアウト + 禁則処理。シェーピング/リガチャ/ルビは未対応）。**F1: TTF パーサ自作済み**（`font/` モジュール。sfnt 単体・TTC コレクション対応、CFF/'OTTO' は非対応を明示 Err、head/maxp/cmap(format4+12)/loca/glyf/hhea/hmtx/OS-2/name を境界チェック付きで解析し、単純/複合グリフを線分+2次ベジェのアウトラインへ正規化。手組み TTF バイト列での既知値一致テストと実システムフォント (msgothic.ttc / YuGothM.ttc・meiryo.ttc / arial.ttf) でのスモークテスト、LCG 破壊 fuzz テスト 1000 件で検証済み）。**F2: スキャンライン AA ラスタライザ自作済み**（`font/raster.rs`。Y方向16分割サブスキャンライン + X方向解析的カバレッジのハイブリッド方式、2次ベジェは曲率に応じた適応分割、nonzero winding rule でホール（'A' の内側等）も正しく処理。ヒンティングは意図的に非実装（AAのみで十分な可読性、理由はモジュール冒頭コメント参照）。合成アウトラインのゴールデンテスト（面積一致・ドーナツ穴・AA階調）で検証済み。`GlyphCache`（LRU）も用意済み）。**F3: `text.rs` への統合完了・`cosmic-text` を依存から実削除済み**（`cargo tree` で cosmic-text/fontdb/swash が依存ツリーから消えたことを確認済み）。`font/registry.rs` が `C:\Windows\Fonts` を起動時 1 回走査して family 名（ローカライズ名含む）→ (パス, TTC index) を索引し、要求 family → Yu Gothic UI → Yu Gothic → Meiryo → MS Gothic → レジストリ内の任意フォントの順でフォールバック（文字単位のグリフフォールバックにも対応）。レイアウトは 1 文字 1 グリフの素朴な折返し（シェーピング/リガチャ非対応）で、**日本語禁則処理**を実装（行頭禁則はぶら下げ方式、行末禁則は道連れ方式。詳細は `text.rs` 冒頭コメント参照）。`font::rasterize` を直接呼んだ結果と `TextEngine` 経由の結果が完全一致することを検証する自己無矛盾性テストあり | 済 |
-| ~~ウィンドウ~~ (`winit` + `softbuffer`) | `win32.rs` | **自作済み・稼働中**（Win32 API 直叩き: `RegisterClassW`+`CreateWindowExW`+`StretchDIBits`、メッセージループは `MsgWaitForMultipleObjects`+`PeekMessage`。**可視ウィンドウでの最終確認は未実施（ユーザーの実機確認待ち）**。不可視ウィンドウ統合テストと `cargo test`/`--autotest` のみで検証済み） | 済 |
+| ~~`rodio` + cpal~~ | `audio.rs` (`AudioCmd` 境界) | **音声デコード 自作済み・稼働中（WAV+OGG/Vorbis。MP3/FLAC は打ち切り）**。音声出力は WASAPI 直叩き + 自作ミキサ/リサンプラ（`wasapi_out.rs` が OS 境界 API、`mixer.rs` が純 Rust・OS 非依存の 3ch ミキサ＋線形補間リサンプラ＋チャンネル変換＋フェード）。**Vorbis デコーダ自作済み**（`codec/ogg.rs` + `codec/vorbis/`。クリーンルーム実装、Xiph の Vorbis I 仕様書 (<https://xiph.org/vorbis/doc/Vorbis_I_spec.html>) と Ogg 仕様 (RFC 3533) のみ参照、libvorbis/lewton 等の既存実装は不参照。Ogg ページング・CRC32・コードブック(カノニカルハフマン+VQ lookup 0/1/2)・Floor type 1・Residue type 0/1/2・channel coupling・逆 MDCT+Vorbis 窓+オーバーラップ加算を実装。V1 で rodio 0.22 (バックエンドは symphonia-codec-vorbis) をテスト内の参照デコーダとして使い、実 OGG ファイル (mono 2 本・stereo 1 本、`tests/vectors_audio/`) でクロスチェックし相関 1.0・最大誤差 1e-7 オーダーで一致することを確認済み）。**V2: `audio.rs` の `build_source()` を自作デコーダ経由に置き換え、`rodio`/`symphonia` 系クレート (15 パッケージ) を依存から完全削除済み**（`cargo tree` で rodio/symphonia が消えたことを確認済み。MP3/FLAC は対応打ち切り、読み込もうとするとエラーログを出して無音継続。`tests/vorbis_crosscheck.rs` は rodio 参照デコーダが使えなくなったため、削除前に rodio で取得した参照スナップショット (チャンネル数・サンプルレート・全体 RMS・1 秒毎チャンク RMS) を定数として焼き込んだ回帰テストに切り替え）。2026-11-22 に `StreamingVorbisSource` / `StreamingWavSource` による定数メモリ逐次デコードへ移行済み（B8） | 済 |
+| ~~`cosmic-text`~~ | `text.rs` (`RasterText` 境界) | **自作済み・稼働中**（TTF/TTC パーサ + AA ラスタライザ + レイアウト + 禁則処理。シェーピング/リガチャ/ルビは未対応）。**F1: TTF パーサ自作済み**（`font/` モジュール。sfnt 単体・TTC コレクション対応、CFF/'OTTO' は非対応を明示 Err、head/maxp/cmap(format4+12)/loca/glyf/hhea/hmtx/OS-2/name を境界チェック付きで解析し、単純/複合グリフを線分+2次ベジェのアウトラインへ正規化。手組み TTF バイト列での既知値一致テストと実システムフォント (msgothic.ttc / YuGothM.ttc・meiryo.ttc / arial.ttf) でのスモークテスト、LCG 破壊 fuzz テスト 1000 件で検証済み）。**F2: スキャンライン AA ラスタライザ自作済み**（`font/raster.rs`。Y方向16分割サブスキャンライン + X方向解析的カバレッジのハイブリッド方式、2次ベジェは曲率に応じた適応分割、nonzero winding rule でホール（'A' の内側等）も正しく処理。ヒンティングは意図的に非実装（AAのみで十分な可読性、理由はモジュール冒頭コメント参照）。合成アウトラインのゴールデンテスト（面積一致・ドーナツ穴・AA階調）で検証済み。`GlyphCache`（LRU）も用意済み）。**F3: `text.rs` への統合完了・`cosmic-text` を依存から実削除済み**（`cargo tree` で cosmic-text/fontdb/swash が依存ツリーから消えたことを確認済み）。`font/registry.rs` が OS のシステムフォントディレクトリを起動時 1 回走査して family 名（ローカライズ名含む）→ (パス, TTC index) を索引し、フォールバック（文字単位のグリフフォールバックにも対応）。レイアウトは 1 文字 1 グリフの素朴な折返し（シェーピング/リガチャ非対応）で、**日本語禁則処理**を実装（行頭禁則はぶら下げ方式、行末禁則は道連れ方式。詳細は `text.rs` 冒頭コメント参照）。`font::rasterize` を直接呼んだ結果と `TextEngine` 経由の結果が完全一致することを検証する自己無矛盾性テストあり | 済 |
+| ~~ウィンドウ~~ (`winit` + `softbuffer`) | `win32.rs` / `x11/` | **自作済み・稼働中**（Windows は Win32 API 直叩き: `RegisterClassW`+`CreateWindowExW`+`StretchDIBits`、Linux は X11 コアプロトコル自作で libX11/xcb 非リンク。**可視ウィンドウでの最終確認は未実施（ユーザーの実機確認待ち）**。不可視ウィンドウ / Xvfb 統合テストと `cargo test`/`--autotest` で検証済み） | 済 |
 | ~~`tokio`~~（tsint エンジン選択時のみ） | `script/tsint_engine.rs` | **自作済み・稼働中**（tsint エンジンは tokio 非依存。自前のタイマーヒープ + 入力ポーリングの駆動ループで非同期 ops を回す） | 済（tsint 選択時） |
-| `deno_core` (V8) + `deno_ast` | `script/`（V8 経路, ops 境界） | 自作 TS インタプリタ（別リポジトリ [`tsint`](../tsint)）を `--engine tsint` で選択可能になった（T5b）。ops（`script/engine_state.rs`）は両エンジンで共用し、挙動が一致することを確認済み。**既定は当面 V8 のまま**（V8 と tsint の並走検証期間。deno_core への完全置換・削除は将来のステップ） | 最高（並走検証中） |
+| `deno_core` (V8) + `deno_ast` | `script/`（V8 経路, ops 境界） | 自作 TS インタプリタ（[`tsint`](https://github.com/ChanyaVRC/tsint) `0.1.0`、crates.io 公開済み）を `--engine tsint` および `dist` ビルド既定で使用可能（T5b）。ops（`script/engine_state.rs`）は両エンジンで共用し、挙動が一致することを確認済み。**開発ビルドの既定は当面 V8 のまま**（V8 と tsint の並走検証期間。deno_core への完全置換・削除は将来のステップ） | 最高（並走検証中） |
 
-残りの推奨順序: ~~音声出力(WASAPI+自作ミキサ)~~ (済) → ~~フォント(TTFパーサ+ラスタライザ+レイアウト+禁則)~~ (済) → ~~スクリプトエンジン(自作TSインタプリタ、`--engine tsint` で選択可)~~ (済、並走検証中) → V8/deno_core 経路の完全置換・削除（将来）。
+残りの推奨順序: ~~音声出力(WASAPI/ALSA+自作ミキサ)~~ (済) → ~~フォント(TTFパーサ+ラスタライザ+レイアウト+禁則)~~ (済) → ~~スクリプトエンジン(自作TSインタプリタ、`--engine tsint` / `dist` 既定)~~ (済、並走検証中) → V8/deno_core 経路の完全置換・削除（将来）。
 `ops` の関数表（`runtime/api.ts` が呼ぶ面）がエンジンの安定 ABI なので、どの層を差し替えてもゲームとタグシナリオフレームワークはそのまま動く。
 
-## テスト・ベンチマーク
+## パフォーマンス・メモリ設計
+
+2026-11-22 の一連の最適化により、大容量アセットでも定数〜上限つきメモリで動作し、1280×720 の CPU 合成は 1 フレーム 0.2ms 未満に収まる。
+
+- **File-backed `Pak`** (`crates/noiria-core/src/pak.rs` / `assets.rs`): オープン時にヘッダと暗号化インデックスのみを読み込み、エントリ実体は位置指定 I/O（Windows `seek_read` / Unix `read_at`）でオンデマンド取得する（`.pak` 全量を RAM に常駐させない）。
+- **ストリーミング音声 (B8)** (`crates/noiria-core/src/audio.rs`): `StreamingVorbisSource` / `StreamingWavSource` が定数メモリで逐次デコード（ファイル・file-backed `.pak` 双方のシーク・ループ対応）。
+- **ストリーミング動画 + バッファ再利用** (`crates/noiria-core/src/codec/video.rs`): AVI/IVF+VP9 を `Read + Seek` でフレーム単位読み込みし、`next_frame_into`・`Pixmap::from_rgba_opaque`・`Arc<Pixmap>` リサイクルで毎フレームの確保を排除。
+- **画像 LRU キャッシュ (B23) + TextEngine 上限** (`crates/noiria-app/src/script/ui_cache.rs` / `crates/noiria-core/src/text.rs`): 一般 `[image]` 向けに 64 MiB バイト上限 LRU（`UiCaches::images`）、インライン画像向けに 16 MiB 上限 LRU（`TextEngine::image_cache`）を実装。
+- **CPU コンポジタ SIMD + スケーラ再利用** (`crates/noiria-core/src/pixmap.rs` / `scale.rs`): x86_64 AVX2/SSE2/SSSE3 SIMD（`blit_over_clipped` / `lerp_from` / `universal_from` / `to_bgrx_u32` / `from_rgba_straight`、スカラー実装とビット完全一致）と、`scale_bilinear` の永続ワーカープール + `AxisCache`。
+- **`vp9dec 0.1.2` (`opt-level=3`)**: `Cargo.toml` の `opt-level=2` 固定を撤廃し、`vp9dec 0.1.2` の AVX2 イントラ予測（DC/V/H/TM）およびロスレス 4x4 WHT SIMD を活用。
+- **`tsint 0.1.0`**: O(1) ハイブリッド `PropMap`、反復 undo-trail 正規表現、非キャプチャローカル変数の非ボックス化、trial-deletion 循環参照回収 GC。
+
+## テスト・ベンチマーク・CI/CD
 
 ```powershell
-cargo test                                          # Windows 763 passed（ignored 5、2026-11-20）
-cargo run --release -p noiria-core --example bench  # 合成ホットパスの計測
-cargo clippy --workspace --all-targets -- -D warnings  # 警告 0 が基準（feature 構成ごとは scripts/feature-build-matrix.ps1）
+cargo test                                                                # ワークスペース全テスト（V8 + tsint）
+cargo test -p noiria-app --no-default-features --features engine-tsint    # V8 抜きの高速テスト（CI と同構成）
+cargo run --release -p noiria-core --example bench                        # 合成ホットパスの計測
+cargo clippy --workspace --all-targets -- -D warnings                     # 警告 0 が基準（feature 構成ごとは scripts/feature-build-matrix.ps1）
 ```
 
-PowerShell で cargo を実行するときは、作業ディレクトリのドライブ文字を大文字（`Set-Location 'C:\...\noiria'`）にすること。
+PowerShell で V8 を含むビルドを cargo 実行するときは、作業ディレクトリのドライブ文字を大文字（`Set-Location 'C:\...\noiria'`）にすること。
 小文字の `c:\` や Git Bash の cwd だと v8 のビルドスクリプトが別ドライブと誤認して symlink 作成（権限エラー 1314）で panic する。
 
+CI/CD（GitHub Actions）:
+- **`.github/workflows/ci.yml`**: Linux clippy (`-D warnings`)、Ubuntu/Windows のテストマトリクス（`noiria-core` / `noiria-tools` / `noiria-app` `engine-tsint`）、Ubuntu/Windows の `dist` ビルド + `--autotest` スモーク検証を自動実行。
+- **`.github/workflows/release.yml`**: `v*` タグ（`v0.1.0`+）で Windows (`x86_64-pc-windows-msvc`, `.zip`)・Linux (`x86_64-unknown-linux-gnu`, `.tar.gz`) のプリビルドバイナリ（`noiria` / `noiria-pack` / `noiria-export`）と `SHA256SUMS.txt` をビルドして [GitHub Releases](https://github.com/ChanyaVRC/noiria/releases) へ公開。
+
 テストには V8/tsint の ops・KAG タグ挙動比較、✅151 タグのカバレッジ照合、
-動画の厳密 seek/event/区間ループと競合回帰、各コーデック、および OS 別の
+動画の厳密 seek/event/区間ループと競合回帰、SIMD vs スカラーのビット一致検証、
+file-backed Pak・ストリーミング音声/動画・LRU キャッシュ、各コーデック、および OS 別の
 Win32/WASAPI/Media Foundation・X11/ALSA 経路を含む。
 
-1280x720 での合成コスト実測（release, 60fps 予算 16.6ms に対して）:
+1280x720 での合成コスト実測（release、`cargo run --release -p noiria-core --example bench`、2026-11-23 計測、60fps 予算 16.6ms に対して）:
 
-| 経路 | ms/frame |
-| --- | --- |
-| 通常合成（背景+立ち絵2+メッセージ） | 約 2.4 |
-| クロスフェード中 | 約 0.9（ページ合成を revision キャッシュ、毎フレームはブレンドのみ） |
-| ルール画像トランジション中 | 約 1.5（内側ループ整数化済み） |
-
-不透明ピクセルのコピー高速パスにより背景 blit は約 0.2ms。
+| 経路 | ms/frame | 備考 |
+| --- | --- | --- |
+| `compose` 4レイヤ (通常) | **0.174** | 旧 ~2.4 ms/frame から約 14 倍高速化 |
+| `compose` クロスフェード中 | **0.153** | 旧 ~0.9 ms/frame（ページ合成キャッシュ + SIMD ブレンド） |
+| `compose` ルールトランジション中 | **0.306** | 旧 ~1.5 ms/frame（256 要素 LUT + SIMD） |
+| `blit_over` 不透明フル画面 | **0.151** | 高速コピーパス |
+| `blit_over` 半透明フル画面 | **0.232** | AVX2/SSE2 SIMD alpha ブレンド |
+| `blit_over` 立ち絵 500x900 | **0.118** | AVX2/SSE2 SIMD alpha ブレンド |
+| `to_bgrx_u32` | **0.107** | AVX2/SSSE3 SIMD チャネルスワップ |
