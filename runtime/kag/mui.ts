@@ -499,7 +499,7 @@ export function addHeading(g: MGroup, z: number, x: number, y: number, en: strin
   const big = new MBox({ x, y, w: sc(560, s), h: sc(70, s) }, z, { fontSize: bigFs, lineHeight: 1.2, color: MC.text, opacity: 0 });
   big.setText([seg(en, MC.text, bigFs, true)]);
   g.add(big);
-  const jx = x + estimateWidth(en, bigFs) + sc(22, s);
+  const jx = x + Math.ceil(estimateWidth(en, bigFs) * 1.24) + sc(22, s);
   const small = new MBox({ x: jx, y: y + sc(26, s), w: sc(300, s), h: sc(30, s) }, z, { fontSize: smallFs, lineHeight: 1.3, color: MC.textSub, opacity: 0 });
   small.setText([seg(jp, MC.textSub, smallFs)]);
   g.add(small);

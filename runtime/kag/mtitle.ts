@@ -411,12 +411,12 @@ export interface GalleryHost {
 }
 
 const G_CARD_W = 360;
-const G_CARD_H = 262;
+const G_CARD_H = 250;
 const G_THUMB_W = 336;
 const G_THUMB_H = 189;
 const G_GAP = 28;
 const G_X0 = 72;
-const G_Y0 = 176;
+const G_Y0 = 140;
 const G_PER_PAGE = 6;
 
 /** 解放済みの CG のサムネイルを別スレッドで先に作っておく（ギャラリーを開くたびに待たない）。 */
@@ -469,7 +469,7 @@ export class GalleryScreen {
     count.go(count.rect.x, count.rect.y, 255, D_OPEN, EASE_OUT);
     const hintFs = sc(14, s);
     const hint = this.g.add(
-      new MBox({ x: this.ox + sc(72, s), y: sh - this.oy - sc(44, s), w: sw - this.ox * 2 - sc(144, s), h: sc(26, s) }, 311, {
+      new MBox({ x: this.ox + sc(72, s), y: sh - this.oy - sc(40, s), w: sw - this.ox * 2 - sc(144, s), h: sc(26, s) }, 311, {
         fontSize: hintFs,
         lineHeight: 1.3,
         align: "right",
@@ -544,7 +544,7 @@ export class GalleryScreen {
     const thumbW = sc(G_THUMB_W, s);
     const thumbH = sc(G_THUMB_H, s);
     const gapX = sc(G_GAP, s);
-    const gapY = sc(24, s);
+    const gapY = sc(18, s);
     const x0 = this.ox + sc(G_X0, s);
     const y0 = this.oy + sc(G_Y0, s);
     const pad = sc(12, s);
@@ -571,10 +571,10 @@ export class GalleryScreen {
         }),
       );
       const num = i + start + 1 < 10 ? `0${i + start + 1}` : `${i + start + 1}`;
-      const titleFs = sc(17, s);
+      const titleFs = sc(15, s);
       const numFs = sc(13, s);
       const title = this.g.add(
-        new MBox({ x: rect.x + pad, y: rect.y + thumbH + sc(20, s), w: rect.w - pad * 2, h: sc(54, s) }, 314, {
+        new MBox({ x: rect.x + pad, y: rect.y + thumbH + sc(16, s), w: rect.w - pad * 2, h: sc(44, s) }, 314, {
           fontSize: titleFs,
           lineHeight: 1.35,
           opacity: 0,
