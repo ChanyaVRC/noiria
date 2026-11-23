@@ -823,28 +823,41 @@ export function makeTags(p: KagPlayer): Record<string, TagHandler> {
     },
     playse: (a) => {
       if (!a.storage) return;
-      api.audio.play(seCh(a), p.resolveStorage("se", a.storage), {
+      const ch = seCh(a);
+      const volume = num(a.volume, 100) / 100;
+      api.audio.play(ch, p.resolveStorage("se", a.storage), {
         loop: bool(a.loop, false),
-        volume: p.volFor("se", num(a.volume, 100) / 100),
+        volume: p.volFor("se", volume),
       });
+      p.noteSePlay(ch, volume);
     },
     fadeinse: (a) => {
       if (!a.storage) return;
-      api.audio.play(seCh(a), p.resolveStorage("se", a.storage), {
+      const ch = seCh(a);
+      const volume = num(a.volume, 100) / 100;
+      api.audio.play(ch, p.resolveStorage("se", a.storage), {
         loop: bool(a.loop, false),
-        volume: p.volFor("se", num(a.volume, 100) / 100),
+        volume: p.volFor("se", volume),
         fadeInMs: num(a.time, 1000),
       });
+      p.noteSePlay(ch, volume);
     },
     fadeoutse: (a) => {
-      api.audio.stop(seCh(a), num(a.time, 1000));
+      const ch = seCh(a);
+      api.audio.stop(ch, num(a.time, 1000));
+      p.noteSeStop(ch);
     },
     fadese: (a) => {
+      const ch = seCh(a);
+      const volume = num(a.volume, 100) / 100;
       api.sys.log(`[fadese] buf=${num(a.buf, 0)} volume=${num(a.volume, 100)}`);
-      api.audio.fadeTo(seCh(a), p.volFor("se", num(a.volume, 100) / 100), num(a.time, 1000), "none");
+      api.audio.fadeTo(ch, p.volFor("se", volume), num(a.time, 1000), "none");
+      p.noteSePlay(ch, volume);
     },
     stopse: (a) => {
-      api.audio.stop(seCh(a));
+      const ch = seCh(a);
+      api.audio.stop(ch);
+      p.noteSeStop(ch);
     },
     ws: async (a) => {
       await api.audio.waitEnd(seCh(a));
@@ -857,7 +870,7 @@ export function makeTags(p: KagPlayer): Record<string, TagHandler> {
     entersebuf: () => {},
     playvoice: (a) => {
       if (!a.storage) return;
-      p.playVoice(p.resolveStorage("voice", a.storage), p.volFor("voice", num(a.volume, 100) / 100));
+      p.playVoice(p.resolveStorage("voice", a.storage), num(a.volume, 100) / 100);
     },
     stopvoice: () => {
       p.stopVoice();

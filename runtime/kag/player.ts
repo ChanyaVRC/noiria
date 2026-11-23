@@ -624,6 +624,8 @@ export class KagPlayer {
   private skipBeforeCtrl = false;
   /** [playvoice] で鳴らしたボイスがまだ停止されていない可能性があるか（次へ送る操作で止める）。 */
   private voiceActive = false;
+  private currentVoiceVolume: number | null = null;
+  private seVolumes = new Map<string, number>();
 
   backlogEnabled = true;
   backlog: BacklogEntry[] = [];
@@ -1850,21 +1852,63 @@ export class KagPlayer {
   private stopVoiceOnAdvance(): void {
     if (!this.voiceActive) return;
     this.voiceActive = false;
+    this.currentVoiceVolume = null;
     api.audio.stop("voice");
   }
 
   /** [playvoice]: 前のボイスを止めて鳴らす。 */
-  playVoice(path: string, volume: number): void {
+  playVoice(path: string, tagVolume = 1): void {
     api.audio.stop("voice");
-    api.audio.play("voice", path, { volume });
+    api.audio.play("voice", path, { volume: this.volFor("voice", tagVolume) });
     this.voiceActive = true;
+    this.currentVoiceVolume = tagVolume;
     this.paragraphVoice = path;
   }
 
   /** [stopvoice] */
   stopVoice(): void {
     this.voiceActive = false;
+    this.currentVoiceVolume = null;
     api.audio.stop("voice");
+  }
+
+  noteSePlay(ch: string, tagVolume: number): void {
+    this.seVolumes.set(ch, tagVolume);
+  }
+
+  noteSeStop(ch: string): void {
+    this.seVolumes.delete(ch);
+  }
+
+  syncSeVolumes(): void {
+    for (const [ch, tagVol] of [...this.seVolumes.entries()]) {
+      api.audio.volume(ch, this.volFor("se", tagVol));
+    }
+  }
+
+  syncVoiceVolume(): void {
+    if (this.voiceActive && this.currentVoiceVolume !== null) {
+      api.audio.volume("voice", this.volFor("voice", this.currentVoiceVolume));
+    }
+  }
+
+  private syncBgmVolume(): void {
+    if (this.currentBgm) {
+      api.audio.volume(this.bgmCh, this.volFor("bgm", this.currentBgm.volume));
+    }
+    const otherCh = this.bgmCh === "bgm" ? "bgm2" : "bgm";
+    if (this.settings.bgmVol === 0 && api.audio.isFading(otherCh)) {
+      api.audio.volume(otherCh, 0);
+    }
+  }
+
+  stopAllSe(): void {
+    api.audio.stop("se");
+    for (const [ch] of [...this.seVolumes.entries()]) {
+      // "se" と "se0" は audio.rs 上で同一スロット (CH_SE) の別名。二重停止を避ける。
+      if (ch !== "se" && ch !== "se0") api.audio.stop(ch);
+    }
+    this.seVolumes.clear();
   }
 
   // ---------- 一時停止（メニュー/バックログ/モーダル表示中） ----------
@@ -2281,11 +2325,13 @@ export class KagPlayer {
     const v = clampVolPct(volPct);
     if (kind === "bgm") {
       this.settings.bgmVol = v;
-      if (this.currentBgm) api.audio.volume(this.bgmCh, this.volFor("bgm", this.currentBgm.volume));
+      this.syncBgmVolume();
     } else if (kind === "se") {
       this.settings.seVol = v;
+      this.syncSeVolumes();
     } else {
       this.settings.voiceVol = v;
+      this.syncVoiceVolume();
     }
   }
 
@@ -2775,9 +2821,8 @@ export class KagPlayer {
     this.mode.auto = false;
     // 読み途中の区間は既読にしない（ロードで抜けた）。
     this.readSection = null;
-    this.voiceActive = false;
-    api.audio.stop("voice");
-    api.audio.stop("se");
+    this.stopVoice();
+    this.stopAllSe();
     this.clearAllMessages();
 
     // レイヤ復元
@@ -3117,6 +3162,7 @@ export class KagPlayer {
           stopVoice: () => {
             api.audio.stop("voice");
             this.voiceActive = false;
+            this.currentVoiceVolume = null;
           },
         }).run();
       } finally {
@@ -3175,6 +3221,7 @@ export class KagPlayer {
       if (voiceStarted) {
         api.audio.stop("voice");
         this.voiceActive = false;
+        this.currentVoiceVolume = null;
       }
     } finally {
       events.close();
@@ -3512,11 +3559,15 @@ export class KagPlayer {
     s[key] = value;
     switch (key) {
       case "bgmVol":
-        if (this.currentBgm) api.audio.volume(this.bgmCh, this.volFor("bgm", this.currentBgm.volume));
+        this.syncBgmVolume();
         break;
       case "seVol":
+        this.syncSeVolumes();
         // 試し鳴り（ヘッドレス実行では音声スレッドが無いため実質無音）
         this.playUiSound("click");
+        break;
+      case "voiceVol":
+        this.syncVoiceVolume();
         break;
       case "cps":
         this.cps = this.settings.cps;
@@ -3538,7 +3589,9 @@ export class KagPlayer {
     this.settings = { ...this.defaultSettings };
     vars.sf.config = this.settings;
     this.applySettings();
-    if (this.currentBgm) api.audio.volume(this.bgmCh, this.volFor("bgm", this.currentBgm.volume));
+    this.syncBgmVolume();
+    this.syncSeVolumes();
+    this.syncVoiceVolume();
     this.refreshMessageWindows();
     this.saveSys();
   }
@@ -3552,7 +3605,7 @@ export class KagPlayer {
     this.readSection = null;
     this.callStack = [];
     this.stopVoice();
-    api.audio.stop("se");
+    this.stopAllSe();
     this.clearAllMessages();
     this.requestJump(t.storage, t.target);
   }

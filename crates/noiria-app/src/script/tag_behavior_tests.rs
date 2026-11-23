@@ -104,6 +104,68 @@ fn regression_playse_buf_uses_distinct_channels() {
     );
 }
 
+#[test]
+fn regression_se_and_voice_volume_sync_across_active_buffers() {
+    let frag = r#"
+[playse storage="a.wav" buf=0 volume=100]
+[playse storage="rain.wav" buf=1 volume=50 loop=true]
+[fadeinse storage="wind.wav" buf=2 volume=80 loop=true time=100]
+[playvoice storage="v1.wav" volume=50]
+[seopt volume=0]
+[fadese buf=1 volume=100 time=100]
+[stopse buf=0]
+[fadeoutse buf=2 time=50]
+[eval exp="sys.player.setSetting('seVol', 50)"]
+[eval exp="sys.player.setSetting('voiceVol', 0)"]
+[eval exp="sys.player.setSetting('voiceVol', 100)"]
+[eval exp="sys.player.resetSettings()"]
+[stopvoice]
+[eval exp="sys.player.setSetting('voiceVol', 20)"]
+"#;
+    let v8_log = run_v8(frag, &[]);
+    let tsint_log = run_tsint(frag, &[]);
+    assert_logs_match(&v8_log, &tsint_log);
+
+    assert_log_contains(&v8_log, "audio_volume se0 vol=0");
+    assert_log_contains(&v8_log, "audio_volume se1 vol=0");
+    assert_log_contains(&v8_log, "audio_volume se2 vol=0");
+    assert_log_contains(&v8_log, "audio_volume se1 vol=0.5");
+    assert_log_contains(&v8_log, "audio_volume se1 vol=0.8");
+    assert_log_count(&v8_log, "audio_volume se0", 1);
+    assert_log_count(&v8_log, "audio_volume se2", 1);
+    assert_log_contains(&v8_log, "audio_volume voice vol=0");
+    assert_log_contains(&v8_log, "audio_volume voice vol=0.5");
+    assert_log_contains(&v8_log, "audio_volume voice vol=0.4");
+    assert_log_count(&v8_log, "audio_volume voice", 3);
+}
+
+#[test]
+fn regression_stop_all_se_on_load_and_go_title() {
+    let frag = r#"
+*start
+[if exp="!sf.didLoad"]
+[eval exp="sf.didLoad = true"]
+[playse storage="rain.wav" buf=1 loop=true]
+[playse storage="hum.wav" buf=2 loop=true]
+[save place=1]
+[load place=1]
+[endif]
+[playse storage="wind.wav" buf=3 loop=true]
+[eval exp="sys.player.titleOpt = { storage: 'test.ks', target: 'after_title' }; sys.player.goTitle()"]
+[s]
+*after_title
+[emb exp="'AT_TITLE'"]
+"#;
+    let v8_log = run_v8(frag, &[]);
+    let tsint_log = run_tsint(frag, &[]);
+    assert_logs_match(&v8_log, &tsint_log);
+
+    assert_log_contains(&v8_log, "audio_stop se1 fade=0");
+    assert_log_contains(&v8_log, "audio_stop se2 fade=0");
+    assert_log_contains(&v8_log, "audio_stop se3 fade=0");
+    assert_log_contains(&v8_log, &printed("AT_TITLE"));
+}
+
 // =====================================================================
 // 既存 (対応済み) タグ: フロー制御
 // =====================================================================
