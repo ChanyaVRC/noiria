@@ -36,6 +36,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -149,7 +150,7 @@ pub struct GlyphRaster {
     pub x: i32,
     pub y: i32,
     /// 縁取り込みでプリマルチプライ済みの小さな絵
-    pub pixmap: Pixmap,
+    pub pixmap: Arc<Pixmap>,
     /// 連結テキスト全体におけるバイト開始位置（リンクのヒットテスト用）
     pub byte_start: usize,
     pub byte_end: usize,
@@ -222,10 +223,81 @@ const GLYPH_CACHE_CAPACITY: usize = 1024;
 /// インライン画像キャッシュの総バイト数上限（16 MiB）。
 const IMAGE_CACHE_MAX_BYTES: usize = 16 << 20;
 
+/// 装飾（色・縁取り・太字）適用済みグリフキャッシュの上限。
+const STYLED_CACHE_MAX_BYTES: usize = 16 << 20;
+const STYLED_CACHE_MAX_ENTRIES: usize = 2048;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StyledGlyphKey {
+    font: FontKey,
+    gid: u16,
+    size_q6: u32,
+    fill: [u8; 4],
+    outline_color: [u8; 4],
+    outline_width: u32,
+    bold: bool,
+}
+
+struct StyledGlyphCache {
+    map: HashMap<StyledGlyphKey, (Arc<Pixmap>, u64)>,
+    bytes: usize,
+    tick: u64,
+}
+
+impl StyledGlyphCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            bytes: 0,
+            tick: 0,
+        }
+    }
+
+    fn get(&mut self, key: &StyledGlyphKey) -> Option<Arc<Pixmap>> {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        self.map.get_mut(key).map(|(p, t)| {
+            *t = tick;
+            Arc::clone(p)
+        })
+    }
+
+    fn insert(&mut self, key: StyledGlyphKey, pixmap: Arc<Pixmap>) {
+        let sz = pixmap.data.len();
+        if sz > STYLED_CACHE_MAX_BYTES {
+            return;
+        }
+        if let Some((old, _)) = self.map.remove(&key) {
+            self.bytes -= old.data.len();
+        }
+        self.tick = self.tick.wrapping_add(1);
+        self.map.insert(key, (pixmap, self.tick));
+        self.bytes += sz;
+        while self.bytes > STYLED_CACHE_MAX_BYTES || self.map.len() > STYLED_CACHE_MAX_ENTRIES {
+            let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((p, _)) = self.map.remove(&oldest) {
+                self.bytes -= p.data.len();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.bytes = 0;
+    }
+}
+
 /// 総バイト数で上限を持つインライン画像 LRU。`has_image(&self)` の公開 API を維持しつつ
 /// アクセス時刻を更新するため、時刻だけ `AtomicU64` にしている（`TextEngine` の `Sync` も保つ）。
 struct ImageCache {
-    map: HashMap<String, (Pixmap, AtomicU64)>,
+    map: HashMap<String, (Arc<Pixmap>, AtomicU64)>,
     bytes: usize,
     cap_bytes: usize,
     tick: AtomicU64,
@@ -254,10 +326,10 @@ impl ImageCache {
         }
     }
 
-    fn get(&self, path: &str) -> Option<&Pixmap> {
+    fn get(&self, path: &str) -> Option<Arc<Pixmap>> {
         self.map.get(path).map(|(p, t)| {
             t.store(self.next_tick(), Ordering::Relaxed);
-            p
+            Arc::clone(p)
         })
     }
 
@@ -270,7 +342,7 @@ impl ImageCache {
             return;
         }
         let tick = self.next_tick();
-        self.map.insert(path, (pixmap, AtomicU64::new(tick)));
+        self.map.insert(path, (Arc::new(pixmap), AtomicU64::new(tick)));
         self.bytes += sz;
         while self.bytes > self.cap_bytes {
             let Some(oldest) = self
@@ -311,6 +383,8 @@ pub struct TextEngine {
     /// どのフォントにも無かった文字（ネガティブキャッシュ）。無いと、その文字が出るたびに全システム
     /// フォントを読み直して探し直す。
     glyph_missing: HashSet<char>,
+    /// 装飾（色・縁取り・太字）適用済みのグリフ画像 LRU。
+    styled_cache: StyledGlyphCache,
     /// `[graph]`（インライン画像, W3）用の画像キャッシュ。キーは解決済みパス。
     /// text.rs は assets への依存を増やしたくない（設計判断、
     /// `docs/implementation-notes.md` 2026-07-11 W3 参照）ため、実際のファイル I/O
@@ -334,6 +408,7 @@ impl TextEngine {
             fonts: HashMap::new(),
             glyph_fallback_cache: HashMap::new(),
             glyph_missing: HashSet::new(),
+            styled_cache: StyledGlyphCache::new(),
             image_cache: ImageCache::new(IMAGE_CACHE_MAX_BYTES),
         }
     }
@@ -350,6 +425,7 @@ impl TextEngine {
         self.fonts.clear();
         self.glyph_fallback_cache.clear();
         self.glyph_missing.clear();
+        self.styled_cache.clear();
     }
 
     /// `path` が既に画像キャッシュへロード済みか。
@@ -554,7 +630,7 @@ impl TextEngine {
             advance_px: f32,
             left: i32,
             top: i32,
-            pixmap: Option<Pixmap>,
+            pixmap: Option<Arc<Pixmap>>,
             byte_start: usize,
             byte_end: usize,
             control: Option<CharControl>,
@@ -619,13 +695,15 @@ impl TextEngine {
                 // （Pass3 のコードは変更しない）。未キャッシュのパスは幅 0 で無視する。
                 if let Some(pixmap) = self.image_cache.get(img_path) {
                     let pad = style.outline_width as i32;
+                    let adv = pixmap.width as f32;
+                    let top = pixmap.height as i32 - pad;
                     resolved.push(Resolved {
                         ch: '\0',
                         is_break: false,
-                        advance_px: pixmap.width as f32,
+                        advance_px: adv,
                         left: pad,
-                        top: pixmap.height as i32 - pad,
-                        pixmap: Some(pixmap.clone()),
+                        top,
+                        pixmap: Some(pixmap),
                         byte_start: byte_pos,
                         byte_end: byte_pos,
                         control: None,
@@ -658,32 +736,43 @@ impl TextEngine {
                     // どのフォントにもグリフが無い: 幅 0 として無視する。
                     continue;
                 };
+                let size_key = size_q6(seg_size);
+                let styled_key = StyledGlyphKey {
+                    font: font_key.clone(),
+                    gid,
+                    size_q6: size_key,
+                    fill,
+                    outline_color: seg_edge_color,
+                    outline_width: style.outline_width,
+                    bold: seg_bold,
+                };
+                let cached_styled = self.styled_cache.get(&styled_key);
                 let Some(loaded) = self.font_mut(&font_key) else {
                     continue;
                 };
                 let scale = seg_size / loaded.font.units_per_em() as f32;
                 let advance_px = loaded.font.advance(gid) as f32 * scale;
-                let size_key = size_q6(seg_size);
-                let mask = match loaded.cache.get(gid, size_key) {
-                    Some(m) => m.clone(),
-                    None => {
-                        let outline = loaded.font.outline(gid).unwrap_or_default();
-                        let m = rasterize(&outline, scale);
-                        loaded.cache.get_or_insert_with(gid, size_key, || m.clone());
-                        m
-                    }
-                };
-
+                let mask = loaded.cache.get_or_insert_with(gid, size_key, || {
+                    let outline = loaded.font.outline(gid).unwrap_or_default();
+                    rasterize(&outline, scale)
+                });
+                let (mask_left, mask_top) = (mask.left, mask.top);
                 let pixmap = if mask.width > 0 && mask.height > 0 {
-                    Some(rasterize_glyph(
-                        mask.width,
-                        mask.height,
-                        &mask.data,
-                        fill,
-                        seg_edge_color,
-                        style.outline_width,
-                        seg_bold,
-                    ))
+                    if let Some(p) = cached_styled {
+                        Some(p)
+                    } else {
+                        let p = Arc::new(rasterize_glyph(
+                            mask.width,
+                            mask.height,
+                            &mask.data,
+                            fill,
+                            seg_edge_color,
+                            style.outline_width,
+                            seg_bold,
+                        ));
+                        self.styled_cache.insert(styled_key, Arc::clone(&p));
+                        Some(p)
+                    }
                 } else {
                     None
                 };
@@ -692,8 +781,8 @@ impl TextEngine {
                     ch,
                     is_break: false,
                     advance_px,
-                    left: mask.left,
-                    top: mask.top,
+                    left: mask_left,
+                    top: mask_top,
                     pixmap,
                     byte_start,
                     byte_end,
@@ -814,7 +903,7 @@ impl TextEngine {
         let ruby_font_size = style.font_size * RUBY_SIZE_RATIO;
 
         struct RChar {
-            pixmap: Pixmap,
+            pixmap: Arc<Pixmap>,
             left: i32,
             top: i32,
             advance_px: f32,
@@ -825,38 +914,51 @@ impl TextEngine {
             let Some((font_key, gid)) = self.glyph_for_char(base_key, ch) else {
                 continue;
             };
+            let size_key = size_q6(ruby_font_size);
+            let styled_key = StyledGlyphKey {
+                font: font_key.clone(),
+                gid,
+                size_q6: size_key,
+                fill: style.color,
+                outline_color: [0, 0, 0, 0],
+                outline_width: 0,
+                bold: false,
+            };
+            let cached_styled = self.styled_cache.get(&styled_key);
             let Some(loaded) = self.font_mut(&font_key) else {
                 continue;
             };
             let scale = ruby_font_size / loaded.font.units_per_em() as f32;
             let advance_px = loaded.font.advance(gid) as f32 * scale;
-            let size_key = size_q6(ruby_font_size);
-            let mask = match loaded.cache.get(gid, size_key) {
-                Some(m) => m.clone(),
-                None => {
-                    let outline = loaded.font.outline(gid).unwrap_or_default();
-                    let m = rasterize(&outline, scale);
-                    loaded.cache.get_or_insert_with(gid, size_key, || m.clone());
-                    m
-                }
-            };
+            let mask = loaded.cache.get_or_insert_with(gid, size_key, || {
+                let outline = loaded.font.outline(gid).unwrap_or_default();
+                rasterize(&outline, scale)
+            });
             total_w += advance_px;
             if mask.width == 0 || mask.height == 0 {
                 continue;
             }
-            let pixmap = rasterize_glyph(
-                mask.width,
-                mask.height,
-                &mask.data,
-                style.color,
-                [0, 0, 0, 0],
-                0,
-                false,
-            );
+            let (mask_left, mask_top) = (mask.left, mask.top);
+            let pixmap = match cached_styled {
+                Some(p) => p,
+                None => {
+                    let p = Arc::new(rasterize_glyph(
+                        mask.width,
+                        mask.height,
+                        &mask.data,
+                        style.color,
+                        [0, 0, 0, 0],
+                        0,
+                        false,
+                    ));
+                    self.styled_cache.insert(styled_key, Arc::clone(&p));
+                    p
+                }
+            };
             rchars.push(RChar {
                 pixmap,
-                left: mask.left,
-                top: mask.top,
+                left: mask_left,
+                top: mask_top,
                 advance_px,
             });
         }
@@ -1150,6 +1252,55 @@ fn is_line_end_forbidden(c: char) -> bool {
 /// `bold`: 疑似太字。本体合成ループでのみ左隣ピクセルのカバレッジを拾う
 /// （`coverage(x,y) = max(mask(x,y), mask(x-1,y))`）。縁取りループには適用しない
 /// （設計判断 5）。advance は呼び出し側で変更しないため、キャンバス拡張も不要。
+/// 1 次元スライディング最大値（van Herk / Gil-Werman）。
+/// `src`（長さ `w`）の両端を `pad` ゼロ埋めした長さ `ow = w + 2*pad` の列に対し、
+/// 半径 `rx`（`rx <= pad`）の区間最大値を `dst`（長さ `ow`）へ書き込む。
+fn dilate_row_1d(
+    src: &[u8],
+    pad: usize,
+    rx: usize,
+    ext: &mut [u8],
+    pre: &mut [u8],
+    suf: &mut [u8],
+    dst: &mut [u8],
+) {
+    let ow = dst.len();
+    if rx == 0 {
+        dst[..pad].fill(0);
+        dst[pad..pad + src.len()].copy_from_slice(src);
+        dst[pad + src.len()..].fill(0);
+        return;
+    }
+    let ext_len = ow + 2 * rx;
+    let ext = &mut ext[..ext_len];
+    let pre = &mut pre[..ext_len];
+    let suf = &mut suf[..ext_len];
+    let left_zero = rx + pad;
+    ext[..left_zero].fill(0);
+    ext[left_zero..left_zero + src.len()].copy_from_slice(src);
+    ext[left_zero + src.len()..].fill(0);
+
+    let k = 2 * rx + 1;
+    for (p_chunk, e_chunk) in pre.chunks_mut(k).zip(ext.chunks(k)) {
+        let mut m = 0u8;
+        for (p, &e) in p_chunk.iter_mut().zip(e_chunk) {
+            m = m.max(e);
+            *p = m;
+        }
+    }
+    for (s_chunk, e_chunk) in suf.chunks_mut(k).zip(ext.chunks(k)) {
+        let mut m = 0u8;
+        for (s, &e) in s_chunk.iter_mut().rev().zip(e_chunk.iter().rev()) {
+            m = m.max(e);
+            *s = m;
+        }
+    }
+    let pre_shift = &pre[2 * rx..2 * rx + ow];
+    for ((d, &s), &p) in dst.iter_mut().zip(&suf[..ow]).zip(pre_shift) {
+        *d = s.max(p);
+    }
+}
+
 fn rasterize_glyph(
     w: u32,
     h: u32,
@@ -1159,74 +1310,179 @@ fn rasterize_glyph(
     outline_width: u32,
     bold: bool,
 ) -> Pixmap {
-    let pad = outline_width as i32;
-    let ow = w as i32 + pad * 2;
-    let oh = h as i32 + pad * 2;
+    let pad = outline_width as usize;
+    let wu = w as usize;
+    let hu = h as usize;
+    let ow = wu + pad * 2;
+    let oh = hu + pad * 2;
     let mut out = Pixmap::new(ow as u32, oh as u32);
 
-    let mask_at = |x: i32, y: i32| -> u32 {
-        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-            return 0;
-        }
-        data[(y as usize) * (w as usize) + (x as usize)] as u32
-    };
-
-    // 1) 縁取り: 各ピクセルについて周囲 (半径 pad) のマスク最大値をとる
+    // 1) 縁取り: 円盤 (dx^2 + dy^2 <= pad^2) の最大値フィルタ。
+    //    pad <= 2 はスタック行バッファ + 非ゼロ散布でヒープ確保ゼロ。
+    //    pad >= 3 は各 dy ごとの水平半径 rx(dy) の van Herk 1D スライディング最大値 + 垂直最大値。
     if outline_width > 0 && outline_color[3] > 0 {
-        for oy in 0..oh {
-            for ox in 0..ow {
-                let mut m = 0u32;
-                for dy in -pad..=pad {
-                    for dx in -pad..=pad {
-                        if dx * dx + dy * dy > pad * pad {
-                            continue;
-                        }
-                        m = m.max(mask_at(ox - pad + dx, oy - pad + dy));
-                        if m == 255 {
-                            break;
+        let mut outline_lut = [[0u8; 4]; 256];
+        for (m, slot) in outline_lut.iter_mut().enumerate().skip(1) {
+            let a = (m as u32 * outline_color[3] as u32) / 255;
+            *slot = [
+                (outline_color[0] as u32 * a / 255) as u8,
+                (outline_color[1] as u32 * a / 255) as u8,
+                (outline_color[2] as u32 * a / 255) as u8,
+                a as u8,
+            ];
+        }
+
+        if pad <= 2 && ow <= 512 {
+            let rx_table: [usize; 3] = if pad == 1 { [1, 0, 0] } else { [2, 1, 0] };
+            let mut row_max = [0u8; 512];
+            let pad_i = pad as i32;
+            for oy in 0..oh {
+                let row = &mut row_max[..ow];
+                row.fill(0);
+                let oy_i = oy as i32;
+                let sy_min = (oy_i - 2 * pad_i).max(0) as usize;
+                let sy_max = oy_i.min(hu as i32 - 1);
+                if sy_max >= sy_min as i32 {
+                    for sy in sy_min..=(sy_max as usize) {
+                        let dy = (sy as i32 - (oy_i - pad_i)).unsigned_abs() as usize;
+                        let rx = rx_table[dy];
+                        let src_row = &data[sy * wu..(sy + 1) * wu];
+                        match rx {
+                            0 => {
+                                for (dst, &v) in row[pad..pad + wu].iter_mut().zip(src_row) {
+                                    *dst = (*dst).max(v);
+                                }
+                            }
+                            1 => {
+                                let base = pad - 1;
+                                for (sx, &v) in src_row.iter().enumerate() {
+                                    if v != 0 {
+                                        let o = base + sx;
+                                        row[o] = row[o].max(v);
+                                        row[o + 1] = row[o + 1].max(v);
+                                        row[o + 2] = row[o + 2].max(v);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // pad == 2, rx == 2 -> base = 0
+                                for (sx, &v) in src_row.iter().enumerate() {
+                                    if v != 0 {
+                                        row[sx] = row[sx].max(v);
+                                        row[sx + 1] = row[sx + 1].max(v);
+                                        row[sx + 2] = row[sx + 2].max(v);
+                                        row[sx + 3] = row[sx + 3].max(v);
+                                        row[sx + 4] = row[sx + 4].max(v);
+                                    }
+                                }
+                            }
                         }
                     }
-                    if m == 255 {
-                        break;
+                }
+                let out_row = &mut out.data[oy * ow * 4..(oy + 1) * ow * 4];
+                for (px, &m) in out_row.as_chunks_mut::<4>().0.iter_mut().zip(row.iter()) {
+                    if m != 0 {
+                        *px = outline_lut[m as usize];
                     }
                 }
-                if m == 0 {
-                    continue;
+            }
+        } else {
+            let pad_i = outline_width as i32;
+            let pad_sq = pad_i * pad_i;
+            let mut rx_for_dy = Vec::with_capacity(pad + 1);
+            for dy in 0..=pad_i {
+                let mut rx = ((pad_sq - dy * dy) as f64).sqrt().floor() as i32;
+                while (rx + 1) * (rx + 1) + dy * dy <= pad_sq {
+                    rx += 1;
                 }
-                let a = m * outline_color[3] as u32 / 255;
-                let idx = (oy as usize * ow as usize + ox as usize) * 4;
-                out.data[idx] = (outline_color[0] as u32 * a / 255) as u8;
-                out.data[idx + 1] = (outline_color[1] as u32 * a / 255) as u8;
-                out.data[idx + 2] = (outline_color[2] as u32 * a / 255) as u8;
-                out.data[idx + 3] = a as u8;
+                while rx * rx + dy * dy > pad_sq {
+                    rx -= 1;
+                }
+                rx_for_dy.push(rx as usize);
+            }
+            let mut unique_rx: Vec<usize> = rx_for_dy.clone();
+            unique_rx.sort_unstable();
+            unique_rx.dedup();
+            let rx_index: Vec<usize> = rx_for_dy
+                .iter()
+                .map(|r| unique_rx.binary_search(r).unwrap())
+                .collect();
+
+            let num_r = unique_rx.len();
+            let mut hmax = vec![0u8; num_r * hu * ow];
+            let max_ext = ow + 2 * pad;
+            let mut ext = vec![0u8; max_ext];
+            let mut pre = vec![0u8; max_ext];
+            let mut suf = vec![0u8; max_ext];
+            for (ri, &rx) in unique_rx.iter().enumerate() {
+                let plane_off = ri * hu * ow;
+                for sy in 0..hu {
+                    let src_row = &data[sy * wu..(sy + 1) * wu];
+                    let dst_row = &mut hmax[plane_off + sy * ow..plane_off + (sy + 1) * ow];
+                    dilate_row_1d(src_row, pad, rx, &mut ext, &mut pre, &mut suf, dst_row);
+                }
+            }
+
+            let mut row_max = vec![0u8; ow];
+            for oy in 0..oh {
+                row_max.fill(0);
+                let oy_i = oy as i32;
+                let sy_min = (oy_i - 2 * pad_i).max(0) as usize;
+                let sy_max = oy_i.min(hu as i32 - 1);
+                if sy_max >= sy_min as i32 {
+                    for sy in sy_min..=(sy_max as usize) {
+                        let dy = (sy as i32 - (oy_i - pad_i)).unsigned_abs() as usize;
+                        let ri = rx_index[dy];
+                        let src_row = &hmax[(ri * hu + sy) * ow..(ri * hu + sy + 1) * ow];
+                        for (acc, &v) in row_max.iter_mut().zip(src_row) {
+                            *acc = (*acc).max(v);
+                        }
+                    }
+                }
+                let out_row = &mut out.data[oy * ow * 4..(oy + 1) * ow * 4];
+                for (px, &m) in out_row.as_chunks_mut::<4>().0.iter_mut().zip(&row_max) {
+                    if m != 0 {
+                        *px = outline_lut[m as usize];
+                    }
+                }
             }
         }
     }
 
     // 2) 本体を over 合成（bold 時は左隣ピクセルのカバレッジも拾って合成する）
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
+    let mut fill_lut = [(0u32, 0u32, 0u32, 0u32); 256];
+    for (m, slot) in fill_lut.iter_mut().enumerate().skip(1) {
+        let a = (m as u32 * fill[3] as u32) / 255;
+        *slot = (
+            fill[0] as u32 * a / 255,
+            fill[1] as u32 * a / 255,
+            fill[2] as u32 * a / 255,
+            a,
+        );
+    }
+
+    for y in 0..hu {
+        let src_row = &data[y * wu..(y + 1) * wu];
+        let didx_row = (y + pad) * ow + pad;
+        let dst_row = &mut out.data[didx_row * 4..(didx_row + wu) * 4];
+        let mut prev_m = 0u8;
+        for (dst_px, &cur_m) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row) {
             let m = if bold {
-                mask_at(x, y).max(mask_at(x - 1, y))
+                let b = cur_m.max(prev_m);
+                prev_m = cur_m;
+                b
             } else {
-                mask_at(x, y)
+                cur_m
             };
             if m == 0 {
                 continue;
             }
-            let a = m * fill[3] as u32 / 255;
-            let (sr, sg, sb, sa) = (
-                fill[0] as u32 * a / 255,
-                fill[1] as u32 * a / 255,
-                fill[2] as u32 * a / 255,
-                a,
-            );
-            let didx = ((y + pad) as usize * ow as usize + (x + pad) as usize) * 4;
+            let (sr, sg, sb, sa) = fill_lut[m as usize];
             let inv = 255 - sa;
-            out.data[didx] = (sr + out.data[didx] as u32 * inv / 255).min(255) as u8;
-            out.data[didx + 1] = (sg + out.data[didx + 1] as u32 * inv / 255).min(255) as u8;
-            out.data[didx + 2] = (sb + out.data[didx + 2] as u32 * inv / 255).min(255) as u8;
-            out.data[didx + 3] = (sa + out.data[didx + 3] as u32 * inv / 255).min(255) as u8;
+            dst_px[0] = (sr + dst_px[0] as u32 * inv / 255).min(255) as u8;
+            dst_px[1] = (sg + dst_px[1] as u32 * inv / 255).min(255) as u8;
+            dst_px[2] = (sb + dst_px[2] as u32 * inv / 255).min(255) as u8;
+            dst_px[3] = (sa + dst_px[3] as u32 * inv / 255).min(255) as u8;
         }
     }
 
@@ -2227,5 +2483,99 @@ mod tests {
         assert!(!e.has_image("a.png"));
         assert_eq!(e.image_cache.len(), 1);
         assert_eq!(e.image_cache.bytes(), one);
+    }
+
+    #[test]
+    fn fast_rasterize_glyph_matches_naive_reference_pixel_for_pixel() {
+        fn naive(
+            w: u32,
+            h: u32,
+            data: &[u8],
+            fill: [u8; 4],
+            outline_color: [u8; 4],
+            outline_width: u32,
+            bold: bool,
+        ) -> Pixmap {
+            let pad = outline_width as i32;
+            let ow = w as i32 + pad * 2;
+            let oh = h as i32 + pad * 2;
+            let mut out = Pixmap::new(ow as u32, oh as u32);
+            let mask_at = |x: i32, y: i32| -> u32 {
+                if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                    return 0;
+                }
+                data[(y as usize) * (w as usize) + (x as usize)] as u32
+            };
+            if outline_width > 0 && outline_color[3] > 0 {
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let mut m = 0u32;
+                        for dy in -pad..=pad {
+                            for dx in -pad..=pad {
+                                if dx * dx + dy * dy <= pad * pad {
+                                    m = m.max(mask_at(ox - pad + dx, oy - pad + dy));
+                                }
+                            }
+                        }
+                        if m == 0 {
+                            continue;
+                        }
+                        let a = m * outline_color[3] as u32 / 255;
+                        let idx = (oy as usize * ow as usize + ox as usize) * 4;
+                        out.data[idx] = (outline_color[0] as u32 * a / 255) as u8;
+                        out.data[idx + 1] = (outline_color[1] as u32 * a / 255) as u8;
+                        out.data[idx + 2] = (outline_color[2] as u32 * a / 255) as u8;
+                        out.data[idx + 3] = a as u8;
+                    }
+                }
+            }
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let m = if bold {
+                        mask_at(x, y).max(mask_at(x - 1, y))
+                    } else {
+                        mask_at(x, y)
+                    };
+                    if m == 0 {
+                        continue;
+                    }
+                    let a = m * fill[3] as u32 / 255;
+                    let (sr, sg, sb, sa) = (
+                        fill[0] as u32 * a / 255,
+                        fill[1] as u32 * a / 255,
+                        fill[2] as u32 * a / 255,
+                        a,
+                    );
+                    let didx = ((y + pad) as usize * ow as usize + (x + pad) as usize) * 4;
+                    let inv = 255 - sa;
+                    out.data[didx] = (sr + out.data[didx] as u32 * inv / 255).min(255) as u8;
+                    out.data[didx + 1] = (sg + out.data[didx + 1] as u32 * inv / 255).min(255) as u8;
+                    out.data[didx + 2] = (sb + out.data[didx + 2] as u32 * inv / 255).min(255) as u8;
+                    out.data[didx + 3] = (sa + out.data[didx + 3] as u32 * inv / 255).min(255) as u8;
+                }
+            }
+            out
+        }
+
+        let mut seed = 0x1234_5678u64;
+        for &(w, h) in &[(1u32, 1u32), (3, 7), (19, 23), (32, 28)] {
+            let data: Vec<u8> = (0..(w * h))
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if (seed >> 56) < 40 {
+                        (seed >> 33) as u8
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            for &pad in &[0u32, 1, 2, 3, 5, 14] {
+                for &bold in &[false, true] {
+                    let got = rasterize_glyph(w, h, &data, [240, 200, 120, 230], [10, 20, 40, 180], pad, bold);
+                    let want = naive(w, h, &data, [240, 200, 120, 230], [10, 20, 40, 180], pad, bold);
+                    assert_eq!(got.data, want.data, "w={w} h={h} pad={pad} bold={bold}");
+                }
+            }
+        }
     }
 }
