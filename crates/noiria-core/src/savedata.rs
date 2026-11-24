@@ -190,7 +190,8 @@ pub fn read_thumb(
         fs::read(&path).with_context(|| format!("サムネイルを読めません: {}", path.display()))?;
     let png = crate::codec::png::decode(&bytes)
         .with_context(|| format!("サムネイルの PNG が不正です: {}", path.display()))?;
-    let mut pixmap = crate::pixmap::Pixmap::from_rgba_straight(png.width, png.height, &png.rgba);
+    let mut pixmap =
+        crate::pixmap::Pixmap::from_rgba_straight_owned(png.width, png.height, png.rgba);
     if pixmap.width > max_w || pixmap.height > max_h {
         let scale = (max_w as f64 / pixmap.width as f64).min(max_h as f64 / pixmap.height as f64);
         let w = ((pixmap.width as f64 * scale).round() as u32).max(1);

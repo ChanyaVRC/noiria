@@ -235,14 +235,14 @@ const IMAGE_CACHE_MAX_BYTES: usize = 16 << 20;
 const STYLED_CACHE_MAX_BYTES: usize = 16 << 20;
 const STYLED_CACHE_MAX_ENTRIES: usize = 2048;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct StyledGlyphKey {
-    font: FontKey,
-    gid: u16,
+    font_id: u32,
     size_q6: u32,
     fill: [u8; 4],
     outline_color: [u8; 4],
     outline_width: u32,
+    gid: u16,
     bold: bool,
 }
 
@@ -282,12 +282,7 @@ impl StyledGlyphCache {
         self.map.insert(key, (pixmap, self.tick));
         self.bytes += sz;
         while self.bytes > STYLED_CACHE_MAX_BYTES || self.map.len() > STYLED_CACHE_MAX_ENTRIES {
-            let Some(oldest) = self
-                .map
-                .iter()
-                .min_by_key(|(_, (_, t))| *t)
-                .map(|(k, _)| k.clone())
-            else {
+            let Some(&oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k) else {
                 break;
             };
             if let Some((p, _)) = self.map.remove(&oldest) {
@@ -381,24 +376,12 @@ impl ImageCache {
 
 pub struct TextEngine {
     registry: &'static registry::FontRegistry,
-    /// ゲームローカルフォント（`fonts/*.ttf|ttc`、W1）。既定は空。`load_game_fonts` で
-    /// 差し替えると、以降の family 解決・グリフフォールバックの両方で `registry`（システム
-    /// フォント）より先に参照される。
     game_registry: registry::FontRegistry,
-    fonts: HashMap<FontKey, LoadedFont>,
-    /// 「ベースフォントに無いグリフ」をレジストリ全体から探した結果のキャッシュ。
-    /// 走査コストの高いフォールバック探索を文字単位で償却する。
-    glyph_fallback_cache: HashMap<char, FontKey>,
-    /// どのフォントにも無かった文字（ネガティブキャッシュ）。無いと、その文字が出るたびに全システム
-    /// フォントを読み直して探し直す。
+    font_ids: HashMap<FontKey, u32>,
+    fonts: Vec<LoadedFont>,
+    glyph_fallback_cache: HashMap<char, u32>,
     glyph_missing: HashSet<char>,
-    /// 装飾（色・縁取り・太字）適用済みのグリフ画像 LRU。
     styled_cache: StyledGlyphCache,
-    /// `[graph]`（インライン画像, W3）用の画像キャッシュ。キーは解決済みパス。
-    /// text.rs は assets への依存を増やしたくない（設計判断、
-    /// `docs/implementation-notes.md` 2026-07-11 W3 参照）ため、実際のファイル I/O
-    /// （`GameDir::load_image`）は呼び出し側（`engine_state::EngineState::text_print`）が
-    /// 行い、ロード済みの `Pixmap` をこのキャッシュへ渡すだけにする。
     image_cache: ImageCache,
 }
 
@@ -414,7 +397,8 @@ impl TextEngine {
         Self {
             registry: registry::global(),
             game_registry: registry::FontRegistry::empty(),
-            fonts: HashMap::new(),
+            font_ids: HashMap::new(),
+            fonts: Vec::new(),
             glyph_fallback_cache: HashMap::new(),
             glyph_missing: HashSet::new(),
             styled_cache: StyledGlyphCache::new(),
@@ -422,15 +406,9 @@ impl TextEngine {
         }
     }
 
-    /// ゲームローカルフォント（`fonts/*.ttf|ttc`、W1）を登録する。呼び出し側
-    /// （`engine_state.rs`）が `GameDir::list_dir("fonts")` + `read_bytes` で集めた
-    /// バイト列をファイル名昇順で渡す想定（登録順がそのままフォールバック優先度になる）。
-    /// フォントが 1 つも無い/全て解析失敗でも空レジストリになるだけで、システムフォント
-    /// のみだった従来の挙動へ自然にフォールバックする。
     pub fn load_game_fonts(&mut self, files: Vec<Vec<u8>>) {
         self.game_registry = registry::FontRegistry::from_game_font_bytes(&files);
-        // 既存キャッシュ（フォントごと・グリフごと）はゲームフォント追加前の解決結果を
-        // 引きずる可能性があるためクリアする（通常は起動直後の 1 回しか呼ばれない）。
+        self.font_ids.clear();
         self.fonts.clear();
         self.glyph_fallback_cache.clear();
         self.glyph_missing.clear();
@@ -468,55 +446,52 @@ impl TextEngine {
         Ok(())
     }
 
-    /// 指定キーのフォントを（未ロードならディスク/メモリから）取得する。
-    /// `FontSource::Path` はディスクから読み、`FontSource::Bytes`（ゲームローカル
-    /// フォント）は既にメモリ上にあるバイト列をそのまま使う（W6 の暗号化 pak 読込でも
-    /// 同じ経路をそのまま使える設計）。
-    fn font_mut(&mut self, key: &FontKey) -> Option<&mut LoadedFont> {
-        if !self.fonts.contains_key(key) {
-            let font = Self::load_font(key)?;
-            self.insert_font(key, font);
+    fn font_id(&mut self, key: &FontKey) -> Option<u32> {
+        if let Some(&id) = self.font_ids.get(key) {
+            return Some(id);
         }
-        self.fonts.get_mut(key)
+        let font = Self::load_font(key)?;
+        Some(self.insert_font(key, font))
+    }
+
+    fn font_mut(&mut self, key: &FontKey) -> Option<&mut LoadedFont> {
+        let id = self.font_id(key)?;
+        self.fonts.get_mut(id as usize)
     }
 
     fn load_font(key: &FontKey) -> Option<Font> {
-        let bytes = match &key.source {
-            FontSource::Path(path) => std::fs::read(path).ok()?,
-            FontSource::Bytes(data) => data.0.to_vec(),
-        };
-        Font::from_bytes(bytes, key.index).ok()
+        match &key.source {
+            FontSource::Path(path) => Font::from_file(path, key.index).ok(),
+            FontSource::Bytes(data) => Font::from_shared_bytes(Arc::clone(&data.0), key.index).ok(),
+        }
     }
 
-    fn insert_font(&mut self, key: &FontKey, font: Font) {
-        self.fonts.insert(
-            key.clone(),
-            LoadedFont {
-                font,
-                cache: GlyphCache::new(GLYPH_CACHE_CAPACITY),
-            },
-        );
+    fn insert_font(&mut self, key: &FontKey, font: Font) -> u32 {
+        let id = self.fonts.len() as u32;
+        self.fonts.push(LoadedFont {
+            font,
+            cache: GlyphCache::new(GLYPH_CACHE_CAPACITY),
+        });
+        self.font_ids.insert(key.clone(), id);
+        id
     }
 
-    /// `key` のフォントが `c` のグリフを持つか調べ、持つならそのフォントを保持して glyph id を返す。
-    /// 持たないフォントは（未ロードなら）保持しない。フォールバック探索が全システムフォントを
-    /// 読み込んで `fonts` に残し続けないため（cmap を引くだけで足りる）。
-    fn probe_glyph(&mut self, key: &FontKey, c: char) -> Option<u16> {
-        if let Some(loaded) = self.fonts.get(key) {
-            return loaded.font.glyph_id(c).filter(|&id| id != 0);
+    /// `key` のフォントが `c` のグリフを持つか調べ、持つならそのフォントを保持して (font_id, glyph_id) を返す。
+    /// 持たないフォントは（未ロードなら）保持しない。
+    fn probe_glyph(&mut self, key: &FontKey, c: char) -> Option<(u32, u16)> {
+        if let Some(&id) = self.font_ids.get(key) {
+            let gid = self.fonts[id as usize]
+                .font
+                .glyph_id(c)
+                .filter(|&g| g != 0)?;
+            return Some((id, gid));
         }
         let font = Self::load_font(key)?;
-        let id = font.glyph_id(c).filter(|&id| id != 0)?;
-        self.insert_font(key, font);
-        Some(id)
+        let gid = font.glyph_id(c).filter(|&g| g != 0)?;
+        let id = self.insert_font(key, font);
+        Some((id, gid))
     }
 
-    /// style.font_family からこの断片列の基準フォント（行メトリクスに使う）を解決する。
-    /// 要求 family のゲームフォント → ゲームフォント先頭（登録順。family 名が一致しなくても
-    /// システムフォントより優先） → 要求 family のシステムフォント → 固定フォールバック
-    /// チェーン → レジストリの先頭、の順で試す。ゲームが同梱フォントを持つなら、既定の
-    /// family（"Yu Gothic UI"）がたまたま存在する Windows と存在しない Linux で結果が
-    /// 食い違わないよう、同梱フォントを常に最優先にしている。
     fn resolve_base(&self, requested: &str) -> Option<FontKey> {
         if let Some(k) = self.game_registry.resolve(requested) {
             return Some(k);
@@ -535,26 +510,26 @@ impl TextEngine {
         self.registry.any()
     }
 
-    /// 文字 `c` を描画できるフォント＋グリフ ID を探す。
-    /// 1) `base` にあればそれを使う（通常経路）。
-    /// 2) 文字単位フォールバックキャッシュ。
-    /// 3) ゲームローカルフォントを登録順に試す（システムフォントより優先、W1）。
-    /// 4) 固定フォールバックチェーン（per-OS）を順に試す。
-    /// 5) レジストリ全体（ゲーム→システム）を走査する（結果は文字単位でキャッシュ）。
-    ///
-    /// どのフォントにも無ければ `None`（その文字は幅 0 で無視される）。
-    fn glyph_for_char(&mut self, base: &FontKey, c: char) -> Option<(FontKey, u16)> {
-        if let Some(loaded) = self.font_mut(base) {
-            if let Some(id) = loaded.font.glyph_id(c).filter(|&id| id != 0) {
-                return Some((base.clone(), id));
+    fn glyph_for_char(&mut self, base: &FontKey, c: char) -> Option<(u32, u16)> {
+        if let Some(base_id) = self.font_id(base) {
+            if let Some(gid) = self.fonts[base_id as usize]
+                .font
+                .glyph_id(c)
+                .filter(|&id| id != 0)
+            {
+                return Some((base_id, gid));
             }
         }
         if self.glyph_missing.contains(&c) {
             return None;
         }
-        if let Some(cached) = self.glyph_fallback_cache.get(&c).cloned() {
-            if let Some(id) = self.probe_glyph(&cached, c) {
-                return Some((cached, id));
+        if let Some(&cached_id) = self.glyph_fallback_cache.get(&c) {
+            if let Some(gid) = self.fonts[cached_id as usize]
+                .font
+                .glyph_id(c)
+                .filter(|&id| id != 0)
+            {
+                return Some((cached_id, gid));
             }
         }
         let game_candidates: Vec<FontKey> = self.game_registry.iter_all().cloned().collect();
@@ -562,9 +537,9 @@ impl TextEngine {
             if key == *base {
                 continue;
             }
-            if let Some(id) = self.probe_glyph(&key, c) {
-                self.glyph_fallback_cache.insert(c, key.clone());
-                return Some((key, id));
+            if let Some((font_id, gid)) = self.probe_glyph(&key, c) {
+                self.glyph_fallback_cache.insert(c, font_id);
+                return Some((font_id, gid));
             }
         }
         for fam in FALLBACK_CHAIN {
@@ -574,13 +549,11 @@ impl TextEngine {
             if key == *base {
                 continue;
             }
-            if let Some(id) = self.probe_glyph(&key, c) {
-                self.glyph_fallback_cache.insert(c, key.clone());
-                return Some((key, id));
+            if let Some((font_id, gid)) = self.probe_glyph(&key, c) {
+                self.glyph_fallback_cache.insert(c, font_id);
+                return Some((font_id, gid));
             }
         }
-        // 最終手段: レジストリ全体（ゲーム→システムの順）を走査する。
-        // 初回のみ高コストだが結果はキャッシュされる。
         let candidates: Vec<FontKey> = self
             .game_registry
             .iter_all()
@@ -591,13 +564,65 @@ impl TextEngine {
             if key == *base {
                 continue;
             }
-            if let Some(id) = self.probe_glyph(&key, c) {
-                self.glyph_fallback_cache.insert(c, key.clone());
-                return Some((key, id));
+            if let Some((font_id, gid)) = self.probe_glyph(&key, c) {
+                self.glyph_fallback_cache.insert(c, font_id);
+                return Some((font_id, gid));
             }
         }
         self.glyph_missing.insert(c);
         None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_styled_glyph(
+        &mut self,
+        font_id: u32,
+        gid: u16,
+        font_size: f32,
+        fill: [u8; 4],
+        outline_color: [u8; 4],
+        outline_width: u32,
+        bold: bool,
+    ) -> (f32, i32, i32, Option<Arc<Pixmap>>) {
+        let size_key = size_q6(font_size);
+        let styled_key = StyledGlyphKey {
+            font_id,
+            gid,
+            size_q6: size_key,
+            fill,
+            outline_color,
+            outline_width,
+            bold,
+        };
+        let cached_styled = self.styled_cache.get(&styled_key);
+        let loaded = &mut self.fonts[font_id as usize];
+        let scale = font_size / loaded.font.units_per_em() as f32;
+        let advance_px = loaded.font.advance(gid) as f32 * scale;
+        let mask = loaded.cache.get_or_insert_with(gid, size_key, || {
+            let outline = loaded.font.outline(gid).unwrap_or_default();
+            rasterize(&outline, scale)
+        });
+        let (mask_left, mask_top) = (mask.left, mask.top);
+        let pixmap = if mask.width > 0 && mask.height > 0 {
+            if let Some(p) = cached_styled {
+                Some(p)
+            } else {
+                let p = Arc::new(rasterize_glyph(
+                    mask.width,
+                    mask.height,
+                    &mask.data,
+                    fill,
+                    outline_color,
+                    outline_width,
+                    bold,
+                ));
+                self.styled_cache.insert(styled_key, Arc::clone(&p));
+                Some(p)
+            }
+        } else {
+            None
+        };
+        (advance_px, mask_left, mask_top, pixmap)
     }
 
     /// 断片列をレイアウトしてグリフごとのラスタ画像列を返す。
@@ -741,57 +766,25 @@ impl TextEngine {
                     continue;
                 }
 
-                let Some((font_key, gid)) = self.glyph_for_char(&seg_base_key, ch) else {
-                    // どのフォントにもグリフが無い: 幅 0 として無視する。
+                let Some((font_id, gid)) = self.glyph_for_char(&seg_base_key, ch) else {
                     continue;
                 };
-                let size_key = size_q6(seg_size);
-                let styled_key = StyledGlyphKey {
-                    font: font_key.clone(),
+                let (advance_px, left, top, pixmap) = self.render_styled_glyph(
+                    font_id,
                     gid,
-                    size_q6: size_key,
+                    seg_size,
                     fill,
-                    outline_color: seg_edge_color,
-                    outline_width: style.outline_width,
-                    bold: seg_bold,
-                };
-                let cached_styled = self.styled_cache.get(&styled_key);
-                let Some(loaded) = self.font_mut(&font_key) else {
-                    continue;
-                };
-                let scale = seg_size / loaded.font.units_per_em() as f32;
-                let advance_px = loaded.font.advance(gid) as f32 * scale;
-                let mask = loaded.cache.get_or_insert_with(gid, size_key, || {
-                    let outline = loaded.font.outline(gid).unwrap_or_default();
-                    rasterize(&outline, scale)
-                });
-                let (mask_left, mask_top) = (mask.left, mask.top);
-                let pixmap = if mask.width > 0 && mask.height > 0 {
-                    if let Some(p) = cached_styled {
-                        Some(p)
-                    } else {
-                        let p = Arc::new(rasterize_glyph(
-                            mask.width,
-                            mask.height,
-                            &mask.data,
-                            fill,
-                            seg_edge_color,
-                            style.outline_width,
-                            seg_bold,
-                        ));
-                        self.styled_cache.insert(styled_key, Arc::clone(&p));
-                        Some(p)
-                    }
-                } else {
-                    None
-                };
+                    seg_edge_color,
+                    style.outline_width,
+                    seg_bold,
+                );
 
                 resolved.push(Resolved {
                     ch,
                     is_break: false,
                     advance_px,
-                    left: mask_left,
-                    top: mask_top,
+                    left,
+                    top,
                     pixmap,
                     byte_start,
                     byte_end,
@@ -920,54 +913,26 @@ impl TextEngine {
         let mut rchars: Vec<RChar> = Vec::new();
         let mut total_w = 0.0f32;
         for ch in text.chars() {
-            let Some((font_key, gid)) = self.glyph_for_char(base_key, ch) else {
+            let Some((font_id, gid)) = self.glyph_for_char(base_key, ch) else {
                 continue;
             };
-            let size_key = size_q6(ruby_font_size);
-            let styled_key = StyledGlyphKey {
-                font: font_key.clone(),
+            let (advance_px, left, top, pixmap) = self.render_styled_glyph(
+                font_id,
                 gid,
-                size_q6: size_key,
-                fill: style.color,
-                outline_color: [0, 0, 0, 0],
-                outline_width: 0,
-                bold: false,
-            };
-            let cached_styled = self.styled_cache.get(&styled_key);
-            let Some(loaded) = self.font_mut(&font_key) else {
-                continue;
-            };
-            let scale = ruby_font_size / loaded.font.units_per_em() as f32;
-            let advance_px = loaded.font.advance(gid) as f32 * scale;
-            let mask = loaded.cache.get_or_insert_with(gid, size_key, || {
-                let outline = loaded.font.outline(gid).unwrap_or_default();
-                rasterize(&outline, scale)
-            });
+                ruby_font_size,
+                style.color,
+                [0, 0, 0, 0],
+                0,
+                false,
+            );
             total_w += advance_px;
-            if mask.width == 0 || mask.height == 0 {
+            let Some(pixmap) = pixmap else {
                 continue;
-            }
-            let (mask_left, mask_top) = (mask.left, mask.top);
-            let pixmap = match cached_styled {
-                Some(p) => p,
-                None => {
-                    let p = Arc::new(rasterize_glyph(
-                        mask.width,
-                        mask.height,
-                        &mask.data,
-                        style.color,
-                        [0, 0, 0, 0],
-                        0,
-                        false,
-                    ));
-                    self.styled_cache.insert(styled_key, Arc::clone(&p));
-                    p
-                }
             };
             rchars.push(RChar {
                 pixmap,
-                left: mask_left,
-                top: mask_top,
+                left,
+                top,
                 advance_px,
             });
         }

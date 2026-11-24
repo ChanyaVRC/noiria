@@ -262,7 +262,7 @@ impl EngineState {
         let size = (pixmap.width, pixmap.height);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok(size)
     }
@@ -304,7 +304,7 @@ impl EngineState {
         let size = (pixmap.width, pixmap.height);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok(size)
     }
@@ -417,7 +417,7 @@ impl EngineState {
         let pixmap = load_scaled_cached(&self.ui_cache, &self.game_dir, &path, w, h)?;
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok((w, h))
     }
@@ -464,7 +464,7 @@ impl EngineState {
                 Some(t) => (t.current_x(now), t.current_y(now), t.current_opacity(now)),
                 None => (layer.x, layer.y, layer.opacity),
             };
-            layer.tween = Some(Tween {
+            layer.tween = Some(Box::new(Tween {
                 from_x,
                 from_y,
                 from_opacity,
@@ -475,7 +475,7 @@ impl EngineState {
                 duration: Duration::from_millis(args.time_ms),
                 accel: args.accel,
                 spline: None,
-            });
+            }));
             layer.tween_queue.clear();
         })
     }
@@ -507,13 +507,13 @@ impl EngineState {
             let full = layer.pixmap.as_ref().map(|p| p.width).unwrap_or(0);
             let from = layer.effective_crop(now).unwrap_or(full);
             layer.crop_w = Some(from);
-            layer.crop_tween = Some(CropTween {
+            layer.crop_tween = Some(Box::new(CropTween {
                 from,
                 to,
                 start: now,
                 duration: Duration::from_millis(time_ms),
                 accel,
-            });
+            }));
         })
     }
 
@@ -638,12 +638,12 @@ impl EngineState {
                 positions.extend(resolved.iter().map(|wp| (wp.x, wp.y)));
                 let segments = natural_spline_segments(&positions);
                 for (waypoint, segment) in resolved.iter_mut().zip(segments) {
-                    waypoint.spline = Some(segment);
+                    waypoint.spline = Some(Box::new(segment));
                 }
             }
             let mut legs = resolved.into_iter();
             let first = legs.next().expect("points は非空を確認済み");
-            layer.tween = Some(Tween {
+            layer.tween = Some(Box::new(Tween {
                 from_x,
                 from_y,
                 from_opacity,
@@ -654,7 +654,7 @@ impl EngineState {
                 duration: first.duration,
                 accel: first.accel,
                 spline: first.spline,
-            });
+            }));
             layer.tween_queue = legs.collect();
         })
     }
@@ -734,7 +734,7 @@ impl EngineState {
         self.log_op(format!("quake ax={ax} ay={ay} ms={ms}"));
         let now = self.clock.now();
         self.with_scene(|scene| {
-            scene.quake = Some((ax, ay, now, ms));
+            scene.quake = Some(Box::new((ax, ay, now, ms)));
         });
     }
 
@@ -811,14 +811,14 @@ impl EngineState {
             None
         };
         self.with_layer("fore", id, move |layer| {
-            layer.text = Some(TextContent {
+            layer.text = Some(Box::new(TextContent {
                 raster,
                 reveal: TextReveal {
                     from_glyph,
                     start: reveal_start,
                     cps: cps as f32,
                 },
-            });
+            }));
         })?;
         Ok(PrintResult { total, added })
     }
@@ -834,14 +834,14 @@ impl EngineState {
         self.with_layer("fore", id, move |layer| match &mut layer.text {
             Some(text) => text.raster = raster,
             None => {
-                layer.text = Some(TextContent {
+                layer.text = Some(Box::new(TextContent {
                     raster,
                     reveal: TextReveal {
                         from_glyph: 0,
                         start: None,
                         cps: 0.0,
                     },
-                });
+                }));
             }
         })
     }
@@ -923,12 +923,12 @@ impl EngineState {
         };
         {
             let mut scene = self.scene.lock_unpoisoned();
-            scene.transition = Some(Transition {
+            scene.transition = Some(Box::new(Transition {
                 method,
                 start: self.clock.now(),
                 duration: Duration::from_millis(args.time_ms),
                 skip: false,
-            });
+            }));
             scene.bump();
         }
         self.wake.send(UserEvent::Redraw);

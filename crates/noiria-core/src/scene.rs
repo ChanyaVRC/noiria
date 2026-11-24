@@ -9,6 +9,23 @@ use crate::pixmap::Pixmap;
 use crate::text::RasterText;
 use crate::transition::Transition;
 
+fn tween_progress(start: Instant, duration: Duration, now: Instant) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    (now.duration_since(start).as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+fn ease(t: f32, accel: f32) -> f32 {
+    if accel > 0.0 {
+        t.powf(1.0 + accel)
+    } else if accel < 0.0 {
+        1.0 - (1.0 - t).powf(1.0 - accel)
+    } else {
+        t
+    }
+}
+
 /// レイヤの位置/不透明度アニメーション（KAG の [move] 相当）。
 /// 描画時にトランジション/リベールと同じ流儀で評価する（純関数）。状態遷移
 /// （完了時に確定値を書き戻す等）は呼び出し側（レンダラ/ops）の責務。
@@ -25,39 +42,26 @@ pub struct Tween {
     /// KAG の accel 準拠: 0 = 線形、>0 = 加速（滑り出しが遅く終盤が速い）、
     /// <0 = 減速（滑り出しが速く終盤が遅い）。
     pub accel: f32,
-    pub spline: Option<SplineSegment>,
+    pub spline: Option<Box<SplineSegment>>,
 }
 
 impl Tween {
     /// 経過に対する線形進捗 (0..1)。
     pub fn progress(&self, now: Instant) -> f32 {
-        if self.duration.is_zero() {
-            return 1.0;
-        }
-        (now.duration_since(self.start).as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0)
+        tween_progress(self.start, self.duration, now)
     }
 
     pub fn is_finished(&self, now: Instant) -> bool {
         self.progress(now) >= 1.0
     }
 
-    /// 線形進捗 t (0..1) へイージングを適用する。
-    /// accel > 0: t を (1+accel) 乗して立ち上がりを遅く・終盤を速くする（ease-in）。
-    /// accel < 0: 終端から測った (1-t) を (1-accel) 乗して立ち上がりを速く・終盤を
-    ///            遅くする（ease-out）。accel = 0 はそのまま（線形）。
     fn eased(&self, t: f32) -> f32 {
-        if self.accel > 0.0 {
-            t.powf(1.0 + self.accel)
-        } else if self.accel < 0.0 {
-            1.0 - (1.0 - t).powf(1.0 - self.accel)
-        } else {
-            t
-        }
+        ease(t, self.accel)
     }
 
     pub fn current_x(&self, now: Instant) -> i32 {
         let d = self.eased(self.progress(now));
-        match self.spline {
+        match self.spline.as_deref() {
             Some(spline) => spline.current_x(self.from_x, self.to_x, d),
             None => lerp_i32(self.from_x, self.to_x, d),
         }
@@ -65,7 +69,7 @@ impl Tween {
 
     pub fn current_y(&self, now: Instant) -> i32 {
         let d = self.eased(self.progress(now));
-        match self.spline {
+        match self.spline.as_deref() {
             Some(spline) => spline.current_y(self.from_y, self.to_y, d),
             None => lerp_i32(self.from_y, self.to_y, d),
         }
@@ -167,10 +171,7 @@ pub struct CropTween {
 
 impl CropTween {
     fn progress(&self, now: Instant) -> f32 {
-        if self.duration.is_zero() {
-            return 1.0;
-        }
-        (now.duration_since(self.start).as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0)
+        tween_progress(self.start, self.duration, now)
     }
 
     pub fn is_finished(&self, now: Instant) -> bool {
@@ -178,14 +179,7 @@ impl CropTween {
     }
 
     pub fn current(&self, now: Instant) -> u32 {
-        let t = self.progress(now);
-        let d = if self.accel > 0.0 {
-            t.powf(1.0 + self.accel)
-        } else if self.accel < 0.0 {
-            1.0 - (1.0 - t).powf(1.0 - self.accel)
-        } else {
-            t
-        };
+        let d = ease(self.progress(now), self.accel);
         (self.from as f32 + (self.to as f32 - self.from as f32) * d)
             .round()
             .max(0.0) as u32
@@ -202,7 +196,7 @@ pub struct Waypoint {
     pub opacity: u8,
     pub duration: Duration,
     pub accel: f32,
-    pub spline: Option<SplineSegment>,
+    pub spline: Option<Box<SplineSegment>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,19 +259,17 @@ pub struct Layer {
     pub z: i32,
     pub opacity: u8,
     pub visible: bool,
-    pub text: Option<TextContent>,
+    pub text: Option<Box<TextContent>>,
     /// セーブ再構築用: 画像の読み込み元パス（ゲームルート相対）
-    pub image_path: Option<String>,
+    pub image_path: Option<Box<str>>,
     /// 進行中の位置/不透明度アニメーション（KAG の [move]）。
-    pub tween: Option<Tween>,
-    /// [move path=]（W5）: `tween` の次に続く区間列（折れ線の残り）。`tween` が完了する
-    /// たびに先頭を取り出して新しい `tween` として開始する。単区間の [move] は常に空のまま
-    /// （既存動作は完全に不変）。
+    pub tween: Option<Box<Tween>>,
+    /// [move path=]（W5）: `tween` の次に続く区間列（折れ線の残り）。
     pub tween_queue: Vec<Waypoint>,
     /// 画像を左端から何画素ぶん合成するか（None = 全幅）。テキストには効かない。
     pub crop_w: Option<u32>,
     /// `crop_w` のアニメーション（`layer_move` の `toCropW`）。
-    pub crop_tween: Option<CropTween>,
+    pub crop_tween: Option<Box<CropTween>>,
 }
 
 impl Layer {
@@ -325,9 +317,9 @@ pub struct Scene {
     pub height: u32,
     pub fore: LayerMap,
     pub back: LayerMap,
-    pub transition: Option<Transition>,
+    pub transition: Option<Box<Transition>>,
     /// 画面揺れ (quake): (振幅x, 振幅y, 開始, 継続ms)
-    pub quake: Option<(i32, i32, Instant, u32)>,
+    pub quake: Option<Box<(i32, i32, Instant, u32)>>,
     next_id: u32,
     /// ops が変更するたびにインクリメント。レンダラの再描画判定に使う。
     pub revision: u64,
@@ -444,7 +436,8 @@ impl Scene {
         if self.transition.is_some() {
             return true;
         }
-        if let Some((_, _, start, ms)) = self.quake {
+        if let Some(q) = self.quake.as_deref() {
+            let (_, _, start, ms) = *q;
             if now.duration_since(start).as_millis() < ms as u128 {
                 return true;
             }
@@ -480,7 +473,7 @@ impl Scene {
                     break;
                 }
                 let wp = layer.tween_queue.remove(0);
-                layer.tween = Some(Tween {
+                layer.tween = Some(Box::new(Tween {
                     from_x: layer.x,
                     from_y: layer.y,
                     from_opacity: layer.opacity,
@@ -491,7 +484,7 @@ impl Scene {
                     duration: wp.duration,
                     accel: wp.accel,
                     spline: wp.spline,
-                });
+                }));
             }
         }
         if changed {
@@ -643,12 +636,12 @@ mod tests {
         let mut scene = Scene::new(4, 4);
         let id = scene.alloc_layer(LayerKind::Image);
         scene.layer_mut(Page::Back, id).unwrap().x = 99;
-        scene.transition = Some(Transition {
+        scene.transition = Some(Box::new(Transition {
             method: TransMethod::Crossfade,
             start: Instant::now(),
             duration: Duration::from_millis(1),
             skip: true,
-        });
+        }));
         scene.swap_after_transition();
         assert_eq!(scene.layer(Page::Fore, id).unwrap().x, 99);
         // back にも複製が残る（連続トランジションのため）
@@ -711,16 +704,16 @@ mod tests {
         let now = Instant::now();
         assert!(!scene.is_animating(now));
 
-        scene.transition = Some(Transition {
+        scene.transition = Some(Box::new(Transition {
             method: TransMethod::Crossfade,
             start: now,
             duration: Duration::from_secs(1),
             skip: false,
-        });
+        }));
         assert!(scene.is_animating(now));
         scene.transition = None;
 
-        scene.quake = Some((5, 5, now, 300));
+        scene.quake = Some(Box::new((5, 5, now, 300)));
         assert!(scene.is_animating(now));
         assert!(!scene.is_animating(now + Duration::from_millis(400)));
     }
@@ -766,7 +759,7 @@ mod tests {
             start,
             duration: Duration::from_millis(100),
             accel: 0.0,
-            spline: Some(segments[0]),
+            spline: Some(Box::new(segments[0])),
         };
         let mid = start + Duration::from_millis(50);
         assert_eq!((first.current_x(mid), first.current_y(mid)), (69, -69));
@@ -791,7 +784,7 @@ mod tests {
             start,
             duration: Duration::from_millis(100),
             accel: 0.0,
-            spline: Some(segments[1]),
+            spline: Some(Box::new(segments[1])),
         };
         assert_eq!(
             (second.current_x(start), second.current_y(start)),
@@ -816,7 +809,7 @@ mod tests {
             start,
             duration: Duration::from_millis(100),
             accel: 0.0,
-            spline: Some(four_point_segments[1]),
+            spline: Some(Box::new(four_point_segments[1])),
         };
         assert_eq!(middle.current_x(mid), 115);
     }
@@ -853,7 +846,7 @@ mod tests {
         let id = scene.alloc_layer(LayerKind::Image);
         let t = tween(0.0);
         let start = t.start;
-        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(t);
+        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(Box::new(t));
 
         // 未完了のうちは確定しない。
         scene.settle_finished_tweens(start + Duration::from_millis(50));
@@ -870,7 +863,7 @@ mod tests {
     fn skip_all_tweens_forces_immediate_completion() {
         let mut scene = Scene::new(4, 4);
         let id = scene.alloc_layer(LayerKind::Image);
-        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(tween(0.0));
+        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(Box::new(tween(0.0)));
         let start = Instant::now();
 
         // 開始直後でも skip すれば to 値へ即確定する。
@@ -887,7 +880,7 @@ mod tests {
         let id = scene.alloc_layer(LayerKind::Image);
         let t = tween(0.0);
         let start = t.start;
-        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(t);
+        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(Box::new(t));
 
         assert!(scene.is_animating(start + Duration::from_millis(50)));
         assert!(!scene.is_animating(start + Duration::from_millis(100)));
@@ -904,7 +897,7 @@ mod tests {
         layer.x = 0;
         layer.y = 0;
         layer.opacity = 0;
-        layer.tween = Some(Tween {
+        layer.tween = Some(Box::new(Tween {
             from_x: 0,
             from_y: 0,
             from_opacity: 0,
@@ -915,7 +908,7 @@ mod tests {
             duration: Duration::from_millis(100),
             accel: 0.0,
             spline: None,
-        });
+        }));
         layer.tween_queue = vec![Waypoint {
             x: 300,
             y: 0,
@@ -982,7 +975,7 @@ mod tests {
         let segments = natural_spline_segments(&[(0, 0), (100, 100), (0, 0)]);
         let id = scene.alloc_layer(LayerKind::Image);
         let layer = scene.layer_mut(Page::Fore, id).unwrap();
-        layer.tween = Some(Tween {
+        layer.tween = Some(Box::new(Tween {
             from_x: 0,
             from_y: 0,
             from_opacity: 0,
@@ -992,21 +985,21 @@ mod tests {
             start,
             duration: Duration::from_millis(100),
             accel: 0.0,
-            spline: Some(segments[0]),
-        });
+            spline: Some(Box::new(segments[0])),
+        }));
         layer.tween_queue.push(Waypoint {
             x: 0,
             y: 0,
             opacity: 200,
             duration: Duration::from_millis(100),
             accel: 0.0,
-            spline: Some(segments[1]),
+            spline: Some(Box::new(segments[1])),
         });
 
         scene.settle_finished_tweens(start + Duration::from_millis(100));
         let layer = scene.layer(Page::Fore, id).unwrap();
         let second = layer.tween.as_ref().unwrap();
-        assert_eq!(second.spline, Some(segments[1]));
+        assert_eq!(second.spline.as_deref(), Some(&segments[1]));
         assert_eq!(
             (
                 second.current_x(start + Duration::from_millis(150)),
@@ -1060,7 +1053,7 @@ mod tests {
         let id = scene.alloc_layer(LayerKind::Image);
         let t = tween(0.0);
         let start = t.start;
-        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(t);
+        scene.layer_mut(Page::Fore, id).unwrap().tween = Some(Box::new(t));
 
         scene.settle_finished_tweens(start + Duration::from_millis(100));
         let layer = scene.layer(Page::Fore, id).unwrap();
@@ -1119,7 +1112,7 @@ mod crop_tests {
             l.pixmap = Some(white(10, 2));
             l.visible = true;
             l.crop_w = Some(0);
-            l.crop_tween = Some(crop_tween(0, 10, 0.0, start));
+            l.crop_tween = Some(Box::new(crop_tween(0, 10, 0.0, start)));
         }
         let mut bufs = ComposeBufs::new(10, 2);
         let mut out = Pixmap::new(10, 2);
@@ -1161,7 +1154,8 @@ mod crop_tests {
         let mut scene = Scene::new(4, 1);
         let id = scene.alloc_layer(LayerKind::Image);
         let start = Instant::now();
-        scene.layer_mut(Page::Fore, id).unwrap().crop_tween = Some(crop_tween(0, 4, 0.0, start));
+        scene.layer_mut(Page::Fore, id).unwrap().crop_tween =
+            Some(Box::new(crop_tween(0, 4, 0.0, start)));
         scene.skip_all_tweens();
         let l = &scene.fore[&id];
         assert!(l.crop_tween.is_none());

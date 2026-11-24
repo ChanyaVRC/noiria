@@ -108,22 +108,41 @@ pub struct AudioShared {
     position_requests: Mutex<PositionRequests>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PositionRequest {
-    Play(u64),
-    Stop(u64),
+/// 1 スロットの未完了 Play/Stop 要求を 8 バイトにパック（0 = None、bit 63 = Stop、それ以外 = Play）。
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct PendingRequest(u64);
+
+impl PendingRequest {
+    const STOP_BIT: u64 = 1 << 63;
+    const ID_MASK: u64 = !Self::STOP_BIT;
+
+    fn play(id: u64) -> Self {
+        Self(id & Self::ID_MASK)
+    }
+    fn stop(id: u64) -> Self {
+        Self((id & Self::ID_MASK) | Self::STOP_BIT)
+    }
+    fn is_play(self) -> bool {
+        self.0 != 0 && (self.0 & Self::STOP_BIT) == 0
+    }
+    fn is_stop(self) -> bool {
+        (self.0 & Self::STOP_BIT) != 0
+    }
+    fn is_none(self) -> bool {
+        self.0 == 0
+    }
 }
 
 struct PositionRequests {
     next_id: u64,
-    pending: [Option<PositionRequest>; NUM_SLOTS],
+    pending: [PendingRequest; NUM_SLOTS],
 }
 
 impl Default for PositionRequests {
     fn default() -> Self {
         Self {
             next_id: 0,
-            pending: [None; NUM_SLOTS],
+            pending: [PendingRequest::default(); NUM_SLOTS],
         }
     }
 }
@@ -140,7 +159,7 @@ impl AudioShared {
             .position_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        matches!(requests.pending[ch], Some(PositionRequest::Play(_)))
+        requests.pending[ch].is_play()
     }
     /// 音声スレッドへ届けられなかった（受信側が無い）`Play` 要求を取り下げる。音声スレッドが
     /// 無い（ヘッドレス等）と誰も確認応答しないため、送れなかった側が自分で確認応答する。
@@ -159,10 +178,10 @@ impl AudioShared {
         self.position_ms[ch].load(Ordering::Relaxed)
     }
     pub fn mark_play_requested(&self, ch: usize, position_ms: u64) -> u64 {
-        self.mark_position_requested(ch, position_ms, PositionRequest::Play)
+        self.mark_position_requested(ch, position_ms, PendingRequest::play)
     }
     pub fn mark_stop_requested(&self, ch: usize) -> u64 {
-        self.mark_position_requested(ch, 0, PositionRequest::Stop)
+        self.mark_position_requested(ch, 0, PendingRequest::stop)
     }
     fn set_playing(&self, ch: usize, v: bool) {
         self.playing[ch].store(v, Ordering::Relaxed);
@@ -180,15 +199,15 @@ impl AudioShared {
         &self,
         ch: usize,
         position_ms: u64,
-        request: fn(u64) -> PositionRequest,
+        request: fn(u64) -> PendingRequest,
     ) -> u64 {
         let mut requests = self
             .position_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        requests.next_id = requests.next_id.wrapping_add(1).max(1);
+        requests.next_id = (requests.next_id.wrapping_add(1) & PendingRequest::ID_MASK).max(1);
         let request_id = requests.next_id;
-        requests.pending[ch] = Some(request(request_id));
+        requests.pending[ch] = request(request_id);
         self.set_position_ms(ch, position_ms);
         request_id
     }
@@ -197,9 +216,9 @@ impl AudioShared {
             .position_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if requests.pending[ch] == Some(PositionRequest::Play(request_id)) {
+        if requests.pending[ch] == PendingRequest::play(request_id) {
             self.set_position_ms(ch, position_ms);
-            requests.pending[ch] = None;
+            requests.pending[ch] = PendingRequest::default();
         }
     }
     fn acknowledge_stop_requested(&self, ch: usize, request_id: u64, is_playing: bool) {
@@ -207,9 +226,9 @@ impl AudioShared {
             .position_requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !is_playing && requests.pending[ch] == Some(PositionRequest::Stop(request_id)) {
+        if !is_playing && requests.pending[ch] == PendingRequest::stop(request_id) {
             self.set_position_ms(ch, 0);
-            requests.pending[ch] = None;
+            requests.pending[ch] = PendingRequest::default();
         }
     }
     fn sync_positions(&self, mixer: &Mixer) {
@@ -218,14 +237,14 @@ impl AudioShared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for (ch, pending) in requests.pending.iter_mut().enumerate() {
-            match *pending {
-                Some(PositionRequest::Play(_)) => {}
-                Some(PositionRequest::Stop(_)) if mixer.is_playing(ch) => {}
-                Some(PositionRequest::Stop(_)) => {
+            if pending.is_play() {
+            } else if pending.is_stop() {
+                if !mixer.is_playing(ch) {
                     self.set_position_ms(ch, 0);
-                    *pending = None;
+                    *pending = PendingRequest::default();
                 }
-                None => self.set_position_ms(ch, mixer.position_ms(ch)),
+            } else if pending.is_none() {
+                self.set_position_ms(ch, mixer.position_ms(ch));
             }
         }
     }

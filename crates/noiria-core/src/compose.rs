@@ -10,8 +10,8 @@ use crate::text::RasterText;
 use crate::transition::TransMethod;
 
 /// 再利用する作業バッファ（毎フレームの確保を避ける）。
-/// トランジション中はページ内容が静的なことが多いので、fore/back の
-/// 合成結果を revision キーでキャッシュし、毎フレームはブレンドだけ行う。
+/// `fore` は通常描画時に `PrefixCache` のチェックポイントとして共用し、`back` は
+/// トランジション中のみ確保・終了時に解放することで、常駐する全画面バッファ数を最小化する。
 pub struct ComposeBufs {
     fore: Pixmap,
     back: Pixmap,
@@ -19,8 +19,6 @@ pub struct ComposeBufs {
     prefix: PrefixCache,
 }
 
-/// レイヤごとの「描くもの」の署名（前フレームと同じなら、そのレイヤは同じ画素を描く）。画像/文字は `Arc` の同一性で比べる
-/// （署名が `Arc` を持ち続けるので、解放された領域が別の絵に再利用されて取り違えることはない）。
 struct LayerSig {
     id: u32,
     x: i32,
@@ -28,7 +26,7 @@ struct LayerSig {
     opacity: u8,
     crop: Option<u32>,
     pixmap: Option<Arc<Pixmap>>,
-    text: Option<(Arc<RasterText>, usize)>,
+    text: Option<(Arc<RasterText>, u32)>,
 }
 
 impl LayerSig {
@@ -43,7 +41,7 @@ impl LayerSig {
             pixmap: layer.pixmap.clone(),
             text: layer.text.as_ref().map(|t| {
                 let total = t.raster.glyphs.len();
-                (t.raster.clone(), t.reveal.visible_glyphs(total, now))
+                (t.raster.clone(), t.reveal.visible_glyphs(total, now) as u32)
             }),
         }
     }
@@ -67,24 +65,20 @@ impl LayerSig {
     }
 }
 
-/// 下の層ほど変わらない、という性質を使った合成の再利用。直前のフレームと署名が同じ下層（z 順の先頭から何枚か）の
-/// 合成結果を 1 枚覚えておき、変わった層より上だけを描き足す（メニューを開いている間の、下のゲーム画面など）。
-/// 結果は毎回ゼロから描いた場合と画素単位で同じ（テストで固定）。
 struct PrefixCache {
     prev: Vec<LayerSig>,
     cur: Vec<LayerSig>,
     order: Vec<(i32, u32)>,
     prev_offset: (i32, i32),
-    /// `checkpoint` が含む層の数（0 = 無効）。
+    /// `fore` バッファが保持している下層チェックポイントの層数（0 = 無効）。
     len: usize,
-    checkpoint: Pixmap,
 }
 
 impl ComposeBufs {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(_width: u32, _height: u32) -> Self {
         Self {
-            fore: Pixmap::new(width, height),
-            back: Pixmap::new(width, height),
+            fore: Pixmap::new(0, 0),
+            back: Pixmap::new(0, 0),
             cached_revision: None,
             prefix: PrefixCache {
                 prev: Vec::new(),
@@ -92,9 +86,14 @@ impl ComposeBufs {
                 order: Vec::new(),
                 prev_offset: (0, 0),
                 len: 0,
-                checkpoint: Pixmap::new(width, height),
             },
         }
+    }
+}
+
+fn ensure_surface(buf: &mut Pixmap, w: u32, h: u32) {
+    if buf.width != w || buf.height != h {
+        *buf = Pixmap::new(w, h);
     }
 }
 
@@ -125,6 +124,9 @@ pub fn compose_frame(scene: &Scene, now: Instant, bufs: &mut ComposeBufs, out: &
 
     match &scene.transition {
         Some(trans) => {
+            bufs.prefix.len = 0;
+            ensure_surface(&mut bufs.fore, out.width, out.height);
+            ensure_surface(&mut bufs.back, out.width, out.height);
             let cacheable = !pages_time_dependent(scene, now);
             if !cacheable || bufs.cached_revision != Some(scene.revision) {
                 compose_page(&scene.fore, now, quake, &mut bufs.fore);
@@ -146,13 +148,23 @@ pub fn compose_frame(scene: &Scene, now: Instant, bufs: &mut ComposeBufs, out: &
         }
         None => {
             bufs.cached_revision = None;
-            compose_page_cached(&scene.fore, now, quake, out, &mut bufs.prefix);
+            if !bufs.back.data.is_empty() {
+                bufs.back = Pixmap::new(0, 0);
+            }
+            compose_page_cached(
+                &scene.fore,
+                now,
+                quake,
+                out,
+                &mut bufs.prefix,
+                &mut bufs.fore,
+            );
         }
     }
 }
 
 fn quake_offset(scene: &Scene, now: Instant) -> (i32, i32) {
-    let Some((ax, ay, start, ms)) = scene.quake else {
+    let Some(&(ax, ay, start, ms)) = scene.quake.as_deref() else {
         return (0, 0);
     };
     let elapsed = now.duration_since(start).as_millis() as u32;
@@ -171,26 +183,8 @@ fn compose_page(layers: &LayerMap, now: Instant, offset: (i32, i32), out: &mut P
     out.fill([0, 0, 0, 255]);
     let mut sorted: Vec<(&u32, &Layer)> = layers.iter().filter(|(_, l)| l.visible).collect();
     sorted.sort_by_key(|(id, l)| (l.z, **id));
-
     for (_, layer) in sorted {
-        let (ex, ey, eo) = effective_transform(layer, now);
-        let lx = ex + offset.0;
-        let ly = ey + offset.1;
-        if let Some(pixmap) = &layer.pixmap {
-            out.blit_over_clipped(pixmap, lx, ly, eo, layer.effective_crop(now));
-        }
-        if let Some(text) = &layer.text {
-            let total = text.raster.glyphs.len();
-            let visible = text.reveal.visible_glyphs(total, now);
-            for g in text.raster.glyphs.iter().take(visible) {
-                out.blit_over(
-                    &g.pixmap,
-                    lx + text.raster.margin_x + g.x,
-                    ly + text.raster.margin_y + g.y,
-                    eo,
-                );
-            }
-        }
+        draw_layer(out, layer, now, offset);
     }
 }
 
@@ -222,6 +216,7 @@ fn compose_page_cached(
     offset: (i32, i32),
     out: &mut Pixmap,
     cache: &mut PrefixCache,
+    checkpoint: &mut Pixmap,
 ) {
     cache.order.clear();
     for (&id, l) in layers {
@@ -237,9 +232,8 @@ fn compose_page_cached(
         cache.cur.push(LayerSig::of(id, l, now, offset));
     }
 
-    let same_size = cache.checkpoint.width == out.width && cache.checkpoint.height == out.height;
-    // 前フレームと署名が一致する先頭の層数
-    let common = if same_size && cache.prev_offset == offset {
+    let same_size = checkpoint.width == out.width && checkpoint.height == out.height;
+    let common = if cache.prev_offset == offset {
         cache
             .cur
             .iter()
@@ -249,8 +243,8 @@ fn compose_page_cached(
     } else {
         0
     };
-    let start = if cache.len > 0 && cache.len <= common {
-        out.data.copy_from_slice(&cache.checkpoint.data);
+    let start = if same_size && cache.len > 0 && cache.len <= common {
+        out.data.copy_from_slice(&checkpoint.data);
         cache.len
     } else {
         out.fill([0, 0, 0, 255]);
@@ -258,15 +252,17 @@ fn compose_page_cached(
     };
     let mut saved = start == common && start > 0;
     for (i, &(_, id)) in cache.order.iter().enumerate().skip(start) {
-        if i == common && common > 0 && same_size {
-            cache.checkpoint.data.copy_from_slice(&out.data);
+        if i == common && common > 0 {
+            ensure_surface(checkpoint, out.width, out.height);
+            checkpoint.data.copy_from_slice(&out.data);
             cache.len = common;
             saved = true;
         }
         draw_layer(out, &layers[&id], now, offset);
     }
-    if !saved && common >= cache.order.len() && common > 0 && same_size {
-        cache.checkpoint.data.copy_from_slice(&out.data);
+    if !saved && common >= cache.order.len() && common > 0 {
+        ensure_surface(checkpoint, out.width, out.height);
+        checkpoint.data.copy_from_slice(&out.data);
         cache.len = common;
         saved = true;
     }
@@ -407,12 +403,12 @@ mod tests {
             l.visible = true;
         }
         let start = Instant::now();
-        scene.transition = Some(Transition {
+        scene.transition = Some(Box::new(Transition {
             method: TransMethod::Crossfade,
             start,
             duration: Duration::from_millis(100),
             skip: false,
-        });
+        }));
         let mut bufs = ComposeBufs::new(2, 2);
         let mut out = Pixmap::new(2, 2);
         compose_frame(
@@ -442,14 +438,14 @@ mod tests {
             l.visible = true;
         }
         let start = Instant::now();
-        scene.transition = Some(Transition {
+        scene.transition = Some(Box::new(Transition {
             method: TransMethod::Scroll {
                 from: ScrollDir::Left,
             },
             start,
             duration: Duration::from_millis(100),
             skip: false,
-        });
+        }));
         let mut bufs = ComposeBufs::new(4, 4);
         let mut out = Pixmap::new(4, 4);
         compose_frame(
@@ -477,7 +473,7 @@ mod tests {
             l.y = 0;
             l.opacity = 0;
             l.visible = true;
-            l.tween = Some(Tween {
+            l.tween = Some(Box::new(Tween {
                 from_x: 0,
                 from_y: 0,
                 from_opacity: 0,
@@ -488,7 +484,7 @@ mod tests {
                 duration: Duration::from_millis(100),
                 accel: 0.0,
                 spline: None,
-            });
+            }));
         }
         let mut bufs = ComposeBufs::new(4, 4);
         let mut out = Pixmap::new(4, 4);

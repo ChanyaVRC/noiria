@@ -149,14 +149,14 @@ fn bench_resolution(label: &str, w: u32, h: u32) {
         l.y = (h * 3 / 4 - 20) as i32;
         l.z = 100;
         l.visible = true;
-        l.text = Some(TextContent {
+        l.text = Some(Box::new(TextContent {
             raster,
             reveal: TextReveal {
                 from_glyph: 0,
                 start: None,
                 cps: 0.0,
             },
-        });
+        }));
     }
     scene.backlay(None);
 
@@ -178,16 +178,16 @@ fn bench_resolution(label: &str, w: u32, h: u32) {
     });
     scene.layer_mut(Page::Fore, msg).unwrap().x = 40;
 
-    scene.transition = Some(Transition {
+    scene.transition = Some(Box::new(Transition {
         method: TransMethod::Crossfade,
         start: now,
         duration: std::time::Duration::from_secs(100),
         skip: false,
-    });
+    }));
     bench_n(&format!("compose crossfade {label}"), 3, 60, || {
         compose_frame(&scene, Instant::now(), &mut bufs, &mut frame);
     });
-    scene.transition = Some(Transition {
+    scene.transition = Some(Box::new(Transition {
         method: TransMethod::Universal {
             rule: Arc::new(wipe_rule),
             vague: 64.0,
@@ -195,7 +195,7 @@ fn bench_resolution(label: &str, w: u32, h: u32) {
         start: now,
         duration: std::time::Duration::from_secs(100),
         skip: false,
-    });
+    }));
     bench_n(&format!("compose universal wipe {label}"), 3, 60, || {
         compose_frame(&scene, Instant::now(), &mut bufs, &mut frame);
     });

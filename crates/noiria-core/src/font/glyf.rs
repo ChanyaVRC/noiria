@@ -6,10 +6,12 @@
 //! 複合グリフはコンポーネント（子グリフ参照 + アフィン変換）の列として
 //! 表現され、ネストしうる（深さ制限つきで再帰的に解決する）。
 
+use std::borrow::Cow;
+
 use anyhow::{ensure, Result};
 
 use super::reader::Reader;
-use super::sfnt::table_slice;
+use super::GlyfStorage;
 
 /// フォント単位座標系の点。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,9 +83,9 @@ pub(crate) fn parse_loca(data: &[u8], num_glyphs: u16, long_format: bool) -> Res
     Ok(out)
 }
 
-/// 指定グリフのアウトラインを取り出す。`glyf` は glyf テーブル全体のバイト列。
+/// 指定グリフのアウトラインを取り出す。
 pub(crate) fn outline_for_glyph(
-    glyf: &[u8],
+    glyf: &GlyfStorage,
     loca: &[u32],
     glyph_id: u16,
     num_glyphs: u16,
@@ -93,7 +95,7 @@ pub(crate) fn outline_for_glyph(
 }
 
 fn outline_recursive(
-    glyf: &[u8],
+    glyf: &GlyfStorage,
     loca: &[u32],
     glyph_id: u16,
     num_glyphs: u16,
@@ -121,8 +123,8 @@ fn outline_recursive(
         // 空のグリフ（スペースなど）。輪郭なしで正常。
         return Ok(Outline::default());
     }
-    let g = table_slice(glyf, start, end - start)?;
-    let mut r = Reader::new(g);
+    let g: Cow<'_, [u8]> = glyf.read_range(start, end - start)?;
+    let mut r = Reader::new(&g);
     let number_of_contours = r.i16()?;
     let _x_min = r.i16()?;
     let _y_min = r.i16()?;
@@ -279,7 +281,7 @@ fn build_contour(points: &[(f32, f32, bool)]) -> Contour {
 
 fn parse_composite_glyph(
     r: &mut Reader,
-    glyf: &[u8],
+    glyf: &GlyfStorage,
     loca: &[u32],
     num_glyphs: u16,
     depth: u32,
