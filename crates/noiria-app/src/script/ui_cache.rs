@@ -29,19 +29,32 @@ pub fn load_image_checked(game_dir: &GameDir, path: &str) -> Result<Pixmap, Stri
     Ok(pixmap)
 }
 
-/// 総バイト数で上限を持つ LRU（エントリ数は数十個なので、追い出しは最古の走査で足りる）。
-pub struct PixmapLru<K: Eq + Hash + Clone> {
-    map: HashMap<K, (Arc<Pixmap>, u64)>,
+/// バイト上限付き LRU に載せる値の占有バイト数を返すトレイト。
+pub trait ByteSized {
+    fn byte_size(&self) -> usize;
+}
+
+impl ByteSized for Arc<Pixmap> {
+    fn byte_size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl ByteSized for Arc<Vec<u8>> {
+    fn byte_size(&self) -> usize {
+        self.len()
+    }
+}
+
+/// 総バイト数で上限を持つ汎用 LRU（エントリ数は数十個なので、追い出しは最古の走査で足りる）。
+pub struct ByteLru<K: Eq + Hash + Clone, V: Clone + ByteSized> {
+    map: HashMap<K, (V, u64)>,
     bytes: usize,
     cap_bytes: usize,
     tick: u64,
 }
 
-fn size_of(p: &Pixmap) -> usize {
-    p.data.len()
-}
-
-impl<K: Eq + Hash + Clone> PixmapLru<K> {
+impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
     pub fn new(cap_bytes: usize) -> Self {
         Self {
             map: HashMap::new(),
@@ -51,23 +64,23 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         }
     }
 
-    pub fn get<Q>(&mut self, k: &Q) -> Option<Arc<Pixmap>>
+    pub fn get<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
         self.tick += 1;
         let tick = self.tick;
-        self.map.get_mut(k).map(|(p, t)| {
+        self.map.get_mut(k).map(|(v, t)| {
             *t = tick;
-            p.clone()
+            v.clone()
         })
     }
 
-    pub fn insert(&mut self, k: K, v: Arc<Pixmap>) {
-        let sz = size_of(&v);
+    pub fn insert(&mut self, k: K, v: V) {
+        let sz = v.byte_size();
         if let Some((old, _)) = self.map.remove(&k) {
-            self.bytes -= size_of(&old);
+            self.bytes -= old.byte_size();
         }
         if sz > self.cap_bytes {
             return;
@@ -81,7 +94,7 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
                 break;
             };
             if let Some((p, _)) = self.map.remove(&oldest) {
-                self.bytes -= size_of(&p);
+                self.bytes -= p.byte_size();
             }
         }
     }
@@ -90,7 +103,7 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         let doomed: Vec<K> = self.map.keys().filter(|k| f(k)).cloned().collect();
         for k in doomed {
             if let Some((p, _)) = self.map.remove(&k) {
-                self.bytes -= size_of(&p);
+                self.bytes -= p.byte_size();
             }
         }
     }
@@ -105,6 +118,9 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         self.bytes
     }
 }
+
+pub type PixmapLru<K> = ByteLru<K, Arc<Pixmap>>;
+pub type RuleLru = ByteLru<RuleKey, Arc<Vec<u8>>>;
 
 /// `layer.panel` の数値列（`PanelSpec::from_slice` が読むもの）を鍵にする。
 pub type PanelKey = Vec<u64>;
@@ -131,61 +147,12 @@ pub struct ScaledKey {
     pub h: u32,
 }
 
-/// ユニバーサルトランジションのルール輝度プレーン用 LRU（バイト上限付き）。
+/// ユニバーサルトランジションのルール輝度プレーン用の鍵: パス・シーン寸法。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RuleKey {
     pub path: String,
     pub w: u32,
     pub h: u32,
-}
-
-pub struct RuleLru {
-    map: HashMap<RuleKey, (Arc<Vec<u8>>, u64)>,
-    bytes: usize,
-    cap_bytes: usize,
-    tick: u64,
-}
-
-impl RuleLru {
-    pub fn new(cap_bytes: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            bytes: 0,
-            cap_bytes,
-            tick: 0,
-        }
-    }
-
-    pub fn get(&mut self, k: &RuleKey) -> Option<Arc<Vec<u8>>> {
-        self.tick += 1;
-        let tick = self.tick;
-        self.map.get_mut(k).map(|(p, t)| {
-            *t = tick;
-            p.clone()
-        })
-    }
-
-    pub fn insert(&mut self, k: RuleKey, v: Arc<Vec<u8>>) {
-        let sz = v.len();
-        if let Some((old, _)) = self.map.remove(&k) {
-            self.bytes -= old.len();
-        }
-        if sz > self.cap_bytes {
-            return;
-        }
-        self.tick += 1;
-        self.map.insert(k, (v, self.tick));
-        self.bytes += sz;
-        while self.bytes > self.cap_bytes {
-            let Some(oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            if let Some((p, _)) = self.map.remove(&oldest) {
-                self.bytes -= p.len();
-            }
-        }
-    }
 }
 
 pub const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
