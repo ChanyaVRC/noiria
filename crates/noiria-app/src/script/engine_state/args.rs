@@ -2,58 +2,70 @@
 
 use std::collections::HashMap;
 
-use noiria_core::text::{LocateArgs, TextAlign, TextEngine, TextSegment, TextStyle};
+#[cfg(feature = "engine-v8")]
+use noiria_core::text::{LocateArgs, TextAlign};
+use noiria_core::text::{TextEngine, TextSegment, TextStyle};
+#[cfg(feature = "engine-v8")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "engine-v8")]
 use crate::script::numconv::{
     de_opt_coord, de_opt_i32, de_opt_u32, de_opt_u8, de_time_ms, de_u32, to_u8,
 };
 
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Default, Clone)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Deserialize))]
+#[cfg_attr(feature = "engine-v8", serde(default))]
 pub(crate) struct LayerProps {
-    #[serde(deserialize_with = "de_opt_coord")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_coord"))]
     pub(crate) x: Option<i32>,
-    #[serde(deserialize_with = "de_opt_coord")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_coord"))]
     pub(crate) y: Option<i32>,
-    #[serde(deserialize_with = "de_opt_i32")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_i32"))]
     pub(crate) z: Option<i32>,
-    #[serde(deserialize_with = "de_opt_u8")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_u8"))]
     pub(crate) opacity: Option<u8>,
     pub(crate) visible: Option<bool>,
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Default, Clone)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Deserialize))]
+#[cfg_attr(feature = "engine-v8", serde(rename_all = "camelCase", default))]
 pub(crate) struct MoveArgs {
-    #[serde(deserialize_with = "de_opt_coord")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_coord"))]
     pub(crate) to_x: Option<i32>,
-    #[serde(deserialize_with = "de_opt_coord")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_coord"))]
     pub(crate) to_y: Option<i32>,
-    #[serde(deserialize_with = "de_opt_u8")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_opt_u8"))]
     pub(crate) to_opacity: Option<u8>,
-    #[serde(deserialize_with = "de_time_ms")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_time_ms"))]
     pub(crate) time_ms: u64,
     pub(crate) accel: f32,
 }
 
 /// `layer_blit_image` の clip= 矩形（画像ファイル内の切り出し範囲）。省略時は画像全体。
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Deserialize))]
 pub(crate) struct BlitClip {
-    #[serde(deserialize_with = "de_u32")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_u32"))]
     pub(crate) x: u32,
-    #[serde(deserialize_with = "de_u32")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_u32"))]
     pub(crate) y: u32,
-    #[serde(deserialize_with = "de_u32")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_u32"))]
     pub(crate) w: u32,
-    #[serde(deserialize_with = "de_u32")]
+    #[cfg_attr(feature = "engine-v8", serde(deserialize_with = "de_u32"))]
     pub(crate) h: u32,
 }
 
 /// [image]（W5 拡張）の clip=/flipud=/fliplr=/grayscale= 属性。`layer_load_image` の拡張版
 /// `layer_load_image_ex` が使う。適用順は clip 抽出 → 左右反転 → 上下反転 → グレースケール化。
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Deserialize))]
+#[cfg_attr(feature = "engine-v8", serde(rename_all = "camelCase", default))]
 pub(crate) struct ImageLoadOpts {
     pub(crate) clip: Option<BlitClip>,
     pub(crate) flip_h: bool,
@@ -61,28 +73,30 @@ pub(crate) struct ImageLoadOpts {
     pub(crate) grayscale: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Deserialize))]
+#[cfg_attr(feature = "engine-v8", serde(rename_all = "camelCase"))]
 pub(crate) struct TransArgs {
     pub(crate) method: String,
-    #[serde(default, deserialize_with = "de_time_ms")]
+    #[cfg_attr(feature = "engine-v8", serde(default, deserialize_with = "de_time_ms"))]
     pub(crate) time_ms: u64,
-    #[serde(default)]
+    #[cfg_attr(feature = "engine-v8", serde(default))]
     pub(crate) rule: Option<String>,
-    #[serde(default)]
+    #[cfg_attr(feature = "engine-v8", serde(default))]
     pub(crate) vague: Option<f32>,
     /// [trans method=scroll]（W5）: 新ページが入ってくる辺（既定 left）。
-    #[serde(default)]
+    #[cfg_attr(feature = "engine-v8", serde(default))]
     pub(crate) from: Option<String>,
     /// [trans method=scroll]（W5）: stayfore|staynone|staybase を受理するが、描画上は
     /// 区別しない（`Pixmap::scroll_from` のコメント参照）。値自体は保持だけして未使用のため
     /// dead_code を明示的に許可する。
-    #[serde(default)]
+    #[cfg_attr(feature = "engine-v8", serde(default))]
     #[allow(dead_code)]
     pub(crate) stay: Option<String>,
 }
 
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
+#[cfg(feature = "engine-v8")]
 fn rgba_u8(c: [f64; 4]) -> [u8; 4] {
     c.map(to_u8)
 }
@@ -90,9 +104,9 @@ fn rgba_u8(c: [f64; 4]) -> [u8; 4] {
 /// V8 の `op_text_style` が受ける `TextStyle`。`noiria_core::text::TextStyle` を直接 serde で受けると
 /// 整数フィールドが `f64 as T`（切り捨て）になり tsint（四捨五入）と食い違うので、数値は f64 で受けて
 /// `numconv` の規則で落とす。省略したフィールドは既定値のまま。
+#[cfg(feature = "engine-v8")]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
 pub(crate) struct TextStyleArgs {
     pub(crate) font_family: Option<String>,
     pub(crate) font_size: Option<f32>,
@@ -112,7 +126,7 @@ pub(crate) struct TextStyleArgs {
     pub(crate) align: Option<TextAlign>,
 }
 
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
+#[cfg(feature = "engine-v8")]
 impl TextStyleArgs {
     pub(crate) fn into_style(self) -> TextStyle {
         let mut s = TextStyle::default();
@@ -154,9 +168,9 @@ impl TextStyleArgs {
 }
 
 /// V8 の `op_text_print` が受ける 1 セグメント（`TextStyleArgs` と同じ理由で色だけ f64 で受ける）。
+#[cfg(feature = "engine-v8")]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
 pub(crate) struct TextSegmentArgs {
     pub(crate) text: String,
     pub(crate) color: Option<[f64; 4]>,
@@ -170,7 +184,7 @@ pub(crate) struct TextSegmentArgs {
     pub(crate) font_family: Option<String>,
 }
 
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
+#[cfg(feature = "engine-v8")]
 impl TextSegmentArgs {
     pub(crate) fn into_segment(self) -> TextSegment {
         TextSegment {
@@ -188,28 +202,33 @@ impl TextSegmentArgs {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "engine-v8", derive(Serialize))]
 pub(crate) struct PrintResult {
     pub(crate) total: usize,
     pub(crate) added: usize,
 }
 
+#[derive(Default)]
+pub(crate) struct TextLayerState {
+    pub(crate) style: TextStyle,
+    pub(crate) segments: Vec<TextSegment>,
+    /// 直近レイアウトの総グリフ数（追記時の再レイアウトを避けるキャッシュ）
+    pub(crate) glyph_count: usize,
+}
+
 /// テキストレイアウトエンジンとレイヤごとの蓄積テキスト（旧 `state::Texts`）。
 pub(crate) struct Texts {
     pub(crate) engine: TextEngine,
-    pub(crate) styles: HashMap<u32, TextStyle>,
-    pub(crate) segments: HashMap<u32, Vec<TextSegment>>,
-    /// 直近レイアウトの総グリフ数（追記時の再レイアウトを避けるキャッシュ）
-    pub(crate) glyph_counts: HashMap<u32, usize>,
+    pub(crate) layers: HashMap<u32, TextLayerState>,
 }
 
 impl Texts {
     pub(crate) fn new() -> Self {
         Self {
             engine: TextEngine::new(),
-            styles: HashMap::new(),
-            segments: HashMap::new(),
-            glyph_counts: HashMap::new(),
+            layers: HashMap::new(),
         }
     }
 }

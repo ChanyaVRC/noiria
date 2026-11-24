@@ -588,7 +588,7 @@ fn text_reflow_preserves_active_reveal_and_refreshes_glyph_cache() {
     assert_eq!(text.reveal.cps, before_reveal.cps);
     assert!(!Arc::ptr_eq(&text.raster, &before_raster));
     assert_eq!(
-        es.texts.glyph_counts.get(&id).copied(),
+        es.texts.layers.get(&id).map(|l| l.glyph_count),
         Some(text.raster.glyphs.len())
     );
     drop(scene);

@@ -390,6 +390,7 @@ fn run() -> anyhow::Result<()> {
             input_sync: input_sync.clone(),
             tick_sync: tick_sync.clone(),
             pending_waits: pending_waits.clone(),
+            #[cfg(test)]
             op_log: None,
         });
         return headless::run_headless(headless::HeadlessParams {
@@ -456,6 +457,7 @@ fn run() -> anyhow::Result<()> {
             input_sync: bridge::InputSync::new(),
             tick_sync: bridge::TickSync::new(),
             pending_waits: bridge::PendingWaits::new(),
+            #[cfg(test)]
             op_log: None,
         });
 
@@ -508,6 +510,7 @@ fn run() -> anyhow::Result<()> {
             input_sync: bridge::InputSync::new(),
             tick_sync: bridge::TickSync::new(),
             pending_waits: bridge::PendingWaits::new(),
+            #[cfg(test)]
             op_log: None,
         });
 

@@ -121,8 +121,8 @@ pub(crate) struct EngineCtx {
     /// （`crate::bridge::PendingWaits` 参照）。tsint/windowed は生成するだけで誰も
     /// 観測しない（挙動不変）。
     pub(crate) pending_waits: PendingWaits,
-    /// タグ振る舞いテストハーネス専用の ops 呼び出し記録先（既定 `None`、本番は常に無効）。
-    /// `docs/implementation-notes.md`「2026-07-11 タグ振る舞いテストスイート」参照。
+    /// タグ振る舞いテストハーネス専用の ops 呼び出し記録先（テスト専用）。
+    #[cfg(test)]
     pub(crate) op_log: Option<engine_state::SharedOpLog>,
 }
 

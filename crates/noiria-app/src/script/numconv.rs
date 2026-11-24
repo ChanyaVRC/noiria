@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "engine-v8")]
 use serde::{Deserialize, Deserializer};
 
 fn rounded(n: f64) -> f64 {
@@ -53,27 +54,32 @@ pub(crate) fn wait_duration(ms: f64) -> Duration {
 
 // ---- serde（V8 の構造体フィールド）: `#[serde(deserialize_with = "...")]` で使う ----
 
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     f64::deserialize(d).map(to_u32)
 }
 
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_time_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     f64::deserialize(d).map(to_time_ms)
 }
 
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_opt_u8<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_u8))
 }
 
-#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_u32))
 }
 
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_opt_coord<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_coord))
 }
 
+#[cfg(feature = "engine-v8")]
 pub(crate) fn de_opt_i32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_i32))
 }

@@ -133,9 +133,9 @@ pub(crate) struct PreparedVideo {
 
 /// 動画再生状態。同時再生は 1 本のみを想定（旧 `ops_video::Videos`）。
 pub(crate) struct Videos {
-    pub(crate) current: Option<VideoHandle>,
+    pub(crate) current: Option<Box<VideoHandle>>,
     /// [openvideo]/[preparevideo] で開いたが、まだ [playvideo] していない動画（W6）。
-    pub(crate) prepared: Option<PreparedVideo>,
+    pub(crate) prepared: Option<Box<PreparedVideo>>,
     generation: Arc<AtomicU64>,
 }
 
@@ -524,14 +524,14 @@ impl EngineState {
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let playing = Arc::new(AtomicBool::new(true));
-        self.videos.current = Some(VideoHandle {
+        self.videos.current = Some(Box::new(VideoHandle {
             stop: stop.clone(),
             paused: paused.clone(),
             playing: playing.clone(),
             control: control.clone(),
             events: events.clone(),
             fps,
-        });
+        }));
 
         let job = PlaybackJob {
             scene: self.scene.clone(),
@@ -598,7 +598,7 @@ impl EngineState {
         path: &str,
         looping: bool,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("video_play {id} {path} loop={looping}"));
+        log_op!(self, "video_play {id} {path} loop={looping}");
         self.video_play_from(id, path, looping, None, None)
     }
 
@@ -610,14 +610,15 @@ impl EngineState {
         frame: Option<usize>,
         position_ms: Option<f64>,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "video_play_at {id} {path} loop={looping} frame={frame:?} position={position_ms:?}"
-        ));
+        );
         self.video_play_from(id, path, looping, frame, position_ms)
     }
 
     pub(crate) fn video_stop(&mut self) {
-        self.log_op("video_stop");
+        log_op!(self, "video_stop");
         self.invalidate_current_video();
     }
 
@@ -636,7 +637,7 @@ impl EngineState {
         path: &str,
         looping: bool,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("video_open {id} {path} loop={looping}"));
+        log_op!(self, "video_open {id} {path} loop={looping}");
         let source = self.game_dir.open_video(path).map_err(|e| e.to_string())?;
         {
             let sc = self.scene.lock_unpoisoned();
@@ -644,14 +645,14 @@ impl EngineState {
                 return Err(format!("レイヤが存在しません: {id}"));
             }
         }
-        self.videos.prepared = Some(PreparedVideo {
+        self.videos.prepared = Some(Box::new(PreparedVideo {
             id,
             source,
             looping,
             initial_index: 0,
             control: Arc::new(Mutex::new(PlaybackControl::default())),
             events: Arc::new(Mutex::new(VideoEvents::default())),
-        });
+        }));
         Ok(())
     }
 
@@ -694,18 +695,18 @@ impl EngineState {
         path: &str,
         looping: bool,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("video_prepare {id} {path} loop={looping}"));
+        log_op!(self, "video_prepare {id} {path} loop={looping}");
         self.video_open(id, path, looping)?;
         self.prepare_opened_video(id)
     }
 
     pub(crate) fn video_prepare_opened(&mut self, id: u32) -> Result<(), EngineError> {
-        self.log_op(format!("video_prepare_opened {id}"));
+        log_op!(self, "video_prepare_opened {id}");
         self.prepare_opened_video(id)
     }
 
     pub(crate) fn video_seek_frame(&mut self, target: usize) -> Result<(), EngineError> {
-        self.log_op(format!("video_seek_frame {target}"));
+        log_op!(self, "video_seek_frame {target}");
         if let Some(prepared) = self.videos.prepared.as_mut() {
             prepared
                 .source
@@ -721,7 +722,7 @@ impl EngineState {
     }
 
     pub(crate) fn video_seek_position(&mut self, position_ms: f64) -> Result<(), EngineError> {
-        self.log_op(format!("video_seek_position {position_ms}"));
+        log_op!(self, "video_seek_position {position_ms}");
         if !position_ms.is_finite() || position_ms < 0.0 {
             return Err(format!("動画位置が不正です: {position_ms}ms"));
         }
@@ -742,7 +743,7 @@ impl EngineState {
     }
 
     pub(crate) fn video_set_period_event(&mut self, frame: usize) {
-        self.log_op(format!("video_set_period_event {frame}"));
+        log_op!(self, "video_set_period_event {frame}");
         let _scene = self.scene.lock_unpoisoned();
         self.videos.for_each_control_and_events(|control, events| {
             control.lock_unpoisoned().period_frame = Some(frame);
@@ -751,7 +752,7 @@ impl EngineState {
     }
 
     pub(crate) fn video_cancel_period_event(&mut self) {
-        self.log_op("video_cancel_period_event");
+        log_op!(self, "video_cancel_period_event");
         let _scene = self.scene.lock_unpoisoned();
         self.videos.for_each_control_and_events(|control, events| {
             control.lock_unpoisoned().period_frame = None;
@@ -769,7 +770,7 @@ impl EngineState {
                 "動画区間は start < end である必要があります: {start}..{end}"
             ));
         }
-        self.log_op(format!("video_set_segment_loop {start} {end}"));
+        log_op!(self, "video_set_segment_loop {start} {end}");
         let _scene = self.scene.lock_unpoisoned();
         self.videos.for_each_control_and_events(|control, events| {
             {
@@ -783,7 +784,7 @@ impl EngineState {
     }
 
     pub(crate) fn video_cancel_segment_loop(&mut self) {
-        self.log_op("video_cancel_segment_loop");
+        log_op!(self, "video_cancel_segment_loop");
         let _scene = self.scene.lock_unpoisoned();
         self.videos.for_each_control_and_events(|control, events| {
             {
@@ -828,7 +829,7 @@ impl EngineState {
     /// [playvideo]（storage= 省略時、W6）: `prepared`（openvideo/preparevideo で開いた動画）の
     /// 再生を開始する。準備済みの動画が無い、または別レイヤ向けのものなら失敗させる。
     pub(crate) fn video_play_prepared(&mut self, id: u32) -> Result<(), EngineError> {
-        self.log_op(format!("video_play_prepared {id}"));
+        log_op!(self, "video_play_prepared {id}");
         let prepared = self
             .videos
             .prepared
@@ -853,7 +854,7 @@ impl EngineState {
 
     /// [pausevideo]（W6）: 再生中の動画をその場で一時停止する（再生位置は保持）。
     pub(crate) fn video_pause(&mut self) {
-        self.log_op("video_pause");
+        log_op!(self, "video_pause");
         let _scene = self.scene.lock_unpoisoned();
         if let Some(current) = self.videos.current.as_ref() {
             current.paused.store(true, Ordering::Relaxed);
@@ -862,7 +863,7 @@ impl EngineState {
 
     /// [resumevideo]（W6）: 一時停止からの再開。
     pub(crate) fn video_resume(&mut self) {
-        self.log_op("video_resume");
+        log_op!(self, "video_resume");
         let _scene = self.scene.lock_unpoisoned();
         if let Some(current) = self.videos.current.as_ref() {
             current.paused.store(false, Ordering::Relaxed);
@@ -871,7 +872,7 @@ impl EngineState {
 
     /// [rewindvideo]（W6）: 再生中/一時停止中の動画を先頭へ巻き戻す。
     pub(crate) fn video_rewind(&mut self) {
-        self.log_op("video_rewind");
+        log_op!(self, "video_rewind");
         if let Some(prepared) = self.videos.prepared.as_mut() {
             match prepared.source.seek_frame(0) {
                 Ok(()) => prepared.initial_index = 0,
