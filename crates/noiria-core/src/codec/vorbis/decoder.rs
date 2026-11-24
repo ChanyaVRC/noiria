@@ -3,7 +3,7 @@
 use super::bitreader::BitReader;
 use super::codebook::{ilog, Codebook};
 use super::floor::{reject_floor0, Floor1};
-use super::mdct::{build_window, Imdct};
+use super::mdct::{build_window, Imdct, ImdctScratch};
 use super::residue::ResidueSetup;
 use anyhow::{bail, ensure, Result};
 
@@ -47,8 +47,13 @@ pub struct VorbisStreamDecoder {
     modes: Vec<Mode>,
     imdct0: Imdct,
     imdct1: Imdct,
+    imdct_scratch: ImdctScratch,
+    win_short: Vec<f32>,
+    win_long: [Vec<f32>; 4],
     /// オーバーラップ加算用の状態: 直前ブロックの「窓掛け済み全長データ」とその長さ。
     prev_block: Option<(Vec<Vec<f32>>, usize)>,
+    /// 再利用する次ブロックバッファ（prev_block と swap してパケット毎の確保を避ける）。
+    reuse_block: Vec<Vec<f32>>,
 }
 
 fn check_header_magic(br: &mut BitReader, expect_type: u32) -> Result<()> {
@@ -76,6 +81,14 @@ impl VorbisStreamDecoder {
         let (codebooks, floors, residues, mappings, modes) =
             parse_setup(setup_packet, channels as u32)?;
 
+        let win_short = build_window(blocksize_0, false, true, true, blocksize_0);
+        let win_long = [
+            build_window(blocksize_1, true, false, false, blocksize_0),
+            build_window(blocksize_1, true, false, true, blocksize_0),
+            build_window(blocksize_1, true, true, false, blocksize_0),
+            build_window(blocksize_1, true, true, true, blocksize_0),
+        ];
+
         Ok(Self {
             channels,
             sample_rate,
@@ -88,7 +101,11 @@ impl VorbisStreamDecoder {
             modes,
             imdct0: Imdct::new(blocksize_0),
             imdct1: Imdct::new(blocksize_1),
+            imdct_scratch: ImdctScratch::default(),
+            win_short,
+            win_long,
             prev_block: None,
+            reuse_block: Vec::new(),
         })
     }
 
@@ -138,13 +155,11 @@ impl VorbisStreamDecoder {
             return Ok(Vec::new());
         }
 
-        let window = build_window(
-            n,
-            blockflag,
-            prev_window_flag,
-            next_window_flag,
-            self.blocksize_0,
-        );
+        let window: &[f32] = if blockflag {
+            &self.win_long[(prev_window_flag as usize) * 2 + (next_window_flag as usize)]
+        } else {
+            &self.win_short
+        };
         let mapping_idx = self.modes[mode_number].mapping as usize;
         ensure!(
             mapping_idx < self.mappings.len(),
@@ -258,18 +273,23 @@ impl VorbisStreamDecoder {
         } else {
             &self.imdct0
         };
-        let mut cur_block: Vec<Vec<f32>> = Vec::with_capacity(ch);
-        for spec in &spectral {
-            let pcm = imdct.transform(spec);
-            let windowed: Vec<f32> = pcm.iter().zip(&window).map(|(&p, &w)| p * w).collect();
-            cur_block.push(windowed);
+        let mut cur_block = std::mem::take(&mut self.reuse_block);
+        cur_block.resize_with(ch, || Vec::with_capacity(self.blocksize_1));
+        for (pcm, spec) in cur_block.iter_mut().zip(&spectral) {
+            pcm.resize(n, 0.0);
+            imdct.transform_into(spec, &mut self.imdct_scratch, pcm);
+            for (p, &w) in pcm.iter_mut().zip(window) {
+                *p *= w;
+            }
         }
 
         let output = match &self.prev_block {
             None => Vec::new(),
             Some((prev_data, prev_n)) => overlap_add(prev_data, *prev_n, &cur_block, n, ch),
         };
-        self.prev_block = Some((cur_block, n));
+        if let Some((old_prev, _)) = self.prev_block.replace((cur_block, n)) {
+            self.reuse_block = old_prev;
+        }
         Ok(output)
     }
 }

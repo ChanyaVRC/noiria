@@ -59,56 +59,153 @@ pub fn build_window(
     w
 }
 
-/// 特定ブロックサイズ `n` 用に事前計算した cos テーブルを保持する逆 MDCT 実行器。
+/// `Imdct::transform_into` 用の再利用スクラッチ。パケット毎のヒープ確保を避ける。
+#[derive(Default)]
+pub struct ImdctScratch {
+    fft_re: Vec<f64>,
+    fft_im: Vec<f64>,
+    u: Vec<f32>,
+}
+
+/// 特定ブロックサイズ `n` 用の O(N log N) 逆 MDCT 実行器（N/4 点複素 FFT ベース）。
 pub struct Imdct {
     n: usize,
-    /// cos(pi*m/(4n)) for m in 0..8n
-    cos_table: Vec<f64>,
+    /// exp(+i * 2π/N * (k + 1/8)) for k in 0..N/4
+    tw_re: Vec<f64>,
+    tw_im: Vec<f64>,
+    /// radix-2 FFT 用のビット反転表 (長さ N/4)
+    bit_rev: Vec<usize>,
+    /// radix-2 FFT ステージごとの回転因子 exp(+i * 2π * j / step)
+    fft_tw_re: Vec<f64>,
+    fft_tw_im: Vec<f64>,
 }
 
 impl Imdct {
     pub fn new(n: usize) -> Self {
-        let period = 8 * n;
-        let cos_table: Vec<f64> = (0..period)
-            .map(|m| (PI * m as f64 / (4.0 * n as f64)).cos())
-            .collect();
-        Self { n, cos_table }
-    }
+        assert!(n >= 8 && n.is_power_of_two(), "IMDCT size must be power of 2 >= 8, got {n}");
+        let n4 = n / 4;
+        let mut tw_re = Vec::with_capacity(n4);
+        let mut tw_im = Vec::with_capacity(n4);
+        let base_ang = 2.0 * PI / n as f64;
+        for k in 0..n4 {
+            let ang = base_ang * (k as f64 + 0.125);
+            tw_re.push(ang.cos());
+            tw_im.push(ang.sin());
+        }
 
-    #[inline]
-    fn cos_h(&self, n_idx: usize, k_idx: usize) -> f64 {
-        let n = self.n as i64;
-        let m = (4 * n_idx as i64 + n + 2) * (2 * k_idx as i64 + 1);
-        let period = 8 * self.n as i64;
-        let idx = m.rem_euclid(period) as usize;
-        self.cos_table[idx]
+        let log_n4 = n4.trailing_zeros();
+        let mut bit_rev = Vec::with_capacity(n4);
+        for i in 0..n4 {
+            bit_rev.push(if log_n4 == 0 {
+                0
+            } else {
+                i.reverse_bits() >> (usize::BITS - log_n4)
+            });
+        }
+
+        let mut fft_tw_re = Vec::with_capacity(n4);
+        let mut fft_tw_im = Vec::with_capacity(n4);
+        let mut half_len = 1usize;
+        while half_len < n4 {
+            let step = half_len * 2;
+            let ang_step = 2.0 * PI / step as f64;
+            for j in 0..half_len {
+                let ang = ang_step * j as f64;
+                fft_tw_re.push(ang.cos());
+                fft_tw_im.push(ang.sin());
+            }
+            half_len = step;
+        }
+
+        Self {
+            n,
+            tw_re,
+            tw_im,
+            bit_rev,
+            fft_tw_re,
+            fft_tw_im,
+        }
     }
 
     /// `x` は長さ n/2 の周波数領域係数。出力は長さ n の時間領域信号
     /// (まだ窓掛け・オーバーラップ前)。
-    #[allow(clippy::needless_range_loop)]
+    #[cfg(test)]
     pub fn transform(&self, x: &[f32]) -> Vec<f32> {
-        debug_assert_eq!(x.len(), self.n / 2);
-        // 注意: 教科書的な TDAC (Time Domain Alias Cancellation) の理論上は
-        // 「無スケールの forward カーネル和」と対になる逆変換のスケールは 4/N になる
-        // (このモジュールのテスト `mdct_perfect_reconstruction_random_signal` は実際に
-        // その組み合わせで完全再構成を検証している)。しかし実際の Vorbis ビットストリーム
-        // は、エンコーダ側の forward 変換に十分な正規化が織り込み済みという別の規約を
-        // 採用しており、デコーダ側はスケール 1.0 (無スケール) の逆カーネル和だけでよい。
-        // これは rodio (symphonia-codec-vorbis をバックエンドとする) との突き合わせテスト
-        // (`tests/vorbis_crosscheck.rs`) で実測して確認した (スケール 1.0 のときのみ
-        // 誤差ゼロ・相関 1.0 で一致し、4/N 等の他の定数では一致しない)。
-        let scale = 1.0f64;
-        let half = self.n / 2;
+        let mut scratch = ImdctScratch::default();
         let mut out = vec![0f32; self.n];
-        for n_idx in 0..self.n {
-            let mut acc = 0f64;
-            for k_idx in 0..half {
-                acc += x[k_idx] as f64 * self.cos_h(n_idx, k_idx);
-            }
-            out[n_idx] = (acc * scale) as f32;
-        }
+        self.transform_into(x, &mut scratch, &mut out);
         out
+    }
+
+    /// `scratch` を再利用して `out` (長さ n) へ直接書き込む。
+    #[allow(clippy::needless_range_loop)]
+    pub fn transform_into(&self, x: &[f32], scratch: &mut ImdctScratch, out: &mut [f32]) {
+        debug_assert_eq!(x.len(), self.n / 2);
+        debug_assert_eq!(out.len(), self.n);
+        // 実際の Vorbis ビットストリームはスケール 1.0 (無スケール) の逆カーネル和を使う
+        // (`tests/vorbis_crosscheck.rs` で symphonia と検証済み)。
+        let n = self.n;
+        let n2 = n / 2;
+        let n4 = n / 4;
+
+        scratch.fft_re.resize(n4, 0.0);
+        scratch.fft_im.resize(n4, 0.0);
+        scratch.u.resize(n2, 0.0);
+        let fft_re = &mut scratch.fft_re[..n4];
+        let fft_im = &mut scratch.fft_im[..n4];
+        let u = &mut scratch.u[..n2];
+
+        for k in 0..n4 {
+            let a = x[2 * k] as f64;
+            let b = -(x[n2 - 1 - 2 * k] as f64);
+            let tr = self.tw_re[k];
+            let ti = self.tw_im[k];
+            let dst = self.bit_rev[k];
+            fft_re[dst] = a * tr - b * ti;
+            fft_im[dst] = a * ti + b * tr;
+        }
+
+        let mut stage_off = 0usize;
+        let mut half_len = 1usize;
+        while half_len < n4 {
+            let step = half_len * 2;
+            for block in (0..n4).step_by(step) {
+                for j in 0..half_len {
+                    let wr = self.fft_tw_re[stage_off + j];
+                    let wi = self.fft_tw_im[stage_off + j];
+                    let u_idx = block + j;
+                    let v_idx = u_idx + half_len;
+                    let vr = fft_re[v_idx];
+                    let vi = fft_im[v_idx];
+                    let tr = vr * wr - vi * wi;
+                    let ti = vr * wi + vi * wr;
+                    let ur = fft_re[u_idx];
+                    let ui = fft_im[u_idx];
+                    fft_re[u_idx] = ur + tr;
+                    fft_im[u_idx] = ui + ti;
+                    fft_re[v_idx] = ur - tr;
+                    fft_im[v_idx] = ui - ti;
+                }
+            }
+            stage_off += half_len;
+            half_len = step;
+        }
+
+        for j in 0..n4 {
+            let cr = fft_re[j];
+            let ci = fft_im[j];
+            let tr = self.tw_re[j];
+            let ti = self.tw_im[j];
+            u[2 * j] = (cr * tr - ci * ti) as f32;
+            u[n2 - 1 - 2 * j] = (cr * ti + ci * tr) as f32;
+        }
+
+        for t in 0..n4 {
+            out[t] = u[n4 + t];
+            out[n4 + t] = -u[n2 - 1 - t];
+            out[n2 + t] = -u[n4 - 1 - t];
+            out[3 * n4 + t] = -u[t];
+        }
     }
 }
 
@@ -195,6 +292,26 @@ mod tests {
             max_err = max_err.max((recon - orig).abs());
         }
         assert!(max_err < 1e-3, "max_err={max_err}");
+    }
+
+    #[test]
+    fn imdct_matches_naive_reference() {
+        let mut rng = SmallRng(0xCAFE_BABE);
+        for &n in &[64usize, 256, 2048] {
+            let x: Vec<f32> = (0..n / 2).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+            let fast = Imdct::new(n).transform(&x);
+            let n0 = n as f64 / 4.0 + 0.5;
+            let mut max_err = 0f32;
+            for (i, &got) in fast.iter().enumerate() {
+                let mut acc = 0f64;
+                for (k, &xk) in x.iter().enumerate() {
+                    acc += xk as f64
+                        * (2.0 * PI / n as f64 * (i as f64 + n0) * (k as f64 + 0.5)).cos();
+                }
+                max_err = max_err.max((got - acc as f32).abs());
+            }
+            assert!(max_err < 1e-3, "n={n} max_err={max_err}");
+        }
     }
 
     // 依存クレートを増やさないための超簡易 LCG 乱数 (テスト専用)。
