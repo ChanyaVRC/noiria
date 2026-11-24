@@ -22,7 +22,7 @@ use crate::script::state::{InputRx, InputWaitEpoch};
 /// `InputWaitEpoch` のドキュメント参照）。
 #[op2]
 #[serde]
-pub async fn op_input_next_event(state: Rc<RefCell<OpState>>) -> InputEvent {
+pub(crate) async fn op_input_next_event(state: Rc<RefCell<OpState>>) -> InputEvent {
     let (rx, epoch) = {
         let s = state.borrow();
         (

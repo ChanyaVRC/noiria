@@ -13,14 +13,14 @@
 const DEFAULT_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
 /// 1 サイズぶんの RGBA（straight alpha, `w*h*4` バイト）アイコン画像。
-pub struct IconImage {
-    pub w: u32,
-    pub h: u32,
-    pub rgba: Vec<u8>,
+pub(crate) struct IconImage {
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) rgba: Vec<u8>,
 }
 
 /// ウィンドウ/タスクバーアイコンの元画像（デコード済み・リサイズ前）。
-pub struct AppIcon {
+pub(crate) struct AppIcon {
     src_w: u32,
     src_h: u32,
     src_rgba: Vec<u8>,
@@ -35,7 +35,7 @@ impl AppIcon {
     /// は `.png` 拡張子のエントリを（元より小さければ）中身だけ WebP へ差し替えるため
     /// （W8）、pak/export 経由で読んだ `icon.png` の中身が WebP になっている場合がある
     /// （`noiria_core::assets::decode_image_bytes` と同じマジックバイト判定方針）。
-    pub fn from_optional_png(icon_png: Option<&[u8]>) -> Self {
+    pub(crate) fn from_optional_png(icon_png: Option<&[u8]>) -> Self {
         if let Some(bytes) = icon_png {
             match decode_icon_bytes(bytes) {
                 Ok((w, h, rgba)) => {
@@ -62,7 +62,7 @@ impl AppIcon {
 
     /// 指定サイズへ最近傍リサイズした RGBA を返す（`Pixmap` にリサイズが無いため自前実装。
     /// アイコン程度の小さいサイズ・起動時 1 回だけの用途なので最近傍で十分）。
-    pub fn image(&self, size: u32) -> IconImage {
+    pub(crate) fn image(&self, size: u32) -> IconImage {
         let rgba = nearest_resize(self.src_w, self.src_h, &self.src_rgba, size, size);
         IconImage {
             w: size,
@@ -103,7 +103,7 @@ fn nearest_resize(src_w: u32, src_h: u32, src: &[u8], dst_w: u32, dst_h: u32) ->
 /// クレート境界をまたいで共有する価値より複製の単純さを優先した。
 /// `docs/implementation-notes.md` 2026-07-13 参照）。
 #[cfg(windows)]
-pub fn build_dib_icon_image(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+pub(crate) fn build_dib_icon_image(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(40 + (w * h * 4) as usize);
     out.extend_from_slice(&40u32.to_le_bytes()); // biSize
     out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth

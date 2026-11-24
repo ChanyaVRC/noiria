@@ -30,39 +30,39 @@ const TICK: Duration = Duration::from_millis(16);
 /// 「2026-07-13 headless ロックステップ完全決定論化」参照）。
 const ACK_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub struct HeadlessParams {
-    pub scene: SharedScene,
-    pub input_tx: UnboundedSender<InputEvent>,
-    pub trans_notify: Arc<Notify>,
-    pub user_rx: Receiver<UserEvent>,
-    pub start: Instant,
+pub(crate) struct HeadlessParams {
+    pub(crate) scene: SharedScene,
+    pub(crate) input_tx: UnboundedSender<InputEvent>,
+    pub(crate) trans_notify: Arc<Notify>,
+    pub(crate) user_rx: Receiver<UserEvent>,
+    pub(crate) start: Instant,
     /// `main.rs` が作る仮想クロック（`EngineCtx.clock` と同じインスタンスを共有する）。
     /// このフレームループだけが `advance` を呼んで進める。
-    pub clock: Clock,
+    pub(crate) clock: Clock,
     /// `main.rs` が作るロックステップ同期カウンタ（`EngineCtx.input_sync` と同じ
     /// インスタンスを共有する）。
-    pub input_sync: InputSync,
+    pub(crate) input_sync: InputSync,
     /// `main.rs` が作る tick ドレインバリア用カウンタ（`EngineCtx.tick_sync` と同じ
     /// インスタンスを共有する。`crate::bridge::TickSync` 参照）。
-    pub tick_sync: TickSync,
+    pub(crate) tick_sync: TickSync,
     /// 実際に起動されているエンジンが tsint の場合のみ `true`。tsint 実行時だけ
     /// 本フィールドによるバリアを使う（`TickSync` のドキュメント参照）。V8 は
     /// `pending_waits`（in-flight な仮想 `op_wait` の有無）で別途バリアの要否を
     /// 判定する（`pending_waits` フィールドのドキュメント参照）。
-    pub tick_barrier: bool,
+    pub(crate) tick_barrier: bool,
     /// `main.rs` が作る、V8 専用の `op_wait` 仮想 in-flight カウンタ
     /// （`EngineCtx.pending_waits` と同じインスタンスを共有する。
     /// `crate::bridge::PendingWaits` 参照）。tsint はこれに触れないため常に 0 のまま
     /// （tsint 実行時は `tick_barrier` 側のバリアだけが効く）。
-    pub pending_waits: PendingWaits,
-    pub duration: Duration,
-    pub out_dir: PathBuf,
-    pub width: u32,
-    pub height: u32,
+    pub(crate) pending_waits: PendingWaits,
+    pub(crate) duration: Duration,
+    pub(crate) out_dir: PathBuf,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     /// `--autotest-script` の展開済みステップ。`Some` なら固定振付の代わりにこれを実行する。
-    pub script: Option<Vec<Step>>,
+    pub(crate) script: Option<Vec<Step>>,
     /// `--autotest-fast`: フレーム毎の実時間スリープを省き仮想時間だけ進める（スクリプトモード用）。
-    pub fast: bool,
+    pub(crate) fast: bool,
 }
 
 /// 入力イベント送信直後、スクリプト側が「次の入力待ちへ戻った」ことを ack するまで
@@ -193,7 +193,7 @@ fn step_scene_animations(p: &HeadlessParams, scene: &mut noiria_core::scene::Sce
     scene.settle_finished_tweens(now);
 }
 
-pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
+pub(crate) fn run_headless(mut p: HeadlessParams) -> Result<()> {
     if let Some(steps) = p.script.take() {
         return run_script(p, steps);
     }

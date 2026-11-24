@@ -9,17 +9,17 @@ use std::time::{Duration, Instant};
 use noiria_core::scene::Scene;
 use serde::Serialize;
 
-pub type SharedScene = Arc<Mutex<Scene>>;
+pub(crate) type SharedScene = Arc<Mutex<Scene>>;
 
 /// シーンのロック。別スレッドがロックを握ったまま panic して毒化していても中身を取り出す。描画ループが先に
 /// `PoisonError` で落ちると、本来のエラー（毒化の原因になった panic）が報告されないまま窓だけが消えるため。
-pub fn lock_scene(scene: &SharedScene) -> std::sync::MutexGuard<'_, Scene> {
+pub(crate) fn lock_scene(scene: &SharedScene) -> std::sync::MutexGuard<'_, Scene> {
     scene.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `lock().unwrap()` の毒化の連鎖を断つ `Mutex` 拡張。別スレッドがロックを握ったまま panic しても
 /// 中身を取り出す（`lock_scene` と同じ理由。次に触るスレッドが `PoisonError` で落ちると本当のエラーが埋もれる）。
-pub trait LockExt<T> {
+pub(crate) trait LockExt<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T>;
 }
 
@@ -32,7 +32,7 @@ impl<T> LockExt<T> for std::sync::Mutex<T> {
 /// 描画ループが次に起きるまでの待ち時間。アニメ中は「前回の present の開始時刻から `interval`」を次の期限にする
 /// （present 後に毎回 `interval` 待つと、周期が `interval` + 合成・転送の時間になり 60fps を割る）。
 /// 動いていないときは、描き直しが間引かれていればその期限（`frame_due_in`）、閉じる猶予があればその残りまで。
-pub fn frame_wait(
+pub(crate) fn frame_wait(
     animating: bool,
     interval: std::time::Duration,
     since_present: std::time::Duration,
@@ -57,13 +57,13 @@ pub fn frame_wait(
 /// 描画ループがこの周期に再合成すべきか。動いている間（`animating`）と、動きが終わった直後の 1 周期
 /// （`was_animating`）は描く。終わった周期は `animating` が false で `revision` も変わらないため、これが
 /// 無いと文字送りの最後のグリフ（「…」の 」 など）が次の更新まで画面に出ない。
-pub fn needs_redraw(revision: u64, last_drawn: u64, animating: bool, was_animating: bool) -> bool {
+pub(crate) fn needs_redraw(revision: u64, last_drawn: u64, animating: bool, was_animating: bool) -> bool {
     revision != last_drawn || animating || was_animating
 }
 
 /// メインループへ送るユーザーイベント。
 #[derive(Debug)]
-pub enum UserEvent {
+pub(crate) enum UserEvent {
     /// シーンが変更された。再描画を要求する。
     Redraw,
     SetTitle(String),
@@ -75,7 +75,7 @@ pub enum UserEvent {
 /// その間はチャンネル送信のみで良い。次のポンプで拾われる）。
 /// ヘッドレス (--autotest) ではチャンネルのみ。
 #[derive(Clone)]
-pub enum WakeSink {
+pub(crate) enum WakeSink {
     #[cfg(windows)]
     Win32 {
         tx: crossbeam_channel::Sender<UserEvent>,
@@ -88,7 +88,7 @@ pub enum WakeSink {
 }
 
 impl WakeSink {
-    pub fn send(&self, ev: UserEvent) {
+    pub(crate) fn send(&self, ev: UserEvent) {
         match self {
             #[cfg(windows)]
             WakeSink::Win32 { tx, hwnd, posted } => {
@@ -105,23 +105,23 @@ impl WakeSink {
 /// スクリプトへ渡す入力イベント。JS へは JSON として渡る。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InputEvent {
+pub(crate) struct InputEvent {
     /// "click" | "move" | "wheel" | "key" | "keyup"（keyup は Control/Shift/Enter/Space のみ）
-    pub kind: &'static str,
+    pub(crate) kind: &'static str,
     /// ゲーム座標系 (スケール補正済み)
-    pub x: f64,
-    pub y: f64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
     /// click: "left" | "right" | "middle"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub button: Option<&'static str>,
+    pub(crate) button: Option<&'static str>,
     /// key/keyup: "Enter" | "Escape" | "Control" | "Shift" | " " | 文字。閉じる操作は key:"WindowClose"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    pub(crate) key: Option<String>,
     /// wheel: 上が正
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<f64>,
+    pub(crate) delta: Option<f64>,
     /// アプリ起動からのミリ秒
-    pub t: f64,
+    pub(crate) t: f64,
 }
 
 /// ヘッドレス（`--autotest`）専用: headless.rs のフレームループとスクリプトスレッドの
@@ -144,28 +144,28 @@ struct InputSyncInner {
 }
 
 #[derive(Clone, Default)]
-pub struct InputSync(Arc<InputSyncInner>);
+pub(crate) struct InputSync(Arc<InputSyncInner>);
 
 impl InputSync {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(InputSyncInner::default()))
     }
 
     /// スクリプトスレッド側: 「次の入力待ちへ戻った」ことを記録し、待機中の headless を即座に起こす。
-    pub fn ack(&self) {
+    pub(crate) fn ack(&self) {
         self.0.gen.fetch_add(1, Ordering::SeqCst);
         let _guard = self.0.mu.lock_unpoisoned();
         self.0.cv.notify_all();
     }
 
     /// headless.rs 側: 現在の世代値を読む。
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.0.gen.load(Ordering::SeqCst)
     }
 
     /// headless.rs 側: 世代が `gen_before` より進むまで `timeout` 上限で Condvar 待機する。
     /// 進んだら `true`、タイムアウトしたら `false`。
-    pub fn wait_after(&self, gen_before: u64, timeout: Duration) -> bool {
+    pub(crate) fn wait_after(&self, gen_before: u64, timeout: Duration) -> bool {
         if self.generation() > gen_before {
             return true;
         }
@@ -238,7 +238,7 @@ struct TickSyncInner {
 }
 
 #[derive(Clone, Default)]
-pub struct TickSync(Arc<TickSyncInner>);
+pub(crate) struct TickSync(Arc<TickSyncInner>);
 
 #[derive(Default)]
 struct V8TickState {
@@ -248,7 +248,7 @@ struct V8TickState {
 }
 
 impl TickSync {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(TickSyncInner::default()))
     }
 
@@ -256,7 +256,7 @@ impl TickSync {
     /// [`wait`][crate::headless] 側の目標値として使う）。`Clock::advance()` の
     /// **後**に呼ぶ（型のドキュメント参照。呼び出し順は `headless.rs` を参照し、
     /// 変更しないこと）。V8 は [`request_for`][Self::request_for] を使う。
-    pub fn request(&self) -> u64 {
+    pub(crate) fn request(&self) -> u64 {
         let gen = self.0.requested.fetch_add(1, Ordering::SeqCst) + 1;
         let _g = self.0.req_notify.0.lock_unpoisoned();
         self.0.req_notify.1.notify_all();
@@ -264,20 +264,20 @@ impl TickSync {
     }
 
     /// headless 側: 入力送信やトランジション完了などで tsint の待機ループを即座に起こす。
-    pub fn notify_script(&self) {
+    pub(crate) fn notify_script(&self) {
         self.0.wake_seq.fetch_add(1, Ordering::SeqCst);
         let _g = self.0.req_notify.0.lock_unpoisoned();
         self.0.req_notify.1.notify_all();
     }
 
     /// tsint 側: `notify_script` の現在世代を読む。
-    pub fn wake_generation(&self) -> u64 {
+    pub(crate) fn wake_generation(&self) -> u64 {
         self.0.wake_seq.load(Ordering::SeqCst)
     }
 
     /// tsint 側（ヘッドレス `Intake::Direct` 用）: 新しい tick 要求または `notify_script` が
     /// 届くまで Condvar で待機する（従来の `thread::sleep(1ms)` ポーリングによる遅延を排除）。
-    pub fn wait_for_request_or_wake(&self, seen_req: u64, seen_wake: u64, timeout: Duration) {
+    pub(crate) fn wait_for_request_or_wake(&self, seen_req: u64, seen_wake: u64, timeout: Duration) {
         if self.0.requested.load(Ordering::SeqCst) > seen_req
             || self.0.wake_seq.load(Ordering::SeqCst) > seen_wake
         {
@@ -300,7 +300,7 @@ impl TickSync {
     /// 反応だけで「この tick は完了」と誤認しないため。`op_wait` が単一の
     /// `poll_event_loop` の Pending 検出だけでは正しく検出できないことは実測で確認
     /// 済み。`docs/implementation-notes.md`「2026-07-13 V8 完全決定論化」参照）。
-    pub fn request_for(&self, expected_reactors: i64) -> u64 {
+    pub(crate) fn request_for(&self, expected_reactors: i64) -> u64 {
         let mut state = self.0.v8.lock_unpoisoned();
         let generation = self.0.requested.fetch_add(1, Ordering::SeqCst) + 1;
         state.generation = generation;
@@ -314,7 +314,7 @@ impl TickSync {
     /// スクリプトスレッド側: 最新の要求世代を読む。tsint はこの直後に `Clock::now()`
     /// を読むことで対応する `Clock::advance()` を確実に観測する（型のドキュメント
     /// 参照）。
-    pub fn requested_generation(&self) -> u64 {
+    pub(crate) fn requested_generation(&self) -> u64 {
         self.0.requested.load(Ordering::SeqCst)
     }
 
@@ -323,7 +323,7 @@ impl TickSync {
     /// [`react`][Self::react] を使う（`remaining` を経由せずここを直接呼ぶと
     /// 「全 `op_wait` が反応し終わるまで待つ」保証が壊れるため、V8 からは
     /// 呼ばないこと）。
-    pub fn mark_complete(&self, gen: u64) {
+    pub(crate) fn mark_complete(&self, gen: u64) {
         let prev = self.0.completed.fetch_max(gen, Ordering::SeqCst);
         if gen > prev {
             let _g = self.0.done_notify.0.lock_unpoisoned();
@@ -338,7 +338,7 @@ impl TickSync {
     /// 呼ばれないため、engine-v8 未使用ビルドでは未使用になる（dead_code を
     /// 明示的に許可する）。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn react(&self, gen: u64) {
+    pub(crate) fn react(&self, gen: u64) {
         let complete = {
             let mut state = self.0.v8.lock_unpoisoned();
             if state.generation != gen {
@@ -356,7 +356,7 @@ impl TickSync {
     /// barrier を開けると、その Promise 継続が次の仮想 tick へずれる。外側の
     /// `poll_event_loop` がマイクロタスクを drain するまで反応を保留する。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn defer_react(&self, gen: u64) {
+    pub(crate) fn defer_react(&self, gen: u64) {
         let mut state = self.0.v8.lock_unpoisoned();
         if state.generation != gen {
             return;
@@ -368,13 +368,13 @@ impl TickSync {
     }
 
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn has_deferred_reactors(&self) -> bool {
+    pub(crate) fn has_deferred_reactors(&self) -> bool {
         self.0.deferred_count.load(Ordering::SeqCst) > 0
     }
 
     /// V8 のイベントループが静止した後、期限到達 waiter の保留反応をまとめて適用する。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn flush_deferred(&self) {
+    pub(crate) fn flush_deferred(&self) {
         let complete_generation = {
             let mut state = self.0.v8.lock_unpoisoned();
             let count = std::mem::take(&mut state.deferred);
@@ -388,12 +388,12 @@ impl TickSync {
     }
 
     /// headless 側: 完了世代を読む。
-    pub fn completed_generation(&self) -> u64 {
+    pub(crate) fn completed_generation(&self) -> u64 {
         self.0.completed.load(Ordering::SeqCst)
     }
 
     /// headless 側: `completed_generation() >= target_gen` になるまで `timeout` 上限で Condvar 待機する。
-    pub fn wait_complete(&self, target_gen: u64, timeout: Duration) -> bool {
+    pub(crate) fn wait_complete(&self, target_gen: u64, timeout: Duration) -> bool {
         if self.completed_generation() >= target_gen {
             return true;
         }
@@ -431,11 +431,11 @@ impl TickSync {
 /// —— 既存の tsint 用バリア（`TickSync` + `HeadlessParams::tick_barrier`）の挙動には
 /// 影響しない（`docs/implementation-notes.md`「2026-07-13 V8 完全決定論化」参照）。
 #[derive(Clone, Default)]
-pub struct PendingWaits(Arc<AtomicI64>);
+pub(crate) struct PendingWaits(Arc<AtomicI64>);
 
 /// [`PendingWaits::enter`] が返す RAII ガード。スコープ終了（キャンセル・unwind を含む）で必ず `dec` する。
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-pub struct PendingWaitGuard(PendingWaits);
+pub(crate) struct PendingWaitGuard(PendingWaits);
 
 impl Drop for PendingWaitGuard {
     fn drop(&mut self) {
@@ -444,19 +444,19 @@ impl Drop for PendingWaitGuard {
 }
 
 impl PendingWaits {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(AtomicI64::new(0)))
     }
 
     /// `op_wait`（V8 版）の仮想分岐: 待機開始時にカウントを増やし、drop で確実に減らすガードを返す。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn enter(&self) -> PendingWaitGuard {
+    pub(crate) fn enter(&self) -> PendingWaitGuard {
         self.0.fetch_add(1, Ordering::SeqCst);
         PendingWaitGuard(self.clone())
     }
 
     /// headless 側: 現在の in-flight 数を読む。
-    pub fn get(&self) -> i64 {
+    pub(crate) fn get(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
 }

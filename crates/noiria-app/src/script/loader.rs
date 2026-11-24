@@ -17,7 +17,7 @@ use noiria_core::assets::GameDir;
 
 use crate::script::runtime_modules::RUNTIME_MODULES;
 
-pub struct NoiriaModuleLoader {
+pub(crate) struct NoiriaModuleLoader {
     /// W5: 実読込は `GameDir` に一本化（`file://` はゲームルート相対 `rel` へ変換
     /// してから `GameDir::read_text` を呼ぶ。tsint 側 `NoiriaTsHost` と同構図）。
     game_dir: GameDir,
@@ -34,7 +34,7 @@ pub struct NoiriaModuleLoader {
 }
 
 impl NoiriaModuleLoader {
-    pub fn new(game_dir: GameDir) -> anyhow::Result<Self> {
+    pub(crate) fn new(game_dir: GameDir) -> anyhow::Result<Self> {
         let mut url = ModuleSpecifier::from_directory_path(game_dir.root())
             .map_err(|_| anyhow::anyhow!("ゲームルートを URL に変換できません"))?;
         if !url.path().ends_with('/') {
@@ -50,7 +50,7 @@ impl NoiriaModuleLoader {
         })
     }
 
-    pub fn main_module(&self, rel: &str) -> Result<ModuleSpecifier, JsErrorBox> {
+    pub(crate) fn main_module(&self, rel: &str) -> Result<ModuleSpecifier, JsErrorBox> {
         self.game_root
             .join(rel)
             .map_err(|e| JsErrorBox::generic(e.to_string()))

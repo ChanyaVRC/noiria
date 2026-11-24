@@ -11,7 +11,7 @@ use crate::script::numconv::to_u32;
 use crate::script::util::err;
 
 #[op2]
-pub fn op_text_style(
+pub(crate) fn op_text_style(
     state: &mut OpState,
     id: f64,
     #[serde] style: TextStyleArgs,
@@ -26,7 +26,7 @@ pub fn op_text_style(
 
 #[op2]
 #[serde]
-pub fn op_text_print(
+pub(crate) fn op_text_print(
     state: &mut OpState,
     id: f64,
     #[serde] segments: Vec<TextSegmentArgs>,
@@ -45,7 +45,7 @@ pub fn op_text_print(
 }
 
 #[op2(fast)]
-pub fn op_text_reflow(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_text_reflow(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
         .text_reflow(to_u32(id))
@@ -54,24 +54,24 @@ pub fn op_text_reflow(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
 
 /// リベールを即時完了させる。
 #[op2(fast)]
-pub fn op_text_complete(state: &mut OpState, id: f64) {
+pub(crate) fn op_text_complete(state: &mut OpState, id: f64) {
     state.borrow::<EngineState>().text_complete(to_u32(id));
 }
 
 /// リベールが完了しているか。
 #[op2(fast)]
-pub fn op_text_is_done(state: &mut OpState, id: f64) -> bool {
+pub(crate) fn op_text_is_done(state: &mut OpState, id: f64) -> bool {
     state.borrow::<EngineState>().text_is_done(to_u32(id))
 }
 
 #[op2(fast)]
-pub fn op_text_clear(state: &mut OpState, id: f64) {
+pub(crate) fn op_text_clear(state: &mut OpState, id: f64) {
     state.borrow_mut::<EngineState>().text_clear(to_u32(id));
 }
 
 /// グリフのヒット矩形（リンク選択肢・メニュー行判定用）。
 #[op2]
 #[serde]
-pub fn op_text_rects(state: &mut OpState, id: f64) -> Vec<GlyphRect> {
+pub(crate) fn op_text_rects(state: &mut OpState, id: f64) -> Vec<GlyphRect> {
     state.borrow::<EngineState>().text_rects(to_u32(id))
 }

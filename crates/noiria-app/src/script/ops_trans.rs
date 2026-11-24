@@ -12,18 +12,18 @@ use crate::script::engine_state::{EngineState, TransArgs};
 use crate::script::util::err;
 
 #[op2]
-pub fn op_trans_begin(state: &mut OpState, #[serde] args: TransArgs) -> Result<(), JsErrorBox> {
+pub(crate) fn op_trans_begin(state: &mut OpState, #[serde] args: TransArgs) -> Result<(), JsErrorBox> {
     state.borrow::<EngineState>().trans_begin(args).map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_trans_skip(state: &mut OpState) {
+pub(crate) fn op_trans_skip(state: &mut OpState) {
     state.borrow::<EngineState>().trans_skip();
 }
 
 /// トランジション完了（ページスワップ）まで待つ。
 #[op2]
-pub async fn op_trans_wait(state: Rc<RefCell<OpState>>) {
+pub(crate) async fn op_trans_wait(state: Rc<RefCell<OpState>>) {
     let notify = {
         let state = state.borrow();
         state.borrow::<EngineState>().trans_notify.clone()

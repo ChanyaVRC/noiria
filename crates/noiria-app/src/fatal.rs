@@ -18,16 +18,16 @@ static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SCRIPT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug)]
-pub struct DialogPolicy {
-    pub headless: bool,
-    pub dist_windows: bool,
-    pub no_dialog_env: bool,
+pub(crate) struct DialogPolicy {
+    pub(crate) headless: bool,
+    pub(crate) dist_windows: bool,
+    pub(crate) no_dialog_env: bool,
 }
 
 impl DialogPolicy {
     /// ダイアログを出してよいか。配布ビルド（`dist`）の Windows だけが対象で、それ以外では
     /// stderr + ログのみ（コンソールのある開発ビルドでは端末に出れば足りる）。
-    pub fn should_show_dialog(self) -> bool {
+    pub(crate) fn should_show_dialog(self) -> bool {
         self.dist_windows && !self.headless && !self.no_dialog_env
     }
 }
@@ -41,24 +41,24 @@ fn dialog_allowed() -> bool {
     .should_show_dialog()
 }
 
-pub fn set_headless(headless: bool) {
+pub(crate) fn set_headless(headless: bool) {
     HEADLESS.store(headless, Ordering::SeqCst);
 }
 
 /// スクリプトスレッドの致命終了を記録する（スクリプトスレッド側から呼ぶ）。ウィンドウは
 /// 続く `UserEvent::Quit` で閉じ、メインスレッドが `take_script_error` で拾って報告する
 /// （ダイアログをスクリプトスレッドから出すと、閉じかけのウィンドウと競合するため）。
-pub fn record_script_error(msg: String) {
+pub(crate) fn record_script_error(msg: String) {
     log::error!("スクリプト実行エラー: {msg}");
     *SCRIPT_ERROR.lock_unpoisoned() = Some(msg);
 }
 
-pub fn take_script_error() -> Option<String> {
+pub(crate) fn take_script_error() -> Option<String> {
     SCRIPT_ERROR.lock_unpoisoned().take()
 }
 
 /// `catch_unwind` で捕まえた panic ペイロードの文字列化。
-pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     let msg = payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
@@ -68,7 +68,7 @@ pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// 致命エラーを報告する: ログ + stderr、許可されていれば `MessageBoxW`。
-pub fn report(title: &str, message: &str) {
+pub(crate) fn report(title: &str, message: &str) {
     log::error!("{title}: {message}");
     let _ = writeln!(std::io::stderr(), "Error: {title}: {message}");
     if dialog_allowed() {
@@ -104,7 +104,7 @@ fn message_box(_title: &str, _text: &str) {}
 
 /// panic をログ・stderr・ダイアログへ出すフックを入れる。既定フック（stderr への
 /// バックトレース）も維持する。
-pub fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default(info);

@@ -89,7 +89,7 @@ fn set_client_size(hwnd: HWND, w: i32, h: i32) {
 }
 
 /// ドライバスレッドを起動する。スクリプトが終わったら `UserEvent::Quit` で描画ループを終わらせる。
-pub fn spawn(
+pub(crate) fn spawn(
     hwnd_slot: Arc<AtomicIsize>,
     user_tx: crossbeam_channel::Sender<UserEvent>,
     start: Instant,

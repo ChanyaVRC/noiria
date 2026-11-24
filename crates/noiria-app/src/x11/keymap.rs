@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Result};
 
-pub struct Keymap {
+pub(crate) struct Keymap {
     min_keycode: u8,
     keysyms_per_keycode: u8,
     keysyms: Vec<u32>,
@@ -15,7 +15,7 @@ impl Keymap {
     /// column が keysyms_per_keycode を超える場合は最後の列にクランプする。
     /// 値が 0（NoSymbol）で column>=1 の場合は列 0 にフォールバックする
     /// （X11 の慣例: シフト列が未定義なら無シフト値を使う）。
-    pub fn keysym(&self, keycode: u8, column: usize) -> u32 {
+    pub(crate) fn keysym(&self, keycode: u8, column: usize) -> u32 {
         let k = self.keysyms_per_keycode as usize;
         if k == 0 || keycode < self.min_keycode {
             return 0;
@@ -34,7 +34,7 @@ impl Keymap {
 
 /// GetKeyboardMapping リプライ（`proto::XConn::send_request_and_wait` が返す
 /// 生バイト列、32 バイトヘッダ込み）をパースする。
-pub fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
+pub(crate) fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
     if reply.len() < 32 {
         bail!("GetKeyboardMapping リプライが短すぎます");
     }
@@ -58,7 +58,7 @@ pub fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
 
 const KS_BACKSPACE: u32 = 0xFF08;
 const KS_TAB: u32 = 0xFF09;
-pub const KS_RETURN: u32 = 0xFF0D;
+pub(crate) const KS_RETURN: u32 = 0xFF0D;
 const KS_ESCAPE: u32 = 0xFF1B;
 const KS_CONTROL_L: u32 = 0xFFE3;
 const KS_CONTROL_R: u32 = 0xFFE4;
@@ -82,7 +82,7 @@ const KS_F7: u32 = 0xFFC4;
 const KS_F8: u32 = 0xFFC5;
 const KS_F9: u32 = 0xFFC6;
 const KS_F10: u32 = 0xFFC7;
-pub const KS_F11: u32 = 0xFFC8;
+pub(crate) const KS_F11: u32 = 0xFFC8;
 const KS_F12: u32 = 0xFFC9;
 const KS_SHIFT_L: u32 = 0xFFE1;
 const KS_SHIFT_R: u32 = 0xFFE2;
@@ -90,7 +90,7 @@ const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
 
 /// keysym → `InputEvent.key` 文字列。win32.rs の WM_KEYDOWN/WM_CHAR 送出集合
 /// と同じ結果を返す。非対応 keysym は None。
-pub fn to_input_key(keysym: u32) -> Option<String> {
+pub(crate) fn to_input_key(keysym: u32) -> Option<String> {
     match keysym {
         KS_BACKSPACE => Some("Backspace".to_string()),
         KS_TAB => Some("Tab".to_string()),

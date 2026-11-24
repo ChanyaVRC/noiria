@@ -20,11 +20,11 @@ use crate::bridge::LockExt;
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// 現在ログの書き込み先（致命エラーダイアログで案内する）。
-pub fn log_path() -> Option<PathBuf> {
+pub(crate) fn log_path() -> Option<PathBuf> {
     LOG_PATH.lock_unpoisoned().clone()
 }
 
-pub struct FileLogger {
+pub(crate) struct FileLogger {
     file: Mutex<Option<File>>,
     level: LevelFilter,
 }
@@ -51,7 +51,7 @@ impl FileLogger {
 
     /// `game_id` が確定した後に呼ぶ: 以後のログをセーブディレクトリの `noiria.log` に切り替える。
     /// 切り替えに失敗した場合は exe 隣接ログのまま続行する（呼び出し元は結果を無視してよい）。
-    pub fn switch_to_game_log(&self, game_id: &str) {
+    pub(crate) fn switch_to_game_log(&self, game_id: &str) {
         let Ok(dir) = noiria_core::savedata::save_dir(game_id) else {
             return;
         };
@@ -107,7 +107,7 @@ impl Log for FileLogger {
 
 /// ロガーを初期化してグローバル登録する。レベルは環境変数 `NOIRIA_LOG`
 /// （`error`/`warn`/`info`/`debug`/`trace`、既定 `warn`）。
-pub fn init() -> &'static FileLogger {
+pub(crate) fn init() -> &'static FileLogger {
     let level = std::env::var("NOIRIA_LOG")
         .ok()
         .and_then(|s| s.parse::<LevelFilter>().ok())

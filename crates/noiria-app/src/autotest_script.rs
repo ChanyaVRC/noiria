@@ -20,7 +20,7 @@ use anyhow::{bail, Result};
 const MAX_STEPS: usize = 2_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Step {
+pub(crate) enum Step {
     Wait(u64),
     Move(f64, f64),
     Click(f64, f64, Button),
@@ -30,7 +30,7 @@ pub enum Step {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
+pub(crate) enum Button {
     Left,
     Right,
 }
@@ -179,7 +179,7 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
 }
 
 /// DSL を展開済みステップ列へ変換する。エラーは `行番号: 内容` 形式。
-pub fn parse(text: &str) -> Result<Vec<Step>> {
+pub(crate) fn parse(text: &str) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let toks = tokenize(line);
@@ -199,14 +199,14 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
 /// 仮想時間駆動の実行状態機械。`poll` は「いま実行すべき次のステップ」を 1 つずつ返し、
 /// `Wait` に当たると以降の `poll` は期限まで `None` を返す。副作用（イベント送信・撮影）は
 /// 呼び出し側（`headless.rs`）が行う。
-pub struct Runner {
+pub(crate) struct Runner {
     steps: Vec<Step>,
     pc: usize,
     resume_at_ms: u64,
 }
 
 impl Runner {
-    pub fn new(steps: Vec<Step>) -> Self {
+    pub(crate) fn new(steps: Vec<Step>) -> Self {
         Self {
             steps,
             pc: 0,
@@ -214,11 +214,11 @@ impl Runner {
         }
     }
 
-    pub fn finished(&self, now_ms: u64) -> bool {
+    pub(crate) fn finished(&self, now_ms: u64) -> bool {
         self.pc >= self.steps.len() && now_ms >= self.resume_at_ms
     }
 
-    pub fn poll(&mut self, now_ms: u64) -> Option<Step> {
+    pub(crate) fn poll(&mut self, now_ms: u64) -> Option<Step> {
         if now_ms < self.resume_at_ms {
             return None;
         }

@@ -7,15 +7,15 @@
 
 /// クライアント領域内でゲームフレームを表示する矩形（クライアント座標、px）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Viewport {
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-    pub h: u32,
+pub(crate) struct Viewport {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
 }
 
 /// アスペクト比を保って `client` に収まる最大の矩形を中央寄せで返す（レターボックス）。
-pub fn fit(client_w: u32, client_h: u32, game_w: u32, game_h: u32) -> Viewport {
+pub(crate) fn fit(client_w: u32, client_h: u32, game_w: u32, game_h: u32) -> Viewport {
     let (cw, ch) = (client_w.max(1) as u64, client_h.max(1) as u64);
     let (gw, gh) = (game_w.max(1) as u64, game_h.max(1) as u64);
     let (w, h) = if cw * gh <= ch * gw {
@@ -35,7 +35,7 @@ impl Viewport {
     /// クライアント座標 → ゲーム（論理）座標。レターボックスの黒帯上の座標はゲーム範囲の外
     /// （負値や `game_w` 超え）になる。クランプしないのは、黒帯のクリックが端にある UI
     /// （画面下端のメッセージ窓内の選択肢など）の誤爆にならないようにするため。
-    pub fn to_game(self, px: f64, py: f64, game_w: u32, game_h: u32) -> (f64, f64) {
+    pub(crate) fn to_game(self, px: f64, py: f64, game_w: u32, game_h: u32) -> (f64, f64) {
         let w = self.w.max(1) as f64;
         let h = self.h.max(1) as f64;
         (
@@ -48,7 +48,7 @@ impl Viewport {
 /// 起動時のクライアントサイズ。`dpi/96` 倍（非整数倍も可）を基本とし、`max_*`
 /// （作業領域からウィンドウ枠を引いた、収まる最大のクライアントサイズ）を超える場合は
 /// アスペクト比を保って縮める。
-pub fn initial_client_size(
+pub(crate) fn initial_client_size(
     game_w: u32,
     game_h: u32,
     dpi: u32,
@@ -68,7 +68,7 @@ pub fn initial_client_size(
 /// クライアント領域 (`cw`x`ch`) のうちゲーム領域 `vp` の外側（黒く塗る帯）。左・右・上・下の順で、幅か高さが 0 の帯は含めない。
 /// 各辺を独立に判定する（1281x720 のクライアントに 1280x720 を出すと、余りは右の 1px だけで `vp.x` は 0 になる）。
 #[cfg(any(windows, test))]
-pub fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, i32, i32)> {
+pub(crate) fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, i32, i32)> {
     let (cw, ch) = (cw as i32, ch as i32);
     let (right, bottom) = (vp.x + vp.w as i32, vp.y + vp.h as i32);
     [
@@ -90,16 +90,16 @@ fn scale_threads() -> usize {
 /// 表示サイズへ拡大した 1 フレームのキャッシュ。同じ (フレーム世代, 出力サイズ) の再表示（Win32 の WM_PAINT、
 /// X11 の Expose / ConfigureNotify）では拡大し直さない。拡大は `noiria_core::scale::scale_bilinear`（Win32/X11 共通）。
 #[derive(Default)]
-pub struct ScaleCache {
+pub(crate) struct ScaleCache {
     buf: Vec<u32>,
     key: Option<(u64, u32, u32)>,
     /// 拡大を実際に行った回数（キャッシュが効いているかのテスト用）。
-    pub scales: u32,
+    pub(crate) scales: u32,
 }
 
 impl ScaleCache {
     /// `src`（`sw`x`sh`、世代 `generation`）を `dw`x`dh` へ拡大したものを返す。同サイズなら `src` そのもの。
-    pub fn get<'a>(&'a mut self, src: &'a [u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> &'a [u32] {
+    pub(crate) fn get<'a>(&'a mut self, src: &'a [u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> &'a [u32] {
         if (sw, sh) == (dw, dh) || sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw as usize * sh as usize {
             return src;
         }
@@ -125,23 +125,23 @@ impl ScaleCache {
 /// 拡大したフレームを黒帯つきの `dw`x`dh` 全面バッファに置いたもの（X11 のようにサーバ側拡縮・帯塗りが無い経路用）。
 /// 出力全体のゼロ埋めはクライアントサイズが変わったときだけ行い、同じ (世代, サイズ) の再表示は何もしない。
 #[derive(Default)]
-pub struct LetterboxCache {
+pub(crate) struct LetterboxCache {
     scaled: ScaleCache,
     dst: Vec<u32>,
     dims: (u32, u32),
     key: Option<(u64, u32, u32)>,
     /// 出力全体をゼロ埋めした回数（テスト用）。
-    pub zero_fills: u32,
+    pub(crate) zero_fills: u32,
 }
 
 impl LetterboxCache {
     #[cfg(test)]
-    pub fn scales(&self) -> u32 {
+    pub(crate) fn scales(&self) -> u32 {
         self.scaled.scales
     }
 
     /// `src`（`sw`x`sh`、世代 `generation`）をレターボックス付きで `dw`x`dh` に置いたバッファと、ゲーム領域を返す。
-    pub fn get(&mut self, src: &[u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> (&[u32], Viewport) {
+    pub(crate) fn get(&mut self, src: &[u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> (&[u32], Viewport) {
         let vp = fit(dw, dh, sw, sh);
         let key = (generation, dw, dh);
         if self.key == Some(key) {
@@ -169,7 +169,7 @@ impl LetterboxCache {
 
 /// `LetterboxCache` を使い捨てで使う版（テスト用）。
 #[cfg(test)]
-pub fn blit_letterboxed(src: &[u32], sw: u32, sh: u32, dst: &mut Vec<u32>, dw: u32, dh: u32) -> Viewport {
+pub(crate) fn blit_letterboxed(src: &[u32], sw: u32, sh: u32, dst: &mut Vec<u32>, dw: u32, dh: u32) -> Viewport {
     let mut cache = LetterboxCache::default();
     let (px, vp) = cache.get(src, 0, sw, sh, dw, dh);
     dst.clear();

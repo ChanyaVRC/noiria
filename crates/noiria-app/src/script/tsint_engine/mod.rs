@@ -101,7 +101,7 @@ impl ModuleHost for NoiriaTsHost {
 
 /// スクリプトスレッドを起動する。スクリプト終了（正常/異常とも）でメインループへ Quit を送る
 /// （V8 版 `script::spawn` と同じ契約）。
-pub fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
+pub(crate) fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("noiria-script-tsint".into())
         .spawn(move || {

@@ -35,19 +35,19 @@ const MOD1_MASK: u16 = 0x8;
 
 /// メインメッセージループの引数一式（win32.rs の `WindowedParams` と同型、
 /// `hwnd_slot` は無し。`WakeSink::Channel` がそのまま起床に使えるため）。
-pub struct WindowedParams {
-    pub title: String,
-    pub game_w: u32,
-    pub game_h: u32,
-    pub scene: SharedScene,
-    pub input_tx: UnboundedSender<InputEvent>,
-    pub trans_notify: Arc<Notify>,
-    pub start: Instant,
-    pub user_rx: crossbeam_channel::Receiver<UserEvent>,
+pub(crate) struct WindowedParams {
+    pub(crate) title: String,
+    pub(crate) game_w: u32,
+    pub(crate) game_h: u32,
+    pub(crate) scene: SharedScene,
+    pub(crate) input_tx: UnboundedSender<InputEvent>,
+    pub(crate) trans_notify: Arc<Notify>,
+    pub(crate) start: Instant,
+    pub(crate) user_rx: crossbeam_channel::Receiver<UserEvent>,
     /// ウィンドウ/タスクバーアイコン（ゲーム側 icon.png、無ければエンジン既定）。
-    pub icon: AppIcon,
+    pub(crate) icon: AppIcon,
     /// false ならウィンドウを一切可視化しない（テスト用）。
-    pub visible: bool,
+    pub(crate) visible: bool,
 }
 
 /// セットアップ完了後に必要になる ID 一式。
@@ -336,7 +336,7 @@ fn toggle_fullscreen(c: &mut proto::XConn, ids: &Ids, setup: &conn::Setup) {
 
 /// 通常起動のメッセージループ。win32.rs と同じ構造（イベントドレイン →
 /// UserEvent ドレイン → トランジション/合成/present → 次イベントまで待機）。
-pub fn run_windowed(p: WindowedParams) -> Result<()> {
+pub(crate) fn run_windowed(p: WindowedParams) -> Result<()> {
     let (mut c, setup, ids, km, init_size) = setup(&p)?;
 
     let (x_tx, x_rx) = crossbeam_channel::unbounded::<proto::XEvent>();

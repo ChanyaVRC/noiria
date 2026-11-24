@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 #[derive(Clone)]
-pub enum Clock {
+pub(crate) enum Clock {
     /// 通常実行（windowed）およびテスト。`Instant::now()` をそのまま返す
     /// （既存挙動と完全に同じ)。
     Real,
@@ -51,7 +51,7 @@ pub enum Clock {
 
 impl Clock {
     /// `base` を起点とする仮想クロックを作る（`nanos` = 0 から開始）。
-    pub fn new_virtual(base: Instant) -> Self {
+    pub(crate) fn new_virtual(base: Instant) -> Self {
         let (tx, _rx) = watch::channel(0u64);
         Clock::Virtual {
             base,
@@ -65,11 +65,11 @@ impl Clock {
     /// 選ぶのに使う（`docs/implementation-notes.md`「2026-07-13 headless
     /// ロックステップ完全決定論化」参照）。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn is_real(&self) -> bool {
+    pub(crate) fn is_real(&self) -> bool {
         matches!(self, Clock::Real)
     }
 
-    pub fn now(&self) -> Instant {
+    pub(crate) fn now(&self) -> Instant {
         match self {
             Clock::Real => Instant::now(),
             Clock::Virtual { base, nanos, .. } => {
@@ -81,7 +81,7 @@ impl Clock {
     /// headless.rs のフレームループだけが呼ぶ想定。`Clock::Real` では no-op。
     /// `nanos` を進めた直後に `tx` へ新値を `send` し、`op_wait`（V8 版）の
     /// 仮想分岐で `rx.changed()` を待っているタスクを起こす。
-    pub fn advance(&self, step: Duration) {
+    pub(crate) fn advance(&self, step: Duration) {
         if let Clock::Virtual { nanos, tx, .. } = self {
             let new_nanos =
                 nanos.fetch_add(step.as_nanos() as u64, Ordering::Relaxed) + step.as_nanos() as u64;
@@ -96,7 +96,7 @@ impl Clock {
     /// `subscribe()` は現在値を既読として始めるため、生成前の `advance()` を新しい
     /// `op_wait` が現在世代の通知として誤消費しない。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn watch_rx(&self) -> watch::Receiver<u64> {
+    pub(crate) fn watch_rx(&self) -> watch::Receiver<u64> {
         match self {
             Clock::Real => watch::channel(0u64).1,
             Clock::Virtual { tx, .. } => tx.subscribe(),

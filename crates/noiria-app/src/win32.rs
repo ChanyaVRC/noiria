@@ -78,24 +78,24 @@ const CLASS_NAME: &str = "NoiriaWindowClass\0";
 const KEY_PREV_STATE: isize = 1 << 30;
 
 /// メインメッセージループの引数一式。
-pub struct WindowedParams {
-    pub title: String,
-    pub game_w: u32,
-    pub game_h: u32,
-    pub scene: SharedScene,
-    pub input_tx: UnboundedSender<InputEvent>,
-    pub trans_notify: Arc<Notify>,
-    pub start: Instant,
-    pub user_rx: crossbeam_channel::Receiver<UserEvent>,
+pub(crate) struct WindowedParams {
+    pub(crate) title: String,
+    pub(crate) game_w: u32,
+    pub(crate) game_h: u32,
+    pub(crate) scene: SharedScene,
+    pub(crate) input_tx: UnboundedSender<InputEvent>,
+    pub(crate) trans_notify: Arc<Notify>,
+    pub(crate) start: Instant,
+    pub(crate) user_rx: crossbeam_channel::Receiver<UserEvent>,
     /// ウィンドウ生成後に hwnd (isize 化) を格納する。`WakeSink::Win32` が
     /// スクリプトスレッドからの `PostMessageW` 起床先として参照する。
-    pub hwnd_slot: Arc<AtomicIsize>,
+    pub(crate) hwnd_slot: Arc<AtomicIsize>,
     /// `WakeSink::Win32` と同じ「起こし投函済み」フラグ（窓ごと）。
-    pub wake_posted: Arc<AtomicBool>,
+    pub(crate) wake_posted: Arc<AtomicBool>,
     /// ウィンドウ/タスクバーアイコン（ゲーム側 icon.png、無ければエンジン既定）。
-    pub icon: AppIcon,
+    pub(crate) icon: AppIcon,
     /// false ならウィンドウを一切可視化しない（テスト用）。
-    pub visible: bool,
+    pub(crate) visible: bool,
 }
 
 /// フルスクリーンへ入る前のウィンドウ状態（復帰用）。
@@ -1146,7 +1146,7 @@ fn tick(hwnd: HWND, shared: &WindowShared) -> Duration {
 /// シーン合成/present → `MsgWaitForMultipleObjects` で次のイベントまで待機、
 /// を繰り返す。WM_QUIT (WM_DESTROY 経由、または `UserEvent::Quit` / 閉じる猶予切れからの
 /// `DestroyWindow`) で終了する。
-pub fn run_windowed(p: WindowedParams) -> Result<()> {
+pub(crate) fn run_windowed(p: WindowedParams) -> Result<()> {
     // 既定のタイマー分解能は約 15.6ms で、16ms の待ちが 2 周期（約 31ms）に伸びる。スクリプトスレッドの sleep も同様。
     // SAFETY: プロセス全体のタイマー分解能の要求（`timeEndPeriod(1)` と対。ポインタ引数なし）。
     unsafe {

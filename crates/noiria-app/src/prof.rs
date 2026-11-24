@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 
 /// `NOIRIA_PROF=2` なら、可視でないウィンドウでも拡大転送の実コストが出るよう、同じ転送をメモリ DC へも行って測る
 /// （不可視ウィンドウへの `StretchDIBits` はクリップされて実際には何もしない）。
-pub fn deep() -> bool {
+pub(crate) fn deep() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("NOIRIA_PROF").is_some_and(|v| v == "2"))
 }
 
-pub fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("NOIRIA_PROF").is_some_and(|v| v != "0"))
 }
@@ -28,7 +28,7 @@ fn ms(d: Duration) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn frame(
+pub(crate) fn frame(
     start: Instant,
     compose: Duration,
     convert: Duration,
@@ -63,6 +63,6 @@ pub fn frame(
 }
 
 /// 入力などの目印（計測スクリプトの `mark` 用）。
-pub fn mark(start: Instant, label: &str) {
+pub(crate) fn mark(start: Instant, label: &str) {
     log::info!("[PROF] t={:.1} mark={}", ms(start.elapsed()), label);
 }

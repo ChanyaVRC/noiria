@@ -18,63 +18,63 @@ fn rounded(n: f64) -> f64 {
     }
 }
 
-pub fn to_u8(n: f64) -> u8 {
+pub(crate) fn to_u8(n: f64) -> u8 {
     rounded(n) as u8
 }
 
-pub fn to_u32(n: f64) -> u32 {
+pub(crate) fn to_u32(n: f64) -> u32 {
     rounded(n) as u32
 }
 
-pub fn to_i32(n: f64) -> i32 {
+pub(crate) fn to_i32(n: f64) -> i32 {
     rounded(n) as i32
 }
 
 /// 座標の絶対値の上限。`noiria_core::scene` の tween 補間は `to - from` を i32 で計算するので、
 /// 両端がこの範囲なら差が i32 に収まる（範囲外の座標は意味を持たない）。
-pub const COORD_MAX: i32 = (1 << 30) - 1;
+pub(crate) const COORD_MAX: i32 = (1 << 30) - 1;
 
 /// 位置（x/y）。`to_i32` と同じ規則で、さらに ±`COORD_MAX` へ飽和する。
-pub fn to_coord(n: f64) -> i32 {
+pub(crate) fn to_coord(n: f64) -> i32 {
     to_i32(n).clamp(-COORD_MAX, COORD_MAX)
 }
 
 /// 時間（ms）。負は 0、上限は `u32::MAX`。
-pub fn to_time_ms(n: f64) -> u64 {
+pub(crate) fn to_time_ms(n: f64) -> u64 {
     u64::from(to_u32(n))
 }
 
 /// `sys.wait` 用。NaN・負は 0、`+Infinity` や巨大値は上限（`u32::MAX` ms）へ打ち切る
 /// （`Duration::from_secs_f64` は無限大・約 1.8e22 超で panic する）。
-pub fn wait_duration(ms: f64) -> Duration {
+pub(crate) fn wait_duration(ms: f64) -> Duration {
     let ms = if ms.is_nan() { 0.0 } else { ms };
     Duration::from_millis(ms.round().clamp(0.0, u32::MAX as f64) as u64)
 }
 
 // ---- serde（V8 の構造体フィールド）: `#[serde(deserialize_with = "...")]` で使う ----
 
-pub fn de_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+pub(crate) fn de_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     f64::deserialize(d).map(to_u32)
 }
 
-pub fn de_time_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+pub(crate) fn de_time_ms<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     f64::deserialize(d).map(to_time_ms)
 }
 
-pub fn de_opt_u8<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
+pub(crate) fn de_opt_u8<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_u8))
 }
 
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-pub fn de_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn de_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_u32))
 }
 
-pub fn de_opt_coord<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
+pub(crate) fn de_opt_coord<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_coord))
 }
 
-pub fn de_opt_i32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
+pub(crate) fn de_opt_i32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i32>, D::Error> {
     Ok(Option::<f64>::deserialize(d)?.map(to_i32))
 }
 

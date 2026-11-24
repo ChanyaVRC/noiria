@@ -2,6 +2,6 @@
 
 use deno_error::JsErrorBox;
 
-pub fn err(e: impl std::fmt::Display) -> JsErrorBox {
+pub(crate) fn err(e: impl std::fmt::Display) -> JsErrorBox {
     JsErrorBox::generic(e.to_string())
 }
