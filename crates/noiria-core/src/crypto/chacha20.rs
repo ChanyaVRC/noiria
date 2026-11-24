@@ -40,25 +40,27 @@ fn quarter_round_rows(r0: &mut [u32; 4], r1: &mut [u32; 4], r2: &mut [u32; 4], r
 
 #[inline(always)]
 fn init_base(key: &[u8; 32], nonce: &[u8; 12]) -> [[u32; 4]; 4] {
+    let (k, _) = key.as_chunks::<4>();
+    let (n, _) = nonce.as_chunks::<4>();
     [
         CONSTANTS,
         [
-            u32::from_le_bytes(key[0..4].try_into().unwrap()),
-            u32::from_le_bytes(key[4..8].try_into().unwrap()),
-            u32::from_le_bytes(key[8..12].try_into().unwrap()),
-            u32::from_le_bytes(key[12..16].try_into().unwrap()),
+            u32::from_le_bytes(k[0]),
+            u32::from_le_bytes(k[1]),
+            u32::from_le_bytes(k[2]),
+            u32::from_le_bytes(k[3]),
         ],
         [
-            u32::from_le_bytes(key[16..20].try_into().unwrap()),
-            u32::from_le_bytes(key[20..24].try_into().unwrap()),
-            u32::from_le_bytes(key[24..28].try_into().unwrap()),
-            u32::from_le_bytes(key[28..32].try_into().unwrap()),
+            u32::from_le_bytes(k[4]),
+            u32::from_le_bytes(k[5]),
+            u32::from_le_bytes(k[6]),
+            u32::from_le_bytes(k[7]),
         ],
         [
             0,
-            u32::from_le_bytes(nonce[0..4].try_into().unwrap()),
-            u32::from_le_bytes(nonce[4..8].try_into().unwrap()),
-            u32::from_le_bytes(nonce[8..12].try_into().unwrap()),
+            u32::from_le_bytes(n[0]),
+            u32::from_le_bytes(n[1]),
+            u32::from_le_bytes(n[2]),
         ],
     ]
 }
@@ -80,12 +82,7 @@ fn block_rows(base: &[[u32; 4]; 4], counter: u32) -> [[u32; 4]; 4] {
         r2 = [r2[2], r2[3], r2[0], r2[1]];
         r3 = [r3[1], r3[2], r3[3], r3[0]];
     }
-    [
-        add4(r0, i0),
-        add4(r1, i1),
-        add4(r2, i2),
-        add4(r3, i3),
-    ]
+    [add4(r0, i0), add4(r1, i1), add4(r2, i2), add4(r3, i3)]
 }
 
 #[inline(always)]
@@ -138,12 +135,9 @@ pub fn apply_keystream(key: &[u8; 32], nonce: &[u8; 12], byte_offset: u64, data:
     let (chunks, rest) = data[pos..].as_chunks_mut::<64>();
     for chunk in chunks {
         let rows = block_rows(&base, counter);
-        for (r, row) in rows.iter().enumerate() {
-            for (c, &ks_w) in row.iter().enumerate() {
-                let p = (r * 4 + c) * 4;
-                let w = u32::from_le_bytes(chunk[p..p + 4].try_into().unwrap()) ^ ks_w;
-                chunk[p..p + 4].copy_from_slice(&w.to_le_bytes());
-            }
+        let (words, _) = chunk.as_chunks_mut::<4>();
+        for (dst, &ks_w) in words.iter_mut().zip(rows.as_flattened()) {
+            *dst = (u32::from_le_bytes(*dst) ^ ks_w).to_le_bytes();
         }
         counter = counter.wrapping_add(1);
     }

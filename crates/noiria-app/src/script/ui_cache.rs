@@ -23,14 +23,14 @@ use crate::bridge::LockExt;
 
 /// ゲーム資産の画像を読み、デコード後の寸法を `checked_dims` で検査して返す
 /// （巨大な寸法の画像でレイヤ・縮小・合成が確保に失敗して abort するのを防ぐ）。
-pub fn load_image_checked(game_dir: &GameDir, path: &str) -> Result<Pixmap, String> {
+pub(crate) fn load_image_checked(game_dir: &GameDir, path: &str) -> Result<Pixmap, String> {
     let pixmap = game_dir.load_image(path).map_err(|e| e.to_string())?;
     checked_dims(pixmap.width, pixmap.height).map_err(|e| format!("{path}: {e}"))?;
     Ok(pixmap)
 }
 
 /// バイト上限付き LRU に載せる値の占有バイト数を返すトレイト。
-pub trait ByteSized {
+pub(crate) trait ByteSized {
     fn byte_size(&self) -> usize;
 }
 
@@ -47,7 +47,7 @@ impl ByteSized for Arc<Vec<u8>> {
 }
 
 /// 総バイト数で上限を持つ汎用 LRU（エントリ数は数十個なので、追い出しは最古の走査で足りる）。
-pub struct ByteLru<K: Eq + Hash + Clone, V: Clone + ByteSized> {
+pub(crate) struct ByteLru<K: Eq + Hash + Clone, V: Clone + ByteSized> {
     map: HashMap<K, (V, u64)>,
     bytes: usize,
     cap_bytes: usize,
@@ -55,7 +55,7 @@ pub struct ByteLru<K: Eq + Hash + Clone, V: Clone + ByteSized> {
 }
 
 impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
-    pub fn new(cap_bytes: usize) -> Self {
+    pub(crate) fn new(cap_bytes: usize) -> Self {
         Self {
             map: HashMap::new(),
             bytes: 0,
@@ -64,7 +64,7 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
         }
     }
 
-    pub fn get<Q>(&mut self, k: &Q) -> Option<V>
+    pub(crate) fn get<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
@@ -77,7 +77,7 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
         })
     }
 
-    pub fn insert(&mut self, k: K, v: V) {
+    pub(crate) fn insert(&mut self, k: K, v: V) {
         let sz = v.byte_size();
         if let Some((old, _)) = self.map.remove(&k) {
             self.bytes -= old.byte_size();
@@ -89,7 +89,11 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
         self.map.insert(k, (v, self.tick));
         self.bytes += sz;
         while self.bytes > self.cap_bytes {
-            let Some(oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone())
+            let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
             else {
                 break;
             };
@@ -99,7 +103,7 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
         }
     }
 
-    pub fn remove_where(&mut self, f: impl Fn(&K) -> bool) {
+    pub(crate) fn remove_where(&mut self, f: impl Fn(&K) -> bool) {
         let doomed: Vec<K> = self.map.keys().filter(|k| f(k)).cloned().collect();
         for k in doomed {
             if let Some((p, _)) = self.map.remove(&k) {
@@ -109,64 +113,64 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
 
     #[cfg(test)]
-    pub fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         self.bytes
     }
 }
 
-pub type PixmapLru<K> = ByteLru<K, Arc<Pixmap>>;
-pub type RuleLru = ByteLru<RuleKey, Arc<Vec<u8>>>;
+pub(crate) type PixmapLru<K> = ByteLru<K, Arc<Pixmap>>;
+pub(crate) type RuleLru = ByteLru<RuleKey, Arc<Vec<u8>>>;
 
 /// `layer.panel` の数値列（`PanelSpec::from_slice` が読むもの）を鍵にする。
-pub type PanelKey = Vec<u64>;
+pub(crate) type PanelKey = Vec<u64>;
 
-pub fn panel_key(spec: &[f64]) -> PanelKey {
+pub(crate) fn panel_key(spec: &[f64]) -> PanelKey {
     spec.iter().map(|v| v.to_bits()).collect()
 }
 
 /// サムネイルの鍵: スロット名・表示寸法（0 = 規定寸法）・ファイルの更新時刻(ns)と長さ。
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ThumbKey {
-    pub slot: String,
-    pub w: u32,
-    pub h: u32,
-    pub mtime_ns: u128,
-    pub len: u64,
+pub(crate) struct ThumbKey {
+    pub(crate) slot: String,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) mtime_ns: u128,
+    pub(crate) len: u64,
 }
 
 /// 縮小済み画像（ギャラリーのサムネイル）の鍵: パス・寸法。ゲーム資産は実行中に変わらない。
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ScaledKey {
-    pub path: String,
-    pub w: u32,
-    pub h: u32,
+pub(crate) struct ScaledKey {
+    pub(crate) path: String,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
 }
 
 /// ユニバーサルトランジションのルール輝度プレーン用の鍵: パス・シーン寸法。
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct RuleKey {
-    pub path: String,
-    pub w: u32,
-    pub h: u32,
+pub(crate) struct RuleKey {
+    pub(crate) path: String,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
 }
 
-pub const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
+pub(crate) const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
 
-pub struct UiCaches {
-    pub panels: PixmapLru<PanelKey>,
-    pub thumbs: PixmapLru<ThumbKey>,
-    pub scaled: PixmapLru<ScaledKey>,
-    pub images: PixmapLru<String>,
-    pub rules: RuleLru,
+pub(crate) struct UiCaches {
+    pub(crate) panels: PixmapLru<PanelKey>,
+    pub(crate) thumbs: PixmapLru<ThumbKey>,
+    pub(crate) scaled: PixmapLru<ScaledKey>,
+    pub(crate) images: PixmapLru<String>,
+    pub(crate) rules: RuleLru,
 }
 
 impl UiCaches {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             panels: PixmapLru::new(64 << 20),
             thumbs: PixmapLru::new(16 << 20),
@@ -176,14 +180,17 @@ impl UiCaches {
         }
     }
 
-    pub fn forget_slot(&mut self, slot: &str) {
+    pub(crate) fn forget_slot(&mut self, slot: &str) {
         self.thumbs.remove_where(|k| k.slot == slot);
     }
 
     /// 縮小画像のキャッシュに `w`x`h` の画像が何枚入るか。これを超えて先読みしても古いものを
     /// 追い出すだけ（かつ先読みのたびに再デコードになる）ので、先読みはこの枚数で打ち切る。
-    pub fn scaled_capacity(&self, w: u32, h: u32) -> usize {
-        let one = (w as usize).saturating_mul(h as usize).saturating_mul(4).max(1);
+    pub(crate) fn scaled_capacity(&self, w: u32, h: u32) -> usize {
+        let one = (w as usize)
+            .saturating_mul(h as usize)
+            .saturating_mul(4)
+            .max(1);
         self.scaled.cap_bytes / one
     }
 }
@@ -205,7 +212,7 @@ fn thumb_key(game_id: &str, slot: &str, w: u32, h: u32) -> Option<ThumbKey> {
 
 /// セーブ領域のサムネイルを復号して返す（キャッシュにあればそれを共有）。w/h が 0 以外なら
 /// ちょうどその寸法へ面積平均で拡縮、0 なら規定寸法に収める従来動作。無い/壊れていれば Err。
-pub fn load_thumb_cached(
+pub(crate) fn load_thumb_cached(
     cache: &Mutex<UiCaches>,
     game_id: &str,
     slot: &str,
@@ -214,7 +221,10 @@ pub fn load_thumb_cached(
 ) -> Result<Arc<Pixmap>, String> {
     let sized = w != 0 && h != 0;
     let key = thumb_key(game_id, slot, w, h);
-    if let Some(p) = key.as_ref().and_then(|k| cache.lock_unpoisoned().thumbs.get(k)) {
+    if let Some(p) = key
+        .as_ref()
+        .and_then(|k| cache.lock_unpoisoned().thumbs.get(k))
+    {
         return Ok(p);
     }
     let (max_w, max_h) = if sized {
@@ -237,7 +247,7 @@ pub fn load_thumb_cached(
 }
 
 /// ゲーム資産の画像をデコードして返す（キャッシュにあれば `Arc<Pixmap>` を共有）。
-pub fn load_image_cached(
+pub(crate) fn load_image_cached(
     cache: &Mutex<UiCaches>,
     game_dir: &GameDir,
     path: &str,
@@ -254,7 +264,7 @@ pub fn load_image_cached(
 }
 
 /// ゲーム資産の画像を w x h へ面積平均で縮めて返す（キャッシュにあればそれを共有）。
-pub fn load_scaled_cached(
+pub(crate) fn load_scaled_cached(
     cache: &Mutex<UiCaches>,
     game_dir: &GameDir,
     path: &str,
@@ -294,7 +304,7 @@ pub fn load_scaled_cached(
 }
 
 /// ユニバーサルトランジションのルール画像をスクリーン寸法の輝度プレーンとしてキャッシュする。
-pub fn load_rule_cached(
+pub(crate) fn load_rule_cached(
     cache: &Mutex<UiCaches>,
     game_dir: &GameDir,
     path: &str,
@@ -331,7 +341,7 @@ struct Worker {
 /// サムネイル・縮小画像の先読みを 1 本のワーカースレッドとキューで行う（以前は呼び出しごとに
 /// デタッチスレッドを作っていたので、メニューを開閉するたびにスレッドが積み上がり、終了時にも
 /// 止められなかった）。ワーカーは最初の依頼で起動し、drop で停止（実行中の 1 枚が終わるまで待って join）。
-pub struct Prefetcher {
+pub(crate) struct Prefetcher {
     cache: Arc<Mutex<UiCaches>>,
     game_dir: GameDir,
     game_id: String,
@@ -342,7 +352,7 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new(cache: Arc<Mutex<UiCaches>>, game_dir: GameDir, game_id: String) -> Self {
+    pub(crate) fn new(cache: Arc<Mutex<UiCaches>>, game_dir: GameDir, game_id: String) -> Self {
         Self {
             cache,
             game_dir,
@@ -355,14 +365,14 @@ impl Prefetcher {
     }
 
     /// ゲーム資産の画像を w x h の縮小サムネイルにしておく。キャッシュに入りきらない枚数は先読みしない。
-    pub fn scaled(&self, mut paths: Vec<String>, w: u32, h: u32) {
+    pub(crate) fn scaled(&self, mut paths: Vec<String>, w: u32, h: u32) {
         let capacity = self.cache.lock_unpoisoned().scaled_capacity(w, h);
         paths.truncate(capacity);
         self.submit(Job::Scaled { paths, w, h });
     }
 
     /// 一覧に出るスロット（`auto` / `quick` / `saveN`）の PNG を先読みする。
-    pub fn thumbs(&self, w: u32, h: u32) {
+    pub(crate) fn thumbs(&self, w: u32, h: u32) {
         self.submit(Job::Thumbs { w, h });
     }
 
@@ -400,14 +410,25 @@ impl Prefetcher {
 impl Drop for Prefetcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(w) = self.worker.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(w) = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             drop(w.tx);
             let _ = w.handle.join();
         }
     }
 }
 
-fn run_job(cache: &Mutex<UiCaches>, game_dir: &GameDir, game_id: &str, stop: &AtomicBool, job: Job) {
+fn run_job(
+    cache: &Mutex<UiCaches>,
+    game_dir: &GameDir,
+    game_id: &str,
+    stop: &AtomicBool,
+    job: Job,
+) {
     match job {
         Job::Scaled { paths, w, h } => {
             for p in paths {
@@ -564,7 +585,11 @@ mod tests {
         drop(pf);
         let after_drop = cache.lock_unpoisoned().scaled.len();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert_eq!(cache.lock_unpoisoned().scaled.len(), after_drop, "drop 後も先読みが続いている");
+        assert_eq!(
+            cache.lock_unpoisoned().scaled.len(),
+            after_drop,
+            "drop 後も先読みが続いている"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -573,7 +598,10 @@ mod tests {
     fn scaled_prefetch_is_capped_to_what_the_cache_can_hold() {
         let caches = UiCaches::new();
         // 336x189x4 = 254,016 バイト。24MiB の上限には 98 枚入る。
-        assert_eq!(caches.scaled_capacity(336, 189), (24 << 20) / (336 * 189 * 4));
+        assert_eq!(
+            caches.scaled_capacity(336, 189),
+            (24 << 20) / (336 * 189 * 4)
+        );
         assert!(caches.scaled_capacity(336, 189) >= 90);
     }
 

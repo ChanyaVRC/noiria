@@ -861,7 +861,10 @@ fn registry_indexing_a_ttc_with_a_huge_font_count_finishes_quickly() {
     let t = std::time::Instant::now();
     let reg = registry::FontRegistry::from_game_font_bytes(&[ttc]);
     assert!(reg.is_empty());
-    assert!(t.elapsed().as_secs() < 5, "TTC の巨大な numFonts で長時間ループした");
+    assert!(
+        t.elapsed().as_secs() < 5,
+        "TTC の巨大な numFonts で長時間ループした"
+    );
 }
 
 #[test]
@@ -907,7 +910,6 @@ fn glyph_mask_within_the_limit_is_still_rendered() {
     assert_eq!((mask.width, mask.height), (2000, 2000));
 }
 
-
 // ---------------------------------------------------------------------
 // R1: 破壊 fuzz（バイト反転・切り詰め・長さフィールド改変。確保上限つき）
 // ---------------------------------------------------------------------
@@ -948,10 +950,18 @@ fn fuzz_corrupted_font_never_panics_or_overallocates() {
         glyphs.push(composite_of(k + 1, 3));
     }
     glyphs.push(simple_glyph_bytes(&[(100, 100), (100, 600), (600, 100)]));
-    glyphs.push(simple_glyph_bytes(&[(0, 0), (0, 900), (900, 900), (900, 0)]));
+    glyphs.push(simple_glyph_bytes(&[
+        (0, 0),
+        (0, 900),
+        (900, 900),
+        (900, 0),
+    ]));
     let composite = custom_font(1000, &glyphs);
     for (i, base) in [plain, composite].iter().enumerate() {
-        assert!(Font::from_bytes(base.clone(), 0).is_ok(), "基準のフォント {i} が解析できる");
+        assert!(
+            Font::from_bytes(base.clone(), 0).is_ok(),
+            "基準のフォント {i} が解析できる"
+        );
         crate::test_support::fuzz("font", 0xC0DE + i as u64, 2000, base, |d| {
             if let Ok(font) = Font::from_bytes(d.to_vec(), 0) {
                 exercise_font(&font);
@@ -984,7 +994,10 @@ fn fuzz_corrupted_cmap_never_panics_or_overallocates() {
         t
     };
     for (i, base) in [cmap_table(), format12].iter().enumerate() {
-        assert!(cmap::parse_cmap(base).is_ok(), "基準の cmap {i} が解析できる");
+        assert!(
+            cmap::parse_cmap(base).is_ok(),
+            "基準の cmap {i} が解析できる"
+        );
         crate::test_support::fuzz("cmap", 0xCAB0 + i as u64, 3000, base, |d| {
             if let Ok(t) = cmap::parse_cmap(d) {
                 for c in ['A', 'D', 'あ', '\u{20001}', '\u{10FFFF}', '\0'] {

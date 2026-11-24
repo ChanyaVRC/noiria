@@ -10,7 +10,6 @@ pub fn canvas() -> Canvas {
     Canvas::new(W, H)
 }
 
-
 // ------------------------------------------------------------
 // 乱数
 // ------------------------------------------------------------
@@ -146,7 +145,20 @@ pub fn bar(cv: &mut Canvas, a: P, b: P, w: f32, c: Rgba32) {
 
 /// 5 角ではなく 4 方向の小さな瞬き星（ひし形）。
 pub fn sparkle(cv: &mut Canvas, x: f32, y: f32, r: f32, c: Rgba32) {
-    poly(cv, &[(x, y - r), (x + r * 0.28, y - r * 0.28), (x + r, y), (x + r * 0.28, y + r * 0.28), (x, y + r), (x - r * 0.28, y + r * 0.28), (x - r, y), (x - r * 0.28, y - r * 0.28)], c);
+    poly(
+        cv,
+        &[
+            (x, y - r),
+            (x + r * 0.28, y - r * 0.28),
+            (x + r, y),
+            (x + r * 0.28, y + r * 0.28),
+            (x, y + r),
+            (x - r * 0.28, y + r * 0.28),
+            (x - r, y),
+            (x - r * 0.28, y - r * 0.28),
+        ],
+        c,
+    );
 }
 
 /// 先細りの流れ星（頭 `h` から尾の向き `(dx, dy)` へ `len`）。尾は淡い帯 + 明るい芯の 2 枚のベタ。
@@ -155,11 +167,27 @@ pub fn meteor(cv: &mut Canvas, h: P, dir: P, len: f32, w: f32) {
     let n = (-dir.1, dir.0);
     let band = |cv: &mut Canvas, k: f32, c: Rgba32| {
         let ww = w * k;
-        poly(cv, &[(h.0 + n.0 * ww, h.1 + n.1 * ww), (tail.0, tail.1), (h.0 - n.0 * ww, h.1 - n.1 * ww)], c);
+        poly(
+            cv,
+            &[
+                (h.0 + n.0 * ww, h.1 + n.1 * ww),
+                (tail.0, tail.1),
+                (h.0 - n.0 * ww, h.1 - n.1 * ww),
+            ],
+            c,
+        );
     };
     band(cv, 2.2, cola(200, 214, 255, 0.28));
     let core = (h.0 + dir.0 * len * 0.55, h.1 + dir.1 * len * 0.55);
     let ww = w * 0.9;
-    poly(cv, &[(h.0 + n.0 * ww, h.1 + n.1 * ww), core, (h.0 - n.0 * ww, h.1 - n.1 * ww)], col(246, 248, 255));
+    poly(
+        cv,
+        &[
+            (h.0 + n.0 * ww, h.1 + n.1 * ww),
+            core,
+            (h.0 - n.0 * ww, h.1 - n.1 * ww),
+        ],
+        col(246, 248, 255),
+    );
     ell(cv, h.0, h.1, w * 1.3, w * 1.3, col(255, 255, 255));
 }

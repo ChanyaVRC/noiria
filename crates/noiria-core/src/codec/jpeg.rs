@@ -373,7 +373,10 @@ pub fn decode_into(data: &[u8], rgba: &mut Vec<u8>) -> Result<(u32, u32)> {
                 width = u16::from_be_bytes([seg[3], seg[4]]) as usize;
                 let n = seg[5] as usize;
                 ensure!(n == 1 || n == 3, "コンポーネント数 {n} は非対応");
-                ensure!(seg.len() >= 6 + n * 3, "SOF のコンポーネント記述が短すぎます");
+                ensure!(
+                    seg.len() >= 6 + n * 3,
+                    "SOF のコンポーネント記述が短すぎます"
+                );
                 comps.clear();
                 for c in 0..n {
                     let b = &seg[6 + c * 3..9 + c * 3];
@@ -656,7 +659,13 @@ mod tests {
 
         let mut total = 0i64;
         let mut worst = 0i32;
-        for (a, b) in ours.rgba.as_chunks::<4>().0.iter().zip(theirs.as_chunks::<4>().0) {
+        for (a, b) in ours
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(theirs.as_chunks::<4>().0)
+        {
             for c in 0..3 {
                 let d = (a[c] as i32 - b[c] as i32).abs();
                 worst = worst.max(d);
@@ -803,7 +812,10 @@ mod tests {
             let mut jpg = small_jpeg();
             let sof = marker_pos(&jpg, 0xC0);
             jpg[sof + 4 + 6 + comp * 3 + 1] = 0x00; // h = v = 0
-            assert!(decode(&jpg).is_err(), "成分 {comp} の h=v=0 が Err にならない");
+            assert!(
+                decode(&jpg).is_err(),
+                "成分 {comp} の h=v=0 が Err にならない"
+            );
         }
     }
 

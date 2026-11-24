@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use image::{Rgb, Rgba, RgbaImage};
-use noiria_tools::{synth, wavout};
 use noiria_tools::paint::{
     aa_bezier, aa_circle, aa_ellipse_soft, aa_line, aa_rounded_rect, aa_rounded_rect_stroke,
     add_radial_glow, blend_over, dither_noise, fbm_noise, fill_vertical_gradient, lerp, lerp_color,
     smoothstep01, soft_shadow_rect, vignette, Color,
 };
+use noiria_tools::{synth, wavout};
 
 const W: u32 = 1280;
 const H: u32 = 720;

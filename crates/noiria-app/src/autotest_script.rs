@@ -20,7 +20,7 @@ use anyhow::{bail, Result};
 const MAX_STEPS: usize = 2_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Step {
+pub(crate) enum Step {
     Wait(u64),
     Move(f64, f64),
     Click(f64, f64, Button),
@@ -30,7 +30,7 @@ pub enum Step {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
+pub(crate) enum Button {
     Left,
     Right,
 }
@@ -120,7 +120,9 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
                 return Ok(());
             }
             Some(_) => {
-                let cmd = c.next().unwrap();
+                let Some(cmd) = c.next() else {
+                    unreachable!("peeked Some token");
+                };
                 match cmd.as_str() {
                     "wait" => {
                         let ms = c.num("wait", "ms")?;
@@ -131,7 +133,11 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
                     }
                     "click" | "rclick" => {
                         let (x, y) = (c.num(&cmd, "x")?, c.num(&cmd, "y")?);
-                        let b = if cmd == "click" { Button::Left } else { Button::Right };
+                        let b = if cmd == "click" {
+                            Button::Left
+                        } else {
+                            Button::Right
+                        };
                         out.push(Step::Click(x, y, b));
                     }
                     "move" => {
@@ -177,7 +183,7 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
 }
 
 /// DSL を展開済みステップ列へ変換する。エラーは `行番号: 内容` 形式。
-pub fn parse(text: &str) -> Result<Vec<Step>> {
+pub(crate) fn parse(text: &str) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let toks = tokenize(line);
@@ -185,8 +191,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
             continue;
         }
         let mut c = Cursor { toks, pos: 0 };
-        parse_cmds(&mut c, false, &mut steps)
-            .map_err(|e| anyhow::anyhow!("{}行目: {e}", i + 1))?;
+        parse_cmds(&mut c, false, &mut steps).map_err(|e| anyhow::anyhow!("{}行目: {e}", i + 1))?;
         if steps.len() > MAX_STEPS {
             bail!("{}行目: ステップ数が上限 {MAX_STEPS} を超えます", i + 1);
         }
@@ -197,14 +202,14 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
 /// 仮想時間駆動の実行状態機械。`poll` は「いま実行すべき次のステップ」を 1 つずつ返し、
 /// `Wait` に当たると以降の `poll` は期限まで `None` を返す。副作用（イベント送信・撮影）は
 /// 呼び出し側（`headless.rs`）が行う。
-pub struct Runner {
+pub(crate) struct Runner {
     steps: Vec<Step>,
     pc: usize,
     resume_at_ms: u64,
 }
 
 impl Runner {
-    pub fn new(steps: Vec<Step>) -> Self {
+    pub(crate) fn new(steps: Vec<Step>) -> Self {
         Self {
             steps,
             pc: 0,
@@ -212,11 +217,11 @@ impl Runner {
         }
     }
 
-    pub fn finished(&self, now_ms: u64) -> bool {
+    pub(crate) fn finished(&self, now_ms: u64) -> bool {
         self.pc >= self.steps.len() && now_ms >= self.resume_at_ms
     }
 
-    pub fn poll(&mut self, now_ms: u64) -> Option<Step> {
+    pub(crate) fn poll(&mut self, now_ms: u64) -> Option<Step> {
         if now_ms < self.resume_at_ms {
             return None;
         }
@@ -326,7 +331,11 @@ mod tests {
         assert!(!r.finished(99));
         assert_eq!(r.poll(100), Some(Step::Key("b".into())));
         assert_eq!(r.poll(100), Some(Step::Key("c".into())));
-        assert_eq!(r.poll(100), Some(Step::Key("d".into())), "wait 0 は待たない");
+        assert_eq!(
+            r.poll(100),
+            Some(Step::Key("d".into())),
+            "wait 0 は待たない"
+        );
         assert_eq!(r.poll(100), None);
         assert!(r.finished(100));
     }

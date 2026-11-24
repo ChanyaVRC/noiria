@@ -11,75 +11,75 @@ use crate::script::numconv::{
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
-pub struct LayerProps {
+pub(crate) struct LayerProps {
     #[serde(deserialize_with = "de_opt_coord")]
-    pub x: Option<i32>,
+    pub(crate) x: Option<i32>,
     #[serde(deserialize_with = "de_opt_coord")]
-    pub y: Option<i32>,
+    pub(crate) y: Option<i32>,
     #[serde(deserialize_with = "de_opt_i32")]
-    pub z: Option<i32>,
+    pub(crate) z: Option<i32>,
     #[serde(deserialize_with = "de_opt_u8")]
-    pub opacity: Option<u8>,
-    pub visible: Option<bool>,
+    pub(crate) opacity: Option<u8>,
+    pub(crate) visible: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct MoveArgs {
+pub(crate) struct MoveArgs {
     #[serde(deserialize_with = "de_opt_coord")]
-    pub to_x: Option<i32>,
+    pub(crate) to_x: Option<i32>,
     #[serde(deserialize_with = "de_opt_coord")]
-    pub to_y: Option<i32>,
+    pub(crate) to_y: Option<i32>,
     #[serde(deserialize_with = "de_opt_u8")]
-    pub to_opacity: Option<u8>,
+    pub(crate) to_opacity: Option<u8>,
     #[serde(deserialize_with = "de_time_ms")]
-    pub time_ms: u64,
-    pub accel: f32,
+    pub(crate) time_ms: u64,
+    pub(crate) accel: f32,
 }
 
 /// `layer_blit_image` の clip= 矩形（画像ファイル内の切り出し範囲）。省略時は画像全体。
 #[derive(Debug, Clone, Copy, Deserialize)]
-pub struct BlitClip {
+pub(crate) struct BlitClip {
     #[serde(deserialize_with = "de_u32")]
-    pub x: u32,
+    pub(crate) x: u32,
     #[serde(deserialize_with = "de_u32")]
-    pub y: u32,
+    pub(crate) y: u32,
     #[serde(deserialize_with = "de_u32")]
-    pub w: u32,
+    pub(crate) w: u32,
     #[serde(deserialize_with = "de_u32")]
-    pub h: u32,
+    pub(crate) h: u32,
 }
 
 /// [image]（W5 拡張）の clip=/flipud=/fliplr=/grayscale= 属性。`layer_load_image` の拡張版
 /// `layer_load_image_ex` が使う。適用順は clip 抽出 → 左右反転 → 上下反転 → グレースケール化。
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct ImageLoadOpts {
-    pub clip: Option<BlitClip>,
-    pub flip_h: bool,
-    pub flip_v: bool,
-    pub grayscale: bool,
+pub(crate) struct ImageLoadOpts {
+    pub(crate) clip: Option<BlitClip>,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
+    pub(crate) grayscale: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TransArgs {
-    pub method: String,
+pub(crate) struct TransArgs {
+    pub(crate) method: String,
     #[serde(default, deserialize_with = "de_time_ms")]
-    pub time_ms: u64,
+    pub(crate) time_ms: u64,
     #[serde(default)]
-    pub rule: Option<String>,
+    pub(crate) rule: Option<String>,
     #[serde(default)]
-    pub vague: Option<f32>,
+    pub(crate) vague: Option<f32>,
     /// [trans method=scroll]（W5）: 新ページが入ってくる辺（既定 left）。
     #[serde(default)]
-    pub from: Option<String>,
+    pub(crate) from: Option<String>,
     /// [trans method=scroll]（W5）: stayfore|staynone|staybase を受理するが、描画上は
     /// 区別しない（`Pixmap::scroll_from` のコメント参照）。値自体は保持だけして未使用のため
     /// dead_code を明示的に許可する。
     #[serde(default)]
     #[allow(dead_code)]
-    pub stay: Option<String>,
+    pub(crate) stay: Option<String>,
 }
 
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
@@ -93,28 +93,28 @@ fn rgba_u8(c: [f64; 4]) -> [u8; 4] {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-pub struct TextStyleArgs {
-    pub font_family: Option<String>,
-    pub font_size: Option<f32>,
-    pub line_height: Option<f32>,
-    pub color: Option<[f64; 4]>,
-    pub outline_color: Option<[f64; 4]>,
+pub(crate) struct TextStyleArgs {
+    pub(crate) font_family: Option<String>,
+    pub(crate) font_size: Option<f32>,
+    pub(crate) line_height: Option<f32>,
+    pub(crate) color: Option<[f64; 4]>,
+    pub(crate) outline_color: Option<[f64; 4]>,
     #[serde(deserialize_with = "de_opt_u32")]
-    pub outline_width: Option<u32>,
+    pub(crate) outline_width: Option<u32>,
     #[serde(deserialize_with = "de_opt_u32")]
-    pub box_w: Option<u32>,
+    pub(crate) box_w: Option<u32>,
     #[serde(deserialize_with = "de_opt_u32")]
-    pub box_h: Option<u32>,
+    pub(crate) box_h: Option<u32>,
     #[serde(deserialize_with = "de_opt_i32")]
-    pub margin_x: Option<i32>,
+    pub(crate) margin_x: Option<i32>,
     #[serde(deserialize_with = "de_opt_i32")]
-    pub margin_y: Option<i32>,
-    pub align: Option<TextAlign>,
+    pub(crate) margin_y: Option<i32>,
+    pub(crate) align: Option<TextAlign>,
 }
 
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
 impl TextStyleArgs {
-    pub fn into_style(self) -> TextStyle {
+    pub(crate) fn into_style(self) -> TextStyle {
         let mut s = TextStyle::default();
         if let Some(v) = self.font_family {
             s.font_family = v;
@@ -157,22 +157,22 @@ impl TextStyleArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-pub struct TextSegmentArgs {
-    pub text: String,
-    pub color: Option<[f64; 4]>,
-    pub size: Option<f32>,
-    pub bold: Option<bool>,
-    pub edge_color: Option<[f64; 4]>,
-    pub ruby: Option<String>,
-    pub locate: Option<LocateArgs>,
-    pub indent: Option<bool>,
-    pub inline_image: Option<String>,
-    pub font_family: Option<String>,
+pub(crate) struct TextSegmentArgs {
+    pub(crate) text: String,
+    pub(crate) color: Option<[f64; 4]>,
+    pub(crate) size: Option<f32>,
+    pub(crate) bold: Option<bool>,
+    pub(crate) edge_color: Option<[f64; 4]>,
+    pub(crate) ruby: Option<String>,
+    pub(crate) locate: Option<LocateArgs>,
+    pub(crate) indent: Option<bool>,
+    pub(crate) inline_image: Option<String>,
+    pub(crate) font_family: Option<String>,
 }
 
 #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
 impl TextSegmentArgs {
-    pub fn into_segment(self) -> TextSegment {
+    pub(crate) fn into_segment(self) -> TextSegment {
         TextSegment {
             text: self.text,
             color: self.color.map(rgba_u8),
@@ -189,22 +189,22 @@ impl TextSegmentArgs {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PrintResult {
-    pub total: usize,
-    pub added: usize,
+pub(crate) struct PrintResult {
+    pub(crate) total: usize,
+    pub(crate) added: usize,
 }
 
 /// テキストレイアウトエンジンとレイヤごとの蓄積テキスト（旧 `state::Texts`）。
-pub struct Texts {
-    pub engine: TextEngine,
-    pub styles: HashMap<u32, TextStyle>,
-    pub segments: HashMap<u32, Vec<TextSegment>>,
+pub(crate) struct Texts {
+    pub(crate) engine: TextEngine,
+    pub(crate) styles: HashMap<u32, TextStyle>,
+    pub(crate) segments: HashMap<u32, Vec<TextSegment>>,
     /// 直近レイアウトの総グリフ数（追記時の再レイアウトを避けるキャッシュ）
-    pub glyph_counts: HashMap<u32, usize>,
+    pub(crate) glyph_counts: HashMap<u32, usize>,
 }
 
 impl Texts {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             engine: TextEngine::new(),
             styles: HashMap::new(),
@@ -219,4 +219,3 @@ impl Default for Texts {
         Self::new()
     }
 }
-

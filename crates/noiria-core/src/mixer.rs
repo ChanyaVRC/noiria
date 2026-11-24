@@ -125,18 +125,57 @@ impl PcmSource for BufferSource {
 /// `Resampler` が下流 `PcmSource` からまとめて先読みするフレーム数。
 const RESAMPLE_IN_CHUNK_FRAMES: usize = 256;
 
+struct ResamplerInput<S> {
+    inner: S,
+    channels: usize,
+    buf: Vec<f32>,
+    pos: usize,
+    len: usize,
+}
+
+impl<S: PcmSource> ResamplerInput<S> {
+    fn new(inner: S, channels: usize) -> Self {
+        Self {
+            inner,
+            channels,
+            buf: vec![0.0; RESAMPLE_IN_CHUNK_FRAMES * channels],
+            pos: 0,
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn read_frame(&mut self, dst: &mut [f32]) -> bool {
+        let ch = self.channels;
+        if self.len - self.pos < ch {
+            let rem = self.len - self.pos;
+            if rem > 0 {
+                self.buf.copy_within(self.pos..self.len, 0);
+            }
+            self.pos = 0;
+            self.len = rem;
+            while self.len < ch {
+                let got = self.inner.read(&mut self.buf[self.len..]);
+                if got == 0 {
+                    return false;
+                }
+                self.len += got;
+            }
+        }
+        dst.copy_from_slice(&self.buf[self.pos..self.pos + ch]);
+        self.pos += ch;
+        true
+    }
+}
+
 /// 線形補間による任意レート → `out_rate` のリサンプラ。`PcmSource` を包んで
 /// 同じ口 (`PcmSource`) で出力できる（チェーン可能）。
 ///
 /// 内部バッファは全て `new` で確保した固定長で、読み出し中にヒープ確保しない。
 pub struct Resampler<S> {
-    inner: S,
-    channels: usize,
+    input: ResamplerInput<S>,
     out_rate: u32,
     ratio: f64, // in_rate / out_rate
-    in_buf: Vec<f32>,
-    in_pos: usize,
-    in_len: usize,
     frame0: Vec<f32>,
     frame1: Vec<f32>,
     have_frames: bool,
@@ -152,13 +191,9 @@ impl<S: PcmSource> Resampler<S> {
         let channels = inner.channels().max(1) as usize;
         let in_rate = inner.sample_rate().max(1);
         Self {
-            inner,
-            channels,
+            input: ResamplerInput::new(inner, channels),
             out_rate: out_rate.max(1),
             ratio: in_rate as f64 / out_rate.max(1) as f64,
-            in_buf: vec![0.0; RESAMPLE_IN_CHUNK_FRAMES * channels],
-            in_pos: 0,
-            in_len: 0,
             frame0: vec![0.0; channels],
             frame1: vec![0.0; channels],
             have_frames: false,
@@ -169,43 +204,14 @@ impl<S: PcmSource> Resampler<S> {
         }
     }
 
-    #[inline]
-    fn read_input_frame(&mut self, dst: &mut [f32]) -> bool {
-        let ch = self.channels;
-        if self.in_len - self.in_pos < ch {
-            let rem = self.in_len - self.in_pos;
-            if rem > 0 {
-                self.in_buf.copy_within(self.in_pos..self.in_len, 0);
-            }
-            self.in_pos = 0;
-            self.in_len = rem;
-            while self.in_len < ch {
-                let got = self.inner.read(&mut self.in_buf[self.in_len..]);
-                if got == 0 {
-                    return false;
-                }
-                self.in_len += got;
-            }
-        }
-        dst.copy_from_slice(&self.in_buf[self.in_pos..self.in_pos + ch]);
-        self.in_pos += ch;
-        true
-    }
-
     fn ensure_frames(&mut self) -> bool {
         if self.have_frames {
             return true;
         }
-        let mut f0 = std::mem::take(&mut self.frame0);
-        let ok0 = self.read_input_frame(&mut f0);
-        self.frame0 = f0;
-        if !ok0 {
+        if !self.input.read_frame(&mut self.frame0) {
             return false;
         }
-        let mut f1 = std::mem::take(&mut self.frame1);
-        let ok1 = self.read_input_frame(&mut f1);
-        self.frame1 = f1;
-        if !ok1 {
+        if !self.input.read_frame(&mut self.frame1) {
             self.frame1.copy_from_slice(&self.frame0);
         }
         self.have_frames = true;
@@ -228,24 +234,19 @@ impl<S: PcmSource> Resampler<S> {
         }
 
         self.t += self.ratio;
-        let ch = self.channels;
+        let ch = self.input.channels;
         while self.t >= 1.0 {
             self.t -= 1.0;
             std::mem::swap(&mut self.frame0, &mut self.frame1);
-            if self.in_len - self.in_pos >= ch {
+            if self.input.len - self.input.pos >= ch {
                 self.frame1
-                    .copy_from_slice(&self.in_buf[self.in_pos..self.in_pos + ch]);
-                self.in_pos += ch;
-            } else {
-                let mut f1 = std::mem::take(&mut self.frame1);
-                let ok = self.read_input_frame(&mut f1);
-                self.frame1 = f1;
-                if !ok {
-                    // 入力が尽きた: これ以上の新規フレームはない。今回出力した
-                    // フレームまでは有効なので返すが、以降は打ち切る。
-                    self.ended = true;
-                    break;
-                }
+                    .copy_from_slice(&self.input.buf[self.input.pos..self.input.pos + ch]);
+                self.input.pos += ch;
+            } else if !self.input.read_frame(&mut self.frame1) {
+                // 入力が尽きた: これ以上の新規フレームはない。今回出力した
+                // フレームまでは有効なので返すが、以降は打ち切る。
+                self.ended = true;
+                break;
             }
         }
         true
@@ -262,63 +263,46 @@ impl<S: PcmSource> Resampler<S> {
     /// 出力を作らずに入力を `adv` フレーム進めた状態（`frame0`/`frame1` が
     /// 入力の `adv` フレーム先）にする。足りなければ `false`。
     fn advance_input(&mut self, adv: u64) -> bool {
-        let ch = self.channels;
+        let ch = self.input.channels;
         match adv {
             0 => true,
             1 => {
                 std::mem::swap(&mut self.frame0, &mut self.frame1);
-                let mut f1 = std::mem::take(&mut self.frame1);
-                let ok = self.read_input_frame(&mut f1);
-                self.frame1 = f1;
-                ok
+                self.input.read_frame(&mut self.frame1)
             }
             _ => {
-                let avail_frames = ((self.in_len - self.in_pos) / ch) as u64;
+                let avail_frames = ((self.input.len - self.input.pos) / ch) as u64;
                 if avail_frames >= adv {
-                    self.in_pos += ((adv - 2) as usize) * ch;
-                    let mut f0 = std::mem::take(&mut self.frame0);
-                    let ok0 = self.read_input_frame(&mut f0);
-                    self.frame0 = f0;
-                    let mut f1 = std::mem::take(&mut self.frame1);
-                    let ok1 = ok0 && self.read_input_frame(&mut f1);
-                    self.frame1 = f1;
-                    ok1
+                    self.input.pos += ((adv - 2) as usize) * ch;
+                    self.input.read_frame(&mut self.frame0)
+                        && self.input.read_frame(&mut self.frame1)
                 } else if adv == avail_frames + 1 {
-                    self.in_pos += ((avail_frames - 1) as usize) * ch;
-                    let mut f0 = std::mem::take(&mut self.frame0);
-                    let ok0 = self.read_input_frame(&mut f0);
-                    self.frame0 = f0;
-                    let mut f1 = std::mem::take(&mut self.frame1);
-                    let ok1 = ok0 && self.read_input_frame(&mut f1);
-                    self.frame1 = f1;
-                    ok1
+                    self.input.pos += ((avail_frames - 1) as usize) * ch;
+                    self.input.read_frame(&mut self.frame0)
+                        && self.input.read_frame(&mut self.frame1)
                 } else {
-                    let rem_samples = (self.in_len - self.in_pos) % ch;
+                    let rem_samples = (self.input.len - self.input.pos) % ch;
                     if rem_samples != 0 {
                         for _ in 0..adv {
                             std::mem::swap(&mut self.frame0, &mut self.frame1);
-                            let mut f1 = std::mem::take(&mut self.frame1);
-                            let ok = self.read_input_frame(&mut f1);
-                            self.frame1 = f1;
-                            if !ok {
+                            if !self.input.read_frame(&mut self.frame1) {
                                 return false;
                             }
                         }
                         return true;
                     }
-                    self.in_pos = 0;
-                    self.in_len = 0;
+                    self.input.pos = 0;
+                    self.input.len = 0;
                     let skip_frames = adv - 2 - avail_frames;
-                    if !self.inner.skip_samples(skip_frames.saturating_mul(ch as u64)) {
+                    if !self
+                        .input
+                        .inner
+                        .skip_samples(skip_frames.saturating_mul(ch as u64))
+                    {
                         return false;
                     }
-                    let mut f0 = std::mem::take(&mut self.frame0);
-                    let ok0 = self.read_input_frame(&mut f0);
-                    self.frame0 = f0;
-                    let mut f1 = std::mem::take(&mut self.frame1);
-                    let ok1 = ok0 && self.read_input_frame(&mut f1);
-                    self.frame1 = f1;
-                    ok1
+                    self.input.read_frame(&mut self.frame0)
+                        && self.input.read_frame(&mut self.frame1)
                 }
             }
         }
@@ -327,13 +311,13 @@ impl<S: PcmSource> Resampler<S> {
 
 impl<S: PcmSource> PcmSource for Resampler<S> {
     fn channels(&self) -> u16 {
-        self.channels as u16
+        self.input.channels as u16
     }
     fn sample_rate(&self) -> u32 {
         self.out_rate
     }
     fn next_sample(&mut self) -> Option<f32> {
-        if self.out_pos >= self.channels {
+        if self.out_pos >= self.input.channels {
             if !self.produce_next_output_frame() {
                 return None;
             }
@@ -344,7 +328,7 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
         Some(s)
     }
     fn read(&mut self, out: &mut [f32]) -> usize {
-        let ch = self.channels;
+        let ch = self.input.channels;
         let mut n = 0;
         if self.out_pos < ch && n < out.len() {
             let take = (ch - self.out_pos).min(out.len() - n);
@@ -367,13 +351,13 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
                     t -= 1.0;
                     f0l = f1l;
                     f0r = f1r;
-                    if self.in_len - self.in_pos >= 2 {
-                        f1l = self.in_buf[self.in_pos];
-                        f1r = self.in_buf[self.in_pos + 1];
-                        self.in_pos += 2;
+                    if self.input.len - self.input.pos >= 2 {
+                        f1l = self.input.buf[self.input.pos];
+                        f1r = self.input.buf[self.input.pos + 1];
+                        self.input.pos += 2;
                     } else {
                         let mut tmp = [0.0f32; 2];
-                        if !self.read_input_frame(&mut tmp) {
+                        if !self.input.read_frame(&mut tmp) {
                             self.ended = true;
                             break;
                         }
@@ -406,12 +390,12 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
                 while t >= 1.0 {
                     t -= 1.0;
                     f0 = f1;
-                    if self.in_len > self.in_pos {
-                        f1 = self.in_buf[self.in_pos];
-                        self.in_pos += 1;
+                    if self.input.len > self.input.pos {
+                        f1 = self.input.buf[self.input.pos];
+                        self.input.pos += 1;
                     } else {
                         let mut tmp = [0.0f32; 1];
-                        if !self.read_input_frame(&mut tmp) {
+                        if !self.input.read_frame(&mut tmp) {
                             self.ended = true;
                             break;
                         }
@@ -452,8 +436,8 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
     /// `inner.skip_samples` で一括して進める。結果の状態は 1 フレームずつ
     /// 読み捨てた場合とビット単位で一致する（テストで固定）。
     fn skip_samples(&mut self, samples: u64) -> bool {
-        let ch = self.channels as u64;
-        if self.out_pos < self.channels || !samples.is_multiple_of(ch) {
+        let ch = self.input.channels as u64;
+        if self.out_pos < self.input.channels || !samples.is_multiple_of(ch) {
             return skip_by_reading(self, samples);
         }
         let frames = samples / ch;
@@ -481,15 +465,15 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
         }
         // 最後の 1 フレームは通常経路（入力枯渇の判定を含む）で作って捨てる。
         let produced = self.produce_next_output_frame();
-        self.out_pos = self.channels;
+        self.out_pos = self.input.channels;
         produced
     }
     fn frame_count_upper_bound(&self) -> Option<u64> {
-        let input_frames = self.inner.frame_count_upper_bound()?;
+        let input_frames = self.input.inner.frame_count_upper_bound()?;
         if input_frames == 0 {
             return Some(0);
         }
-        let in_rate = self.inner.sample_rate().max(1) as u128;
+        let in_rate = self.input.inner.sample_rate().max(1) as u128;
         let numerator = input_frames as u128 * self.out_rate as u128;
         let scaled = numerator.div_ceil(in_rate);
         // f64 位相の丸めで入力境界が 1 出力フレーム遅れる場合がある。
@@ -497,13 +481,13 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
         Some(upper_bound.min(u64::MAX as u128) as u64)
     }
     fn rewind(&mut self) -> bool {
-        if self.inner.rewind() {
-            self.in_pos = 0;
-            self.in_len = 0;
+        if self.input.inner.rewind() {
+            self.input.pos = 0;
+            self.input.len = 0;
             self.have_frames = false;
             self.t = 0.0;
             self.ended = false;
-            self.out_pos = self.channels;
+            self.out_pos = self.input.channels;
             true
         } else {
             false
@@ -765,8 +749,8 @@ impl Mixer {
         out_channels: u16,
         out_rate: u32,
     ) -> PreparedSource {
-        let start_frame =
-            ((start_position_ms as u128 * out_rate.max(1) as u128) / 1000).min(u64::MAX as u128) as u64;
+        let start_frame = ((start_position_ms as u128 * out_rate.max(1) as u128) / 1000)
+            .min(u64::MAX as u128) as u64;
         let past_known_end = source
             .frame_count_upper_bound()
             .is_some_and(|upper_bound| start_frame > upper_bound);
@@ -1923,7 +1907,9 @@ mod tests {
             0.4,
             7,
         );
-        let blocks = [1usize, 7, 64, 255, 256, 257, 1000, 3, 513, 2000, 31, 4096, 9, 700];
+        let blocks = [
+            1usize, 7, 64, 255, 256, 257, 1000, 3, 513, 2000, 31, 4096, 9, 700,
+        ];
         let mut h = 0xcbf29ce484222325u64;
         for (i, &frames) in blocks.iter().cycle().take(40).enumerate() {
             match i {
@@ -1941,7 +1927,9 @@ mod tests {
             m.mix_into(&mut out);
             fnv_bits(&mut h, &out);
             for ch in 0..5 {
-                h ^= (m.position_ms(ch) << 3) ^ ((m.is_playing(ch) as u64) << 1) ^ m.is_finished(ch) as u64;
+                h ^= (m.position_ms(ch) << 3)
+                    ^ ((m.is_playing(ch) as u64) << 1)
+                    ^ m.is_finished(ch) as u64;
                 h = h.wrapping_mul(0x100000001b3);
             }
         }
@@ -2025,7 +2013,10 @@ mod tests {
         let mut m = Mixer::new(2, 48000);
         let t = std::time::Instant::now();
         m.play_from_ms(0, src, true, 1.0, 0, 60_000);
-        eprintln!("BENCH play_from_ms(60s) total: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+        eprintln!(
+            "BENCH play_from_ms(60s) total: {:.2} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
 
     #[test]
@@ -2042,7 +2033,11 @@ mod tests {
         m.set_volume(0, 1.0);
         let mut next = vec![0.0; 1];
         m.mix_into(&mut next);
-        assert_eq!(next, vec![0.005], "一時停止点の続き（先読みで捨てていない）");
+        assert_eq!(
+            next,
+            vec![0.005],
+            "一時停止点の続き（先読みで捨てていない）"
+        );
     }
 
     /// 1 フレームずつ（`next_sample`）読み捨てた場合との同値性:
@@ -2073,14 +2068,22 @@ mod tests {
                 let mut slow = mk();
                 let ok_fast = fast.skip_samples(start * 2);
                 let ok_slow = (0..start * 2).all(|_| slow.next_sample().is_some());
-                assert_eq!(ok_fast, ok_slow, "可否 in={in_rate} out={out_rate} start={start}");
+                assert_eq!(
+                    ok_fast, ok_slow,
+                    "可否 in={in_rate} out={out_rate} start={start}"
+                );
                 if !ok_slow {
                     continue;
                 }
                 let a: Vec<Option<f32>> = (0..60).map(|_| fast.next_sample()).collect();
                 let b: Vec<Option<f32>> = (0..60).map(|_| slow.next_sample()).collect();
-                let bits = |v: &[Option<f32>]| v.iter().map(|x| x.map(f32::to_bits)).collect::<Vec<_>>();
-                assert_eq!(bits(&a), bits(&b), "後続出力 in={in_rate} out={out_rate} start={start}");
+                let bits =
+                    |v: &[Option<f32>]| v.iter().map(|x| x.map(f32::to_bits)).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(&a),
+                    bits(&b),
+                    "後続出力 in={in_rate} out={out_rate} start={start}"
+                );
             }
         }
     }

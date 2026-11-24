@@ -9,7 +9,7 @@ use crate::script::numconv::to_u32;
 use crate::script::util::err;
 
 #[op2(fast)]
-pub fn op_video_play(
+pub(crate) fn op_video_play(
     state: &mut OpState,
     id: f64,
     #[string] path: &str,
@@ -17,12 +17,12 @@ pub fn op_video_play(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_play(to_u32(id), path, looping)
+        .video_play(to_u32(id), path, looping)
         .map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_video_play_at(
+pub(crate) fn op_video_play_at(
     state: &mut OpState,
     id: f64,
     #[string] path: &str,
@@ -44,19 +44,19 @@ pub fn op_video_play_at(
 }
 
 #[op2(fast)]
-pub fn op_video_stop(state: &mut OpState) {
+pub(crate) fn op_video_stop(state: &mut OpState) {
     state.borrow_mut::<EngineState>().video_stop();
 }
 
 #[op2(fast)]
-pub fn op_video_is_playing(state: &mut OpState) -> bool {
+pub(crate) fn op_video_is_playing(state: &mut OpState) -> bool {
     state.borrow::<EngineState>().video_is_playing()
 }
 
 // ---- W6: openvideo/preparevideo/playvideo/pausevideo/resumevideo/rewindvideo ----
 
 #[op2(fast)]
-pub fn op_video_open(
+pub(crate) fn op_video_open(
     state: &mut OpState,
     id: f64,
     #[string] path: &str,
@@ -64,12 +64,12 @@ pub fn op_video_open(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_open(to_u32(id), path, looping)
+        .video_open(to_u32(id), path, looping)
         .map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_video_prepare(
+pub(crate) fn op_video_prepare(
     state: &mut OpState,
     id: f64,
     #[string] path: &str,
@@ -77,48 +77,48 @@ pub fn op_video_prepare(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_prepare(to_u32(id), path, looping)
+        .video_prepare(to_u32(id), path, looping)
         .map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_video_prepare_opened(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_video_prepare_opened(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_prepare_opened(to_u32(id))
+        .video_prepare_opened(to_u32(id))
         .map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_video_play_prepared(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_video_play_prepared(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_play_prepared(to_u32(id))
+        .video_play_prepared(to_u32(id))
         .map_err(err)
 }
 
 #[op2(fast)]
-pub fn op_video_pause(state: &mut OpState) {
+pub(crate) fn op_video_pause(state: &mut OpState) {
     state.borrow_mut::<EngineState>().video_pause();
 }
 
 #[op2(fast)]
-pub fn op_video_resume(state: &mut OpState) {
+pub(crate) fn op_video_resume(state: &mut OpState) {
     state.borrow_mut::<EngineState>().video_resume();
 }
 
 #[op2(fast)]
-pub fn op_video_rewind(state: &mut OpState) {
+pub(crate) fn op_video_rewind(state: &mut OpState) {
     state.borrow_mut::<EngineState>().video_rewind();
 }
 
 #[op2(fast)]
-pub fn op_video_is_paused(state: &mut OpState) -> bool {
+pub(crate) fn op_video_is_paused(state: &mut OpState) -> bool {
     state.borrow::<EngineState>().video_is_paused()
 }
 
 #[op2(fast)]
-pub fn op_video_seek_frame(state: &mut OpState, target: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_video_seek_frame(state: &mut OpState, target: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
         .video_seek_frame(to_u32(target) as usize)
@@ -126,7 +126,10 @@ pub fn op_video_seek_frame(state: &mut OpState, target: f64) -> Result<(), JsErr
 }
 
 #[op2(fast)]
-pub fn op_video_seek_position(state: &mut OpState, position_ms: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_video_seek_position(
+    state: &mut OpState,
+    position_ms: f64,
+) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
         .video_seek_position(position_ms)
@@ -134,21 +137,21 @@ pub fn op_video_seek_position(state: &mut OpState, position_ms: f64) -> Result<(
 }
 
 #[op2(fast)]
-pub fn op_video_set_period_event(state: &mut OpState, frame: f64) {
+pub(crate) fn op_video_set_period_event(state: &mut OpState, frame: f64) {
     state
         .borrow_mut::<EngineState>()
         .video_set_period_event(to_u32(frame) as usize);
 }
 
 #[op2(fast)]
-pub fn op_video_cancel_period_event(state: &mut OpState) {
+pub(crate) fn op_video_cancel_period_event(state: &mut OpState) {
     state
         .borrow_mut::<EngineState>()
         .video_cancel_period_event();
 }
 
 #[op2(fast)]
-pub fn op_video_set_segment_loop(
+pub(crate) fn op_video_set_segment_loop(
     state: &mut OpState,
     start: f64,
     end: f64,
@@ -160,18 +163,18 @@ pub fn op_video_set_segment_loop(
 }
 
 #[op2(fast)]
-pub fn op_video_cancel_segment_loop(state: &mut OpState) {
+pub(crate) fn op_video_cancel_segment_loop(state: &mut OpState) {
     state
         .borrow_mut::<EngineState>()
         .video_cancel_segment_loop();
 }
 
 #[op2(fast)]
-pub fn op_video_take_event(state: &mut OpState, #[string] kind: &str) -> bool {
+pub(crate) fn op_video_take_event(state: &mut OpState, #[string] kind: &str) -> bool {
     state.borrow_mut::<EngineState>().video_take_event(kind)
 }
 
 #[op2(fast)]
-pub fn op_video_generation(state: &mut OpState) -> f64 {
+pub(crate) fn op_video_generation(state: &mut OpState) -> f64 {
     state.borrow::<EngineState>().video_generation()
 }

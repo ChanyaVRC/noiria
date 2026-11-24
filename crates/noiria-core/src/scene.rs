@@ -467,13 +467,11 @@ impl Scene {
     pub fn settle_finished_tweens(&mut self, now: Instant) {
         let mut changed = false;
         for layer in self.fore.values_mut().chain(self.back.values_mut()) {
-            if layer.crop_tween.as_ref().is_some_and(|t| t.is_finished(now)) {
-                let t = layer.crop_tween.take().unwrap();
+            if let Some(t) = layer.crop_tween.take_if(|t| t.is_finished(now)) {
                 layer.crop_w = Some(t.to);
                 changed = true;
             }
-            while layer.tween.as_ref().is_some_and(|t| t.is_finished(now)) {
-                let t = layer.tween.take().unwrap();
+            while let Some(t) = layer.tween.take_if(|t| t.is_finished(now)) {
                 layer.x = t.to_x;
                 layer.y = t.to_y;
                 layer.opacity = t.to_opacity;
@@ -1127,9 +1125,18 @@ mod crop_tests {
         let mut out = Pixmap::new(10, 2);
         let px = |p: &Pixmap, x: usize| p.data[x * 4 + 3];
         compose_frame(&scene, start, &mut bufs, &mut out);
-        assert_eq!(px(&out, 0), 255, "alpha は不透明な黒背景 (幅 0 なら画素は黒のまま)");
+        assert_eq!(
+            px(&out, 0),
+            255,
+            "alpha は不透明な黒背景 (幅 0 なら画素は黒のまま)"
+        );
         assert_eq!(out.data[0], 0, "幅 0 では何も重ならない");
-        compose_frame(&scene, start + Duration::from_millis(50), &mut bufs, &mut out);
+        compose_frame(
+            &scene,
+            start + Duration::from_millis(50),
+            &mut bufs,
+            &mut out,
+        );
         assert_eq!(out.data[4 * 4], 255, "x=4 は見える幅 5 の内側（白）");
         assert_eq!(out.data[7 * 4], 0, "x=7 は見える幅の外（黒のまま）");
         assert!(scene.is_animating(start + Duration::from_millis(50)));
@@ -1140,7 +1147,12 @@ mod crop_tests {
         assert!(scene.fore[&id].crop_tween.is_none());
         assert_eq!(scene.fore[&id].crop_w, Some(10));
         assert!(!scene.is_animating(start + Duration::from_millis(100)));
-        compose_frame(&scene, start + Duration::from_millis(200), &mut bufs, &mut out);
+        compose_frame(
+            &scene,
+            start + Duration::from_millis(200),
+            &mut bufs,
+            &mut out,
+        );
         assert_eq!(out.data[9 * 4], 255);
     }
 

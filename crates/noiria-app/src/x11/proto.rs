@@ -10,55 +10,55 @@ use anyhow::{bail, Result};
 use crossbeam_channel::Sender;
 
 // --- オペコード ---
-pub const OP_CREATE_WINDOW: u8 = 1;
-pub const OP_MAP_WINDOW: u8 = 8;
-pub const OP_CHANGE_PROPERTY: u8 = 18;
+pub(crate) const OP_CREATE_WINDOW: u8 = 1;
+pub(crate) const OP_MAP_WINDOW: u8 = 8;
+pub(crate) const OP_CHANGE_PROPERTY: u8 = 18;
 /// 本番ではフルスクリーン切替（root へ `_NET_WM_STATE` の ClientMessage）に使う。
 /// テストは WM_DELETE_WINDOW や合成キーの自送にも使う。
-pub const OP_SEND_EVENT: u8 = 25;
-pub const OP_CREATE_GC: u8 = 55;
-pub const OP_PUT_IMAGE: u8 = 72;
+pub(crate) const OP_SEND_EVENT: u8 = 25;
+pub(crate) const OP_CREATE_GC: u8 = 55;
+pub(crate) const OP_PUT_IMAGE: u8 = 72;
 /// GetImage も同様に検証（テスト②のピクセル読み戻し、テスト⑤のスクリーン
 /// ショット取得）専用。`run_windowed` は PutImage で書くだけで読み返さない。
 #[cfg(test)]
-pub const OP_GET_IMAGE: u8 = 73;
-pub const OP_INTERN_ATOM: u8 = 16;
-pub const OP_GET_KEYBOARD_MAPPING: u8 = 101;
+pub(crate) const OP_GET_IMAGE: u8 = 73;
+pub(crate) const OP_INTERN_ATOM: u8 = 16;
+pub(crate) const OP_GET_KEYBOARD_MAPPING: u8 = 101;
 /// テスト用（他クライアントとして自分のウィンドウを見つける）に追加した
 /// opcode。計画の必須オペコード一覧には無いが、④の SendEvent クローズ
 /// テストと⑤のスクリーンショット取得に必要なので追加した
 /// （詳細は implementation-notes.md 参照）。
 #[cfg(test)]
-pub const OP_QUERY_TREE: u8 = 15;
+pub(crate) const OP_QUERY_TREE: u8 = 15;
 
 // --- 定義済みアトム（InternAtom 不要） ---
-pub const XA_STRING: u32 = 31;
-pub const XA_ATOM: u32 = 4;
-pub const XA_CARDINAL: u32 = 6;
-pub const XA_WM_NAME: u32 = 39;
-pub const XA_WM_NORMAL_HINTS: u32 = 40;
-pub const XA_WM_SIZE_HINTS: u32 = 41;
+pub(crate) const XA_STRING: u32 = 31;
+pub(crate) const XA_ATOM: u32 = 4;
+pub(crate) const XA_CARDINAL: u32 = 6;
+pub(crate) const XA_WM_NAME: u32 = 39;
+pub(crate) const XA_WM_NORMAL_HINTS: u32 = 40;
+pub(crate) const XA_WM_SIZE_HINTS: u32 = 41;
 
 // --- イベントマスク ---
-pub const KEY_PRESS_MASK: u32 = 0x0000_0001;
-pub const KEY_RELEASE_MASK: u32 = 0x0000_0002;
-pub const BUTTON_PRESS_MASK: u32 = 0x0000_0004;
-pub const POINTER_MOTION_MASK: u32 = 0x0000_0040;
-pub const EXPOSURE_MASK: u32 = 0x0000_8000;
-pub const STRUCTURE_NOTIFY_MASK: u32 = 0x0002_0000;
-pub const FOCUS_CHANGE_MASK: u32 = 0x0020_0000;
+pub(crate) const KEY_PRESS_MASK: u32 = 0x0000_0001;
+pub(crate) const KEY_RELEASE_MASK: u32 = 0x0000_0002;
+pub(crate) const BUTTON_PRESS_MASK: u32 = 0x0000_0004;
+pub(crate) const POINTER_MOTION_MASK: u32 = 0x0000_0040;
+pub(crate) const EXPOSURE_MASK: u32 = 0x0000_8000;
+pub(crate) const STRUCTURE_NOTIFY_MASK: u32 = 0x0002_0000;
+pub(crate) const FOCUS_CHANGE_MASK: u32 = 0x0020_0000;
 /// ルートへ送る `_NET_WM_STATE` ClientMessage の宛先マスク（SubstructureRedirect | SubstructureNotify）。
-pub const ROOT_WM_REQUEST_MASK: u32 = 0x0010_0000 | 0x0008_0000;
+pub(crate) const ROOT_WM_REQUEST_MASK: u32 = 0x0010_0000 | 0x0008_0000;
 
 // --- イベントコード ---
-pub const EV_KEY_PRESS: u8 = 2;
-pub const EV_KEY_RELEASE: u8 = 3;
-pub const EV_BUTTON_PRESS: u8 = 4;
-pub const EV_MOTION_NOTIFY: u8 = 6;
-pub const EV_FOCUS_OUT: u8 = 10;
-pub const EV_EXPOSE: u8 = 12;
-pub const EV_CONFIGURE_NOTIFY: u8 = 22;
-pub const EV_CLIENT_MESSAGE: u8 = 33;
+pub(crate) const EV_KEY_PRESS: u8 = 2;
+pub(crate) const EV_KEY_RELEASE: u8 = 3;
+pub(crate) const EV_BUTTON_PRESS: u8 = 4;
+pub(crate) const EV_MOTION_NOTIFY: u8 = 6;
+pub(crate) const EV_FOCUS_OUT: u8 = 10;
+pub(crate) const EV_EXPOSE: u8 = 12;
+pub(crate) const EV_CONFIGURE_NOTIFY: u8 = 22;
+pub(crate) const EV_CLIENT_MESSAGE: u8 = 33;
 
 fn pad4(buf: &mut Vec<u8>) {
     while !buf.len().is_multiple_of(4) {
@@ -74,7 +74,7 @@ fn set_len_words(req: &mut [u8]) {
 /// CWBackPixel | CWEventMask の 2 値だけを使う CreateWindow。値リストは
 /// 昇順ビットの順で並べる必要がある（back-pixel が event-mask より前）。
 #[allow(clippy::too_many_arguments)]
-pub fn req_create_window(
+pub(crate) fn req_create_window(
     wid: u32,
     parent: u32,
     x: i16,
@@ -107,14 +107,14 @@ pub fn req_create_window(
     req
 }
 
-pub fn req_map_window(window: u32) -> Vec<u8> {
+pub(crate) fn req_map_window(window: u32) -> Vec<u8> {
     let mut req = vec![OP_MAP_WINDOW, 0, 0, 0];
     req.extend_from_slice(&window.to_le_bytes());
     set_len_words(&mut req);
     req
 }
 
-pub fn req_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
+pub(crate) fn req_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
     let mut req = vec![OP_CREATE_GC, 0, 0, 0];
     req.extend_from_slice(&cid.to_le_bytes());
     req.extend_from_slice(&drawable.to_le_bytes());
@@ -123,7 +123,7 @@ pub fn req_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
     req
 }
 
-pub fn req_intern_atom(name: &str, only_if_exists: bool) -> Vec<u8> {
+pub(crate) fn req_intern_atom(name: &str, only_if_exists: bool) -> Vec<u8> {
     let mut req = Vec::new();
     req.push(OP_INTERN_ATOM);
     req.push(u8::from(only_if_exists));
@@ -136,7 +136,7 @@ pub fn req_intern_atom(name: &str, only_if_exists: bool) -> Vec<u8> {
     req
 }
 
-pub fn parse_intern_atom_reply(reply: &[u8]) -> Result<u32> {
+pub(crate) fn parse_intern_atom_reply(reply: &[u8]) -> Result<u32> {
     if reply.len() < 12 {
         bail!("InternAtom リプライが短すぎます");
     }
@@ -146,7 +146,7 @@ pub fn parse_intern_atom_reply(reply: &[u8]) -> Result<u32> {
 }
 
 /// `data` は既に `format`（8/16/32bit）単位でパックされたバイト列。
-pub fn req_change_property(
+pub(crate) fn req_change_property(
     window: u32,
     property: u32,
     prop_type: u32,
@@ -174,7 +174,7 @@ pub fn req_change_property(
 
 /// ICCCM WM_SIZE_HINTS（18 x CARD32 = 72 バイト）。最小サイズだけ指定する（最大は無制限 =
 /// リサイズ・最大化可。他のフィールドは全て 0）。
-pub fn wm_size_hints_min(min_w: u32, min_h: u32) -> Vec<u8> {
+pub(crate) fn wm_size_hints_min(min_w: u32, min_h: u32) -> Vec<u8> {
     const P_MIN_SIZE: u32 = 1 << 4;
     let mut d = Vec::with_capacity(72);
     let mut push = |v: u32| d.extend_from_slice(&v.to_le_bytes());
@@ -200,7 +200,7 @@ pub fn wm_size_hints_min(min_w: u32, min_h: u32) -> Vec<u8> {
 }
 
 /// PutImage 1 バンド分（`format`=2 = ZPixmap 固定）。
-pub fn req_put_image_band(
+pub(crate) fn req_put_image_band(
     drawable: u32,
     gc: u32,
     width: u16,
@@ -230,7 +230,7 @@ pub fn req_put_image_band(
 
 /// フレーム全体（BGRX u32 列）を `max_request_bytes` に収まるよう帯分割して
 /// PutImage を連続送出する。
-pub fn put_image_banded(
+pub(crate) fn put_image_banded(
     conn: &mut XConn,
     drawable: u32,
     gc: u32,
@@ -275,7 +275,14 @@ pub fn put_image_banded(
 }
 
 #[cfg(test)]
-pub fn req_get_image(drawable: u32, x: i16, y: i16, w: u16, h: u16, plane_mask: u32) -> Vec<u8> {
+pub(crate) fn req_get_image(
+    drawable: u32,
+    x: i16,
+    y: i16,
+    w: u16,
+    h: u16,
+    plane_mask: u32,
+) -> Vec<u8> {
     let mut req = Vec::with_capacity(20);
     req.push(OP_GET_IMAGE);
     req.push(2); // ZPixmap
@@ -291,23 +298,23 @@ pub fn req_get_image(drawable: u32, x: i16, y: i16, w: u16, h: u16, plane_mask: 
 
 /// GetImage リプライ（32 バイトヘッダ + データ）からピクセルデータ部分を返す。
 #[cfg(test)]
-pub fn parse_get_image_reply(reply: &[u8]) -> Result<&[u8]> {
+pub(crate) fn parse_get_image_reply(reply: &[u8]) -> Result<&[u8]> {
     if reply.len() < 32 {
         bail!("GetImage リプライが短すぎます");
     }
     Ok(&reply[32..])
 }
 
-pub fn req_get_keyboard_mapping(first_keycode: u8, count: u8) -> Vec<u8> {
+pub(crate) fn req_get_keyboard_mapping(first_keycode: u8, count: u8) -> Vec<u8> {
     vec![OP_GET_KEYBOARD_MAPPING, 0, 2, 0, first_keycode, count, 0, 0]
 }
 
 /// GetProperty（テスト用。`_NET_WM_ICON` の読み戻し検証に使う）。
 #[cfg(test)]
-pub const OP_GET_PROPERTY: u8 = 20;
+pub(crate) const OP_GET_PROPERTY: u8 = 20;
 
 #[cfg(test)]
-pub fn req_get_property(
+pub(crate) fn req_get_property(
     window: u32,
     property: u32,
     prop_type: u32,
@@ -330,7 +337,7 @@ pub fn req_get_property(
 /// GetProperty を送って format=32 の値を `u32` 列として読み戻す
 /// （`_NET_WM_ICON` は CARDINAL=32bit 固定なのでこれで十分）。
 #[cfg(test)]
-pub fn get_property_u32s(
+pub(crate) fn get_property_u32s(
     conn: &mut XConn,
     window: u32,
     property: u32,
@@ -364,14 +371,14 @@ pub fn get_property_u32s(
 }
 
 #[cfg(test)]
-pub fn req_query_tree(window: u32) -> Vec<u8> {
+pub(crate) fn req_query_tree(window: u32) -> Vec<u8> {
     let mut req = vec![OP_QUERY_TREE, 0, 2, 0];
     req.extend_from_slice(&window.to_le_bytes());
     req
 }
 
 #[cfg(test)]
-pub fn parse_query_tree_children(reply: &[u8]) -> Result<Vec<u32>> {
+pub(crate) fn parse_query_tree_children(reply: &[u8]) -> Result<Vec<u32>> {
     if reply.len() < 32 {
         bail!("QueryTree リプライが短すぎます");
     }
@@ -389,7 +396,7 @@ pub fn parse_query_tree_children(reply: &[u8]) -> Result<Vec<u32>> {
 
 /// GetImage して BGRX u32 列として返す（テスト用ヘルパ）。
 #[cfg(test)]
-pub fn get_image_pixels(
+pub(crate) fn get_image_pixels(
     conn: &mut XConn,
     drawable: u32,
     x: i16,
@@ -414,7 +421,7 @@ pub fn get_image_pixels(
     Ok(out)
 }
 
-pub fn req_send_event(
+pub(crate) fn req_send_event(
     destination: u32,
     propagate: bool,
     event_mask: u32,
@@ -431,7 +438,7 @@ pub fn req_send_event(
 }
 
 /// ClientMessage（format=32）のワイヤバイト列を組み立てる。`data` は 5 個の CARD32。
-pub fn build_client_message(window: u32, message_type: u32, data: [u32; 5]) -> [u8; 32] {
+pub(crate) fn build_client_message(window: u32, message_type: u32, data: [u32; 5]) -> [u8; 32] {
     let mut ev = [0u8; 32];
     ev[0] = EV_CLIENT_MESSAGE;
     ev[1] = 32;
@@ -445,13 +452,13 @@ pub fn build_client_message(window: u32, message_type: u32, data: [u32; 5]) -> [
 
 /// `data[0]` だけを使う ClientMessage（テスト④が WM_DELETE_WINDOW を自送するのに使う）。
 #[cfg(test)]
-pub fn build_client_message32(window: u32, message_type: u32, data0: u32) -> [u8; 32] {
+pub(crate) fn build_client_message32(window: u32, message_type: u32, data0: u32) -> [u8; 32] {
     build_client_message(window, message_type, [data0, 0, 0, 0, 0])
 }
 
 // --- パケット読み取り ---
 
-pub enum Packet {
+pub(crate) enum Packet {
     Error {
         code: u8,
         seq: u16,
@@ -469,7 +476,7 @@ pub enum Packet {
     },
 }
 
-pub fn read_packet(r: &mut impl Read) -> Result<Packet> {
+pub(crate) fn read_packet(r: &mut impl Read) -> Result<Packet> {
     let mut buf = [0u8; 32];
     r.read_exact(&mut buf)?;
     match buf[0] {
@@ -507,7 +514,7 @@ pub fn read_packet(r: &mut impl Read) -> Result<Packet> {
 
 /// デコード済みイベント（`window.rs` のメインループ/リーダースレッドが使う）。
 #[derive(Debug, Clone)]
-pub enum XEvent {
+pub(crate) enum XEvent {
     KeyPress {
         keycode: u8,
         state: u16,
@@ -539,7 +546,7 @@ pub enum XEvent {
     Other,
 }
 
-pub fn decode_event(code: u8, data: &[u8; 32]) -> XEvent {
+pub(crate) fn decode_event(code: u8, data: &[u8; 32]) -> XEvent {
     match code {
         EV_KEY_PRESS | EV_KEY_RELEASE => {
             let keycode = data[1];
@@ -591,8 +598,8 @@ pub fn decode_event(code: u8, data: &[u8; 32]) -> XEvent {
 /// 書き込み専用ハンドル + sequence/resource-id カウンタ。セットアップ完了後は
 /// このハンドルの `stream` は書き込み専用として使い、読み取りは別スレッド
 /// （`reader_loop`）がクローンしたハンドルで行う。
-pub struct XConn {
-    pub stream: UnixStream,
+pub(crate) struct XConn {
+    pub(crate) stream: UnixStream,
     next_seq: u16,
     resource_id_base: u32,
     resource_id_mask: u32,
@@ -600,7 +607,7 @@ pub struct XConn {
 }
 
 impl XConn {
-    pub fn new(stream: UnixStream, resource_id_base: u32, resource_id_mask: u32) -> Self {
+    pub(crate) fn new(stream: UnixStream, resource_id_base: u32, resource_id_mask: u32) -> Self {
         Self {
             stream,
             next_seq: 1,
@@ -612,14 +619,14 @@ impl XConn {
 
     /// resource-id-mask は実サーバでは連続下位ビットである前提（Xorg/Xvfb は
     /// 常にそう）の最小実装。`base | (counter & mask)`。
-    pub fn alloc_id(&mut self) -> u32 {
+    pub(crate) fn alloc_id(&mut self) -> u32 {
         let id = self.resource_id_base | (self.next_counter & self.resource_id_mask);
         self.next_counter += 1;
         id
     }
 
     /// リプライを期待しないリクエストを送る（sequence だけ進める）。
-    pub fn send_request(&mut self, bytes: &[u8]) -> Result<u16> {
+    pub(crate) fn send_request(&mut self, bytes: &[u8]) -> Result<u16> {
         self.stream.write_all(bytes)?;
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
@@ -631,7 +638,7 @@ impl XConn {
     /// 想定外の Event が割り込んできた場合はログに残して読み飛ばす
     /// （このフェーズでは Expose 等が飛んでくる可能性は低いが、
     /// 万一発生しても致命傷にしないための最小限のフォールバック）。
-    pub fn send_request_and_wait(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn send_request_and_wait(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
         let want_seq = self.send_request(bytes)?;
         loop {
             match read_packet(&mut self.stream)? {
@@ -665,7 +672,7 @@ impl XConn {
 /// 以降は Event のみを想定する（Reply は来ない設計）。Error（type=0）は
 /// ログして継続する（致命的な接続断ではないため）。ソケット切断や
 /// チャンネル送信失敗でループを抜ける。
-pub fn reader_loop(mut stream: UnixStream, tx: Sender<XEvent>) {
+pub(crate) fn reader_loop(mut stream: UnixStream, tx: Sender<XEvent>) {
     loop {
         match read_packet(&mut stream) {
             Ok(Packet::Event { code, data }) => {
@@ -709,11 +716,18 @@ mod decode_tests {
         d[28..30].copy_from_slice(&0x8u16.to_le_bytes());
         assert!(matches!(
             decode_event(EV_KEY_PRESS, &d),
-            XEvent::KeyPress { keycode: 37, state: 0x8, time: 123_456 }
+            XEvent::KeyPress {
+                keycode: 37,
+                state: 0x8,
+                time: 123_456
+            }
         ));
         assert!(matches!(
             decode_event(EV_KEY_RELEASE, &d),
-            XEvent::KeyRelease { keycode: 37, time: 123_456 }
+            XEvent::KeyRelease {
+                keycode: 37,
+                time: 123_456
+            }
         ));
     }
 
@@ -724,7 +738,10 @@ mod decode_tests {
         d[22..24].copy_from_slice(&1080u16.to_le_bytes());
         assert!(matches!(
             decode_event(EV_CONFIGURE_NOTIFY, &d),
-            XEvent::ConfigureNotify { width: 1920, height: 1080 }
+            XEvent::ConfigureNotify {
+                width: 1920,
+                height: 1080
+            }
         ));
         assert!(matches!(decode_event(EV_FOCUS_OUT, &d), XEvent::FocusOut));
     }

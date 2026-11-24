@@ -15,21 +15,27 @@ use std::sync::Mutex;
 
 use log::{LevelFilter, Log, Metadata, Record};
 
+use crate::bridge::LockExt;
+
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// 現在ログの書き込み先（致命エラーダイアログで案内する）。
-pub fn log_path() -> Option<PathBuf> {
-    LOG_PATH.lock().unwrap().clone()
+pub(crate) fn log_path() -> Option<PathBuf> {
+    LOG_PATH.lock_unpoisoned().clone()
 }
 
-pub struct FileLogger {
+pub(crate) struct FileLogger {
     file: Mutex<Option<File>>,
     level: LevelFilter,
 }
 
 fn open_append(path: &std::path::Path) -> Option<File> {
-    let f = OpenOptions::new().create(true).append(true).open(path).ok()?;
-    *LOG_PATH.lock().unwrap() = Some(path.to_path_buf());
+    let f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    *LOG_PATH.lock_unpoisoned() = Some(path.to_path_buf());
     Some(f)
 }
 
@@ -49,7 +55,7 @@ impl FileLogger {
 
     /// `game_id` が確定した後に呼ぶ: 以後のログをセーブディレクトリの `noiria.log` に切り替える。
     /// 切り替えに失敗した場合は exe 隣接ログのまま続行する（呼び出し元は結果を無視してよい）。
-    pub fn switch_to_game_log(&self, game_id: &str) {
+    pub(crate) fn switch_to_game_log(&self, game_id: &str) {
         let Ok(dir) = noiria_core::savedata::save_dir(game_id) else {
             return;
         };
@@ -57,7 +63,7 @@ impl FileLogger {
             return;
         }
         if let Some(f) = open_append(&dir.join("noiria.log")) {
-            *self.file.lock().unwrap() = Some(f);
+            *self.file.lock_unpoisoned() = Some(f);
         }
     }
 }
@@ -83,7 +89,7 @@ impl Log for FileLogger {
             record.target(),
             record.args()
         );
-        let mut guard = self.file.lock().unwrap();
+        let mut guard = self.file.lock_unpoisoned();
         match guard.as_mut() {
             Some(f) => {
                 let _ = f.write_all(line.as_bytes());
@@ -97,7 +103,7 @@ impl Log for FileLogger {
     }
 
     fn flush(&self) {
-        if let Some(f) = self.file.lock().unwrap().as_mut() {
+        if let Some(f) = self.file.lock_unpoisoned().as_mut() {
             let _ = f.flush();
         }
     }
@@ -105,13 +111,17 @@ impl Log for FileLogger {
 
 /// ロガーを初期化してグローバル登録する。レベルは環境変数 `NOIRIA_LOG`
 /// （`error`/`warn`/`info`/`debug`/`trace`、既定 `warn`）。
-pub fn init() -> &'static FileLogger {
+pub(crate) fn init() -> &'static FileLogger {
     let level = std::env::var("NOIRIA_LOG")
         .ok()
         .and_then(|s| s.parse::<LevelFilter>().ok())
         .unwrap_or(LevelFilter::Warn);
     let logger: &'static FileLogger = Box::leak(Box::new(FileLogger::new(level)));
     log::set_logger(logger).expect("ロガーは一度しか初期化できません");
-    log::set_max_level(if crate::prof::enabled() { level.max(LevelFilter::Info) } else { level });
+    log::set_max_level(if crate::prof::enabled() {
+        level.max(LevelFilter::Info)
+    } else {
+        level
+    });
     logger
 }

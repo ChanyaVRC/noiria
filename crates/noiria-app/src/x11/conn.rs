@@ -10,14 +10,14 @@ use anyhow::{bail, Context, Result};
 
 /// パース済み DISPLAY（ローカル X11 のみサポート）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplaySpec {
-    pub display: u32,
-    pub screen: u32,
+pub(crate) struct DisplaySpec {
+    pub(crate) display: u32,
+    pub(crate) screen: u32,
 }
 
 /// DISPLAY 文字列 (`:N` / `:N.S` / `unix:N` / `unix:N.S`) を解析する。
 /// ホスト名付き形式 (`host:N`, TCP 接続が要る) は明確なエラーにする。
-pub fn parse_display(s: &str) -> Result<DisplaySpec> {
+pub(crate) fn parse_display(s: &str) -> Result<DisplaySpec> {
     let rest = if let Some(r) = s.strip_prefix("unix:") {
         r
     } else if let Some(r) = s.strip_prefix(':') {
@@ -45,7 +45,7 @@ pub fn parse_display(s: &str) -> Result<DisplaySpec> {
 /// 上書き、Xvfb 等の隔離ディスプレイを指す）が設定されていればそれを優先し、
 /// 通常はユーザーのデスクトップ DISPLAY を汚さない。未設定時は標準の `DISPLAY`
 /// を使う。
-pub fn resolve_display_env() -> Result<String> {
+pub(crate) fn resolve_display_env() -> Result<String> {
     if let Ok(v) = env::var("NOIRIA_X11_TEST_DISPLAY") {
         if !v.is_empty() {
             return Ok(v);
@@ -56,7 +56,7 @@ pub fn resolve_display_env() -> Result<String> {
 
 /// `/tmp/.X11-unix/X{display}` へ接続する。失敗時は同じディスプレイ番号の
 /// abstract socket（Linux 固有、`\0/tmp/.X11-unix/X{display}`）を試す。
-pub fn connect_socket(display: u32) -> Result<UnixStream> {
+pub(crate) fn connect_socket(display: u32) -> Result<UnixStream> {
     let path = format!("/tmp/.X11-unix/X{display}");
     match UnixStream::connect(&path) {
         Ok(s) => return Ok(s),
@@ -157,7 +157,7 @@ fn parse_one_entry(r: &mut &[u8]) -> Option<XauthEntry> {
 
 /// `.Xauthority` から display に対応する MIT-MAGIC-COOKIE-1 を探す。見つから
 /// なければ `None`（呼び出し側は空 auth でハンドシェイクを試みる）。
-pub fn find_mit_cookie(display: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn find_mit_cookie(display: u32) -> Option<(Vec<u8>, Vec<u8>)> {
     let path = xauthority_path()?;
     let data = std::fs::read(&path).ok()?;
     let mut r: &[u8] = &data;
@@ -179,19 +179,19 @@ pub fn find_mit_cookie(display: u32) -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 /// セットアップハンドシェイク成功時に得られる情報。
-pub struct Setup {
-    pub root: u32,
+pub(crate) struct Setup {
+    pub(crate) root: u32,
     /// 先頭スクリーンの寸法（px, mm）。初期ウィンドウサイズの決定（DPI 推定と収まる上限）に使う。
-    pub screen_px: (u16, u16),
-    pub screen_mm: (u16, u16),
-    pub root_visual: u32,
-    pub depth: u8,
-    pub resource_id_base: u32,
-    pub resource_id_mask: u32,
+    pub(crate) screen_px: (u16, u16),
+    pub(crate) screen_mm: (u16, u16),
+    pub(crate) root_visual: u32,
+    pub(crate) depth: u8,
+    pub(crate) resource_id_base: u32,
+    pub(crate) resource_id_mask: u32,
     /// バイト単位（ワイヤ上は 4 バイト単位で送られてくるので 4 倍済み）。
-    pub max_request_length: u32,
-    pub min_keycode: u8,
-    pub max_keycode: u8,
+    pub(crate) max_request_length: u32,
+    pub(crate) min_keycode: u8,
+    pub(crate) max_keycode: u8,
 }
 
 fn pad4(buf: &mut Vec<u8>) {
@@ -244,7 +244,11 @@ const BYTE_ORDER_LSB: u8 = b'l';
 /// セットアップハンドシェイクを行い、TrueColor visual（depth 24/32、
 /// red-mask==0xFF0000）を検証して返す。想定外の visual / image-byte-order は
 /// 明確なエラーにする（バイトスワップは初版非対応）。
-pub fn handshake(stream: &mut UnixStream, auth_name: &[u8], auth_data: &[u8]) -> Result<Setup> {
+pub(crate) fn handshake(
+    stream: &mut UnixStream,
+    auth_name: &[u8],
+    auth_data: &[u8],
+) -> Result<Setup> {
     let mut req = Vec::new();
     req.push(BYTE_ORDER_LSB);
     req.push(0);

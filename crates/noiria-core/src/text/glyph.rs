@@ -161,7 +161,11 @@ pub(super) fn rasterize_glyph(
             unique_rx.dedup();
             let rx_index: Vec<usize> = rx_for_dy
                 .iter()
-                .map(|r| unique_rx.binary_search(r).unwrap())
+                .map(|r| {
+                    unique_rx
+                        .binary_search(r)
+                        .expect("unique_rx は rx_for_dy から生成されている")
+                })
                 .collect();
 
             let num_r = unique_rx.len();
@@ -244,4 +248,3 @@ pub(super) fn rasterize_glyph(
 
     out
 }
-

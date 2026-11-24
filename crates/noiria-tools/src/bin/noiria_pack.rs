@@ -181,7 +181,12 @@ fn main() -> Result<()> {
     );
     if args.list {
         for e in &packed.entries {
-            println!("  {}  {} バイト{}", e.path, e.plain_len, e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default());
+            println!(
+                "  {}  {} バイト{}",
+                e.path,
+                e.plain_len,
+                e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default()
+            );
         }
     }
     println!("{}", excluded_summary(&packed.excluded));
@@ -200,7 +205,14 @@ mod tests {
 
     #[test]
     fn hex_key_accepts_exactly_64_hex_digits() {
-        let key = parse_hex_key(&"0aF".repeat(21).chars().chain("b".chars()).collect::<String>()).unwrap();
+        let key = parse_hex_key(
+            &"0aF"
+                .repeat(21)
+                .chars()
+                .chain("b".chars())
+                .collect::<String>(),
+        )
+        .unwrap();
         assert_eq!(key[0], 0x0a);
         assert!(parse_hex_key(&"a".repeat(63)).is_err());
     }

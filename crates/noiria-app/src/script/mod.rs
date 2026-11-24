@@ -1,8 +1,15 @@
 //! スクリプトスレッド: tokio current-thread + LocalSet 上で V8 (JsRuntime) を動かす。
 
-pub mod engine_state;
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b1_tests;
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b2_tests;
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b3_tests;
+pub(crate) mod engine_state;
 #[cfg(feature = "engine-v8")]
 mod loader;
+mod numconv;
 #[cfg(feature = "engine-v8")]
 mod ops_audio;
 #[cfg(feature = "engine-v8")]
@@ -17,25 +24,18 @@ mod ops_text;
 mod ops_trans;
 #[cfg(feature = "engine-v8")]
 mod ops_video;
-mod numconv;
-mod runtime_modules;
-mod ui_cache;
-#[cfg(feature = "engine-v8")]
-pub mod state;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b1_tests;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b2_tests;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b3_tests;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod r2_tests;
+mod runtime_modules;
+#[cfg(feature = "engine-v8")]
+mod state;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod tag_behavior_tests;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod tag_harness;
 #[cfg(feature = "engine-tsint")]
-pub mod tsint_engine;
+pub(crate) mod tsint_engine;
+mod ui_cache;
 #[cfg(feature = "engine-v8")]
 mod util;
 
@@ -94,36 +94,36 @@ impl Wake for DrainWake {
 }
 
 /// 拡張へ渡す初期化コンテキスト。
-pub struct EngineCtx {
-    pub scene: SharedScene,
-    pub proxy: WakeSink,
-    pub input_rx: UnboundedReceiver<InputEvent>,
-    pub trans_notify: Arc<Notify>,
-    pub audio_tx: Sender<AudioCmd>,
-    pub audio_shared: Arc<AudioShared>,
-    pub game_dir: GameDir,
-    pub config: GameConfig,
-    pub start: Instant,
+pub(crate) struct EngineCtx {
+    pub(crate) scene: SharedScene,
+    pub(crate) proxy: WakeSink,
+    pub(crate) input_rx: UnboundedReceiver<InputEvent>,
+    pub(crate) trans_notify: Arc<Notify>,
+    pub(crate) audio_tx: Sender<AudioCmd>,
+    pub(crate) audio_shared: Arc<AudioShared>,
+    pub(crate) game_dir: GameDir,
+    pub(crate) config: GameConfig,
+    pub(crate) start: Instant,
     /// 現在時刻の供給源（`crate::clock::Clock`）。windowed 実行は `Clock::Real`
     /// （挙動不変）、ヘッドレスは `crate::main` が作る `Clock::Virtual` を共有する
     /// （`docs/implementation-notes.md`「2026-07-13 dist フレーム差異の調査と
     /// headless 決定論化」参照）。
-    pub clock: Clock,
+    pub(crate) clock: Clock,
     /// ヘッドレス専用のロックステップ同期カウンタ（`crate::bridge::InputSync` 参照）。
     /// windowed 実行は生成するだけで誰も観測しない（挙動不変）。
-    pub input_sync: InputSync,
+    pub(crate) input_sync: InputSync,
     /// tick ドレインバリア用カウンタ（`crate::bridge::TickSync` 参照）。tsint の
     /// `drive()` ループに加え、V8 の `ops_sys.rs::op_wait`（`EngineState.tick_sync`
     /// 経由）も watch バリアの完了報告（`TickSync::react`）に使う。windowed は
     /// 生成するだけで誰も観測しない（挙動不変）。
-    pub tick_sync: TickSync,
+    pub(crate) tick_sync: TickSync,
     /// ヘッドレス（V8 専用）の `op_wait` 仮想 in-flight カウンタ
     /// （`crate::bridge::PendingWaits` 参照）。tsint/windowed は生成するだけで誰も
     /// 観測しない（挙動不変）。
-    pub pending_waits: PendingWaits,
+    pub(crate) pending_waits: PendingWaits,
     /// タグ振る舞いテストハーネス専用の ops 呼び出し記録先（既定 `None`、本番は常に無効）。
     /// `docs/implementation-notes.md`「2026-07-11 タグ振る舞いテストスイート」参照。
-    pub op_log: Option<engine_state::SharedOpLog>,
+    pub(crate) op_log: Option<engine_state::SharedOpLog>,
 }
 
 #[cfg(feature = "engine-v8")]
@@ -223,30 +223,16 @@ extension!(
     ],
     options = { ctx: EngineCtx },
     state = |state, opt| {
-        let ctx = opt.ctx;
-        state.put(InputRx(Rc::new(tokio::sync::Mutex::new(ctx.input_rx))));
+        let (engine_state, input_rx) = EngineState::from_ctx(opt.ctx);
+        state.put(InputRx(Rc::new(tokio::sync::Mutex::new(input_rx))));
         state.put(state::InputWaitEpoch::default());
-        state.put(EngineState::new(
-            ctx.scene,
-            ctx.proxy,
-            ctx.trans_notify,
-            ctx.audio_tx,
-            ctx.audio_shared,
-            ctx.game_dir,
-            ctx.config,
-            ctx.start,
-            ctx.clock,
-            ctx.input_sync,
-            ctx.tick_sync,
-            ctx.pending_waits,
-            ctx.op_log,
-        ));
+        state.put(engine_state);
     },
 );
 
 /// スクリプトスレッドを起動する。スクリプト終了（正常/異常とも）でメインループへ Quit を送る。
 #[cfg(feature = "engine-v8")]
-pub fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
+pub(crate) fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("noiria-script".into())
         .spawn(move || {
@@ -1186,7 +1172,8 @@ ops.op_quit();
             &|| {
                 pending_waits.get() == 1
                     && op_log
-                        .lock().unwrap()
+                        .lock()
+                        .unwrap()
                         .iter()
                         .any(|line| line == "log info armed")
             },
@@ -1200,7 +1187,8 @@ ops.op_quit();
             &|| {
                 pending_waits.get() == 1
                     && op_log
-                        .lock().unwrap()
+                        .lock()
+                        .unwrap()
                         .iter()
                         .any(|line| line == "log info before-scene-gate")
             },
@@ -1218,7 +1206,8 @@ ops.op_quit();
         );
         assert!(
             op_log
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .iter()
                 .any(|line| line == "log info continued"),
             "barrier 完了前に JavaScript 継続が完走していません"

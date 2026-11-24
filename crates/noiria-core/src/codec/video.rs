@@ -195,90 +195,81 @@ impl<R: Read + Seek> MjpegAvi<R> {
             &head[0..4] == b"RIFF" && &head[8..12] == b"AVI ",
             "AVI ファイルではありません"
         );
-        let mut width = 0u32;
-        let mut height = 0u32;
-        let mut fps = 30.0f32;
-        let mut frames = Vec::new();
-
-        // LIST の入れ子の上限。実在の AVI は RIFF > LIST(hdrl) > LIST(strl) 程度（3 段）。
-        const MAX_LIST_DEPTH: u32 = 8;
-
-        // RIFF チャンクの走査（LIST は再帰的に中を見る）
-        #[allow(clippy::too_many_arguments)]
-        fn walk<R: Read + Seek>(
-            reader: &mut R,
+        struct AviScanner<'a, R> {
+            reader: &'a mut R,
             file_len: u64,
-            depth: u32,
-            mut pos: u64,
-            end: u64,
-            width: &mut u32,
-            height: &mut u32,
-            fps: &mut f32,
-            frames: &mut Vec<(u64, usize)>,
-        ) -> Result<()> {
-            while pos.checked_add(8).is_some_and(|p| p <= end) {
-                reader.seek(SeekFrom::Start(pos))?;
-                let mut hdr = [0u8; 8];
-                reader.read_exact(&mut hdr)?;
-                let fourcc = &hdr[0..4];
-                let len = u32le(&hdr, 4) as u64;
-                let body = pos + 8;
-                let body_end = body.checked_add(len).context("AVI チャンクが範囲外")?;
-                ensure!(body_end <= file_len, "AVI チャンクが範囲外");
-                match fourcc {
-                    b"LIST" => {
-                        ensure!(depth < MAX_LIST_DEPTH, "AVI の LIST の入れ子が深すぎます");
-                        // LIST 種別 4 バイトの後に子チャンクが続く
-                        if len >= 4 {
-                            walk(
-                                reader,
-                                file_len,
-                                depth + 1,
-                                body + 4,
-                                body_end,
-                                width,
-                                height,
-                                fps,
-                                frames,
-                            )?;
-                        }
-                    }
-                    b"avih" => {
-                        ensure!(len >= 40, "avih が短すぎます");
-                        let mut avih = [0u8; 40];
-                        reader.read_exact(&mut avih)?;
-                        let usec = u32le(&avih, 0);
-                        if usec > 0 {
-                            *fps = 1_000_000.0 / usec as f32;
-                        }
-                        *width = u32le(&avih, 32);
-                        *height = u32le(&avih, 36);
-                    }
-                    // ストリーム 00 のビデオフレーム (dc=compressed, db=uncompressed扱いも JPEG とみなす)
-                    b"00dc" | b"00db" if len > 0 => {
-                        let len = usize::try_from(len).context("AVI チャンクが範囲外")?;
-                        frames.push((body, len));
-                    }
-                    _ => {}
-                }
-                let Some(next) = body_end.checked_add(len & 1) else {
-                    break;
-                };
-                pos = next; // 2 バイト境界へパディング
-            }
-            Ok(())
+            width: u32,
+            height: u32,
+            fps: f32,
+            frames: Vec<(u64, usize)>,
         }
-        walk(
-            &mut reader,
+
+        impl<R: Read + Seek> AviScanner<'_, R> {
+            // LIST の入れ子の上限。実在の AVI は RIFF > LIST(hdrl) > LIST(strl) 程度（3 段）。
+            const MAX_LIST_DEPTH: u32 = 8;
+
+            fn walk(&mut self, depth: u32, mut pos: u64, end: u64) -> Result<()> {
+                while pos.checked_add(8).is_some_and(|p| p <= end) {
+                    self.reader.seek(SeekFrom::Start(pos))?;
+                    let mut hdr = [0u8; 8];
+                    self.reader.read_exact(&mut hdr)?;
+                    let fourcc = &hdr[0..4];
+                    let len = u32le(&hdr, 4) as u64;
+                    let body = pos + 8;
+                    let body_end = body.checked_add(len).context("AVI チャンクが範囲外")?;
+                    ensure!(body_end <= self.file_len, "AVI チャンクが範囲外");
+                    match fourcc {
+                        b"LIST" => {
+                            ensure!(
+                                depth < Self::MAX_LIST_DEPTH,
+                                "AVI の LIST の入れ子が深すぎます"
+                            );
+                            if len >= 4 {
+                                self.walk(depth + 1, body + 4, body_end)?;
+                            }
+                        }
+                        b"avih" => {
+                            ensure!(len >= 40, "avih が短すぎます");
+                            let mut avih = [0u8; 40];
+                            self.reader.read_exact(&mut avih)?;
+                            let usec = u32le(&avih, 0);
+                            if usec > 0 {
+                                self.fps = 1_000_000.0 / usec as f32;
+                            }
+                            self.width = u32le(&avih, 32);
+                            self.height = u32le(&avih, 36);
+                        }
+                        b"00dc" | b"00db" if len > 0 => {
+                            let len = usize::try_from(len).context("AVI チャンクが範囲外")?;
+                            self.frames.push((body, len));
+                        }
+                        _ => {}
+                    }
+                    let Some(next) = body_end.checked_add(len & 1) else {
+                        break;
+                    };
+                    pos = next; // 2 バイト境界へパディング
+                }
+                Ok(())
+            }
+        }
+
+        let mut scanner = AviScanner {
+            reader: &mut reader,
             file_len,
-            0,
-            12,
-            file_len,
-            &mut width,
-            &mut height,
-            &mut fps,
-            &mut frames,
-        )?;
+            width: 0,
+            height: 0,
+            fps: 30.0,
+            frames: Vec::new(),
+        };
+        scanner.walk(0, 12, file_len)?;
+        let AviScanner {
+            width,
+            height,
+            fps,
+            frames,
+            ..
+        } = scanner;
 
         ensure!(!frames.is_empty(), "ビデオフレームがありません");
         ensure!(width > 0 && height > 0, "AVI のサイズ情報がありません");
@@ -1251,7 +1242,10 @@ mod tests {
 
     #[test]
     fn avi_list_nesting_is_depth_limited() {
-        assert!(MjpegAvi::parse(nested_avi(3)).is_ok(), "実在する程度の入れ子は読める");
+        assert!(
+            MjpegAvi::parse(nested_avi(3)).is_ok(),
+            "実在する程度の入れ子は読める"
+        );
         assert!(MjpegAvi::parse(nested_avi(200)).is_err());
         // 数万重でもスタックを使い切らず Err を返す。
         assert!(MjpegAvi::parse(nested_avi(20_000)).is_err());
@@ -1327,7 +1321,11 @@ mod tests {
             assert!((video.fps() - 15.0).abs() < 0.1);
 
             for (i, want) in expected.iter().enumerate() {
-                assert_eq!(video.next_frame().unwrap().as_ref(), Some(want), "frame {i}");
+                assert_eq!(
+                    video.next_frame().unwrap().as_ref(),
+                    Some(want),
+                    "frame {i}"
+                );
             }
             assert!(video.next_frame().unwrap().is_none());
 
@@ -1419,7 +1417,8 @@ mod tests {
         );
         let ivf = include_bytes!("../../tests/fixtures/vp9_p2_10bit_yuv420_16x16_2f.ivf").to_vec();
 
-        let cases: [(&str, &str, Vec<u8>); 2] = [("avi_reuse", "avi", avi), ("ivf_reuse", "ivf", ivf)];
+        let cases: [(&str, &str, Vec<u8>); 2] =
+            [("avi_reuse", "avi", avi), ("ivf_reuse", "ivf", ivf)];
         for (tag, ext, bytes) in cases {
             let mut ref_src = open_video(bytes.clone()).unwrap();
             let mut expected = Vec::new();

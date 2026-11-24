@@ -143,7 +143,10 @@ fn wait_for_clean_root(display: &str) {
     let spec = conn::parse_display(display).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while top_child_window(spec).is_some() {
-        assert!(Instant::now() < deadline, "root に古いウィンドウが残っています");
+        assert!(
+            Instant::now() < deadline,
+            "root に古いウィンドウが残っています"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -201,7 +204,10 @@ fn client_message_wm_delete_window_forwards_window_close_then_forces_quit() {
         .unwrap();
 
     let close = recv_input(&mut input_rx);
-    assert_eq!((close.kind, close.key.as_deref()), ("key", Some("WindowClose")));
+    assert_eq!(
+        (close.kind, close.key.as_deref()),
+        ("key", Some("WindowClose"))
+    );
     thread::sleep(Duration::from_millis(700));
     assert!(!handle.is_finished(), "猶予内に閉じてはならない");
     let result = handle
@@ -417,7 +423,10 @@ fn recv_input(rx: &mut UnboundedReceiver<InputEvent>) -> InputEvent {
         if let Ok(ev) = rx.try_recv() {
             return ev;
         }
-        assert!(Instant::now() < deadline, "InputEvent を受信できませんでした");
+        assert!(
+            Instant::now() < deadline,
+            "InputEvent を受信できませんでした"
+        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -493,9 +502,7 @@ fn spawn_red_window(display: &str) -> Running {
     let mut pm = noiria_core::pixmap::Pixmap::new(320, 240);
     pm.fill([255, 0, 0, 255]);
     {
-        let layer = scene
-            .layer_mut(noiria_core::scene::Page::Fore, id)
-            .unwrap();
+        let layer = scene.layer_mut(noiria_core::scene::Page::Fore, id).unwrap();
         layer.pixmap = Some(Arc::new(pm));
         layer.visible = true;
     }
@@ -562,7 +569,8 @@ fn resize_letterboxes_frame_and_inverse_maps_mouse() {
     let red = 0x00FF_0000u32;
 
     // 800x240: 左右 240px の黒帯、中央 320 幅が赤。
-    r.c.send_request(&req_configure_size(r.wid, 800, 240)).unwrap();
+    r.c.send_request(&req_configure_size(r.wid, 800, 240))
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
         let px = proto::get_image_pixels(&mut r.c, r.wid, 0, 120, 800, 1).unwrap();
@@ -598,7 +606,8 @@ fn resize_letterboxes_frame_and_inverse_maps_mouse() {
     assert!(recv_input(&mut r.input_rx).x < 0.0);
 
     // 2 倍 (640x480): 全面が赤で、マウスは 1/2 倍。
-    r.c.send_request(&req_configure_size(r.wid, 640, 480)).unwrap();
+    r.c.send_request(&req_configure_size(r.wid, 640, 480))
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
         let px = proto::get_image_pixels(&mut r.c, r.wid, 0, 0, 640, 480).unwrap();
@@ -637,7 +646,8 @@ fn f11_and_alt_enter_request_wm_fullscreen_toggle() {
     let mut expect_toggle = |r: &mut Running, ev: [u8; 32]| {
         r.send(&ev);
         loop {
-            match proto::read_packet(&mut wm.stream).expect("偽 WM がイベントを受信できません") {
+            match proto::read_packet(&mut wm.stream).expect("偽 WM がイベントを受信できません")
+            {
                 proto::Packet::Event { code, data } if code == proto::EV_CLIENT_MESSAGE => {
                     let ty = u32::from_le_bytes(data[8..12].try_into().unwrap());
                     let d0 = u32::from_le_bytes(data[12..16].try_into().unwrap());
@@ -693,7 +703,11 @@ fn wm_delete_window_with_dead_script_quits_immediately() {
     let r = spawn_red_window(&display);
     let t0 = Instant::now();
     r.finish();
-    assert!(t0.elapsed() < crate::input::CLOSE_GRACE, "{:?}", t0.elapsed());
+    assert!(
+        t0.elapsed() < crate::input::CLOSE_GRACE,
+        "{:?}",
+        t0.elapsed()
+    );
 }
 
 fn fake_setup(px: (u16, u16), mm: (u16, u16)) -> conn::Setup {
@@ -716,16 +730,31 @@ fn fake_setup(px: (u16, u16), mm: (u16, u16)) -> conn::Setup {
 fn initial_size_follows_screen_dpi_and_fits_the_screen() {
     use super::initial_size;
     // Xvfb 既定（96dpi）: 画面と同じ 1280x720 でも縮めない。
-    assert_eq!(initial_size(&fake_setup((1280, 720), (339, 191)), 1280, 720), (1280, 720));
+    assert_eq!(
+        initial_size(&fake_setup((1280, 720), (339, 191)), 1280, 720),
+        (1280, 720)
+    );
     // 丸め誤差で 97dpi になっても等倍扱い（108 未満は 96）。
-    assert_eq!(initial_size(&fake_setup((1280, 720), (335, 188)), 1280, 720), (1280, 720));
+    assert_eq!(
+        initial_size(&fake_setup((1280, 720), (335, 188)), 1280, 720),
+        (1280, 720)
+    );
     // 4K・192dpi: 2 倍が画面に収まるのでそのまま。
-    assert_eq!(initial_size(&fake_setup((3840, 2160), (508, 286)), 1280, 720), (2560, 1440));
+    assert_eq!(
+        initial_size(&fake_setup((3840, 2160), (508, 286)), 1280, 720),
+        (2560, 1440)
+    );
     // 1080p・144dpi: 1.5 倍は画面の 92% を超えるので、アスペクトを保って縮める。
     let (w, h) = initial_size(&fake_setup((1920, 1080), (339, 191)), 1280, 720);
     assert!(w <= 1920 * 92 / 100 && h <= 1080 * 92 / 100, "{w}x{h}");
-    assert!((w as f64 / h as f64 - 1280.0 / 720.0).abs() < 0.01, "{w}x{h}");
+    assert!(
+        (w as f64 / h as f64 - 1280.0 / 720.0).abs() < 0.01,
+        "{w}x{h}"
+    );
     assert!(w > 1280, "拡大されるはず: {w}x{h}");
     // 寸法不明（0）でも panic せず等倍。
-    assert_eq!(initial_size(&fake_setup((0, 0), (0, 0)), 1280, 720), (1280, 720));
+    assert_eq!(
+        initial_size(&fake_setup((0, 0), (0, 0)), 1280, 720),
+        (1280, 720)
+    );
 }

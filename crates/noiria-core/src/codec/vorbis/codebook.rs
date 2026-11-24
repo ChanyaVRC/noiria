@@ -100,7 +100,9 @@ impl Huffman {
                 .iter()
                 .position(|&(d, _)| d <= l)
                 .ok_or_else(|| anyhow::anyhow!("コードブックのハフマン符号割当が過剰です"))?;
-            let (mut d, mut p) = open.remove(pos).unwrap();
+            let (mut d, mut p) = open
+                .remove(pos)
+                .expect("pos は直前の position() が返した有効な添字");
             while d < l {
                 open.insert(pos, (d + 1, 2 * p + 1));
                 d += 1;
@@ -467,7 +469,10 @@ mod tests {
                 let mut br = BitReader::new(&data);
                 Codebook::parse(&mut br).map(|_| ())
             });
-            assert!(r.is_err(), "entries={entries} dims={dims} type={lookup_type}");
+            assert!(
+                r.is_err(),
+                "entries={entries} dims={dims} type={lookup_type}"
+            );
         }
     }
 

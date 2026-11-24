@@ -312,7 +312,10 @@ impl DriveRun {
     fn join_within(&mut self, limit: Duration) -> Duration {
         let t = Instant::now();
         while !self.finished.load(AtomicOrdering::SeqCst) {
-            assert!(t.elapsed() < limit, "スクリプトが {limit:?} 以内に終わらない");
+            assert!(
+                t.elapsed() < limit,
+                "スクリプトが {limit:?} 以内に終わらない"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         self.handle.take().unwrap().join().unwrap();
@@ -359,9 +362,20 @@ fn process_cpu_ms() -> f64 {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> isize;
-        fn GetProcessTimes(h: isize, c: *mut FileTime, e: *mut FileTime, k: *mut FileTime, u: *mut FileTime) -> i32;
+        fn GetProcessTimes(
+            h: isize,
+            c: *mut FileTime,
+            e: *mut FileTime,
+            k: *mut FileTime,
+            u: *mut FileTime,
+        ) -> i32;
     }
-    let (mut c, mut e, mut k, mut u) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+    let (mut c, mut e, mut k, mut u) = (
+        FileTime::default(),
+        FileTime::default(),
+        FileTime::default(),
+        FileTime::default(),
+    );
     // SAFETY: 4 つとも有効な書き込み先。現在プロセスのハンドルは疑似ハンドルで閉じる必要がない。
     unsafe {
         GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u);
@@ -390,12 +404,21 @@ fn drive_sleeps_while_waiting_for_input() {
     let cpu_before = process_cpu_ms();
     std::thread::sleep(Duration::from_millis(1000));
     let idle_wakes = run.wakes() - before;
-    eprintln!("DRIVE_IDLE_WAKES_PER_SEC={idle_wakes} DRIVE_IDLE_CPU_MS_PER_SEC={:.1}", process_cpu_ms() - cpu_before);
+    eprintln!(
+        "DRIVE_IDLE_WAKES_PER_SEC={idle_wakes} DRIVE_IDLE_CPU_MS_PER_SEC={:.1}",
+        process_cpu_ms() - cpu_before
+    );
     let sent = Instant::now();
     run.input_tx.send(click()).unwrap();
     let latency = run.join_within(Duration::from_secs(2));
     eprintln!("DRIVE_INPUT_LATENCY_MS={}", latency.as_millis());
     assert!(sent.elapsed() < Duration::from_secs(2));
-    assert!(idle_wakes <= 10, "入力待ちで 1 秒に {idle_wakes} 回起きている（眠っていない）");
-    assert!(latency < Duration::from_millis(100), "入力から再開まで {latency:?}");
+    assert!(
+        idle_wakes <= 10,
+        "入力待ちで 1 秒に {idle_wakes} 回起きている（眠っていない）"
+    );
+    assert!(
+        latency < Duration::from_millis(100),
+        "入力から再開まで {latency:?}"
+    );
 }

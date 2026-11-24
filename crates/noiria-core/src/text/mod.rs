@@ -350,7 +350,8 @@ impl ImageCache {
             return;
         }
         let tick = self.next_tick();
-        self.map.insert(path, (Arc::new(pixmap), AtomicU64::new(tick)));
+        self.map
+            .insert(path, (Arc::new(pixmap), AtomicU64::new(tick)));
         self.bytes += sz;
         while self.bytes > self.cap_bytes {
             let Some(oldest) = self
@@ -1016,4 +1017,3 @@ struct RubyPlacement {
     line_advance: f32,
     byte_pos: usize,
 }
-

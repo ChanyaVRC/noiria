@@ -325,7 +325,10 @@ fn read_project_config(game_dir: &Path, read_excludes: bool) -> Result<ProjectCo
             }
         }
         Err(e) if read_excludes => {
-            return Err(e.context(format!("game.json の pack 設定が不正です: {}", path.display())))
+            return Err(e.context(format!(
+                "game.json の pack 設定が不正です: {}",
+                path.display()
+            )))
         }
         Err(_) => {}
     }
@@ -383,7 +386,10 @@ fn json_kind(v: &serde_json::Value) -> &'static str {
 /// `main` が実在しない場合は検査しない（除外されたファイルの一覧にあるときだけエラー）。
 fn check_protected(excluded: &[ExcludedEntry], main: &str) -> Result<()> {
     let main = normalize_pattern(main);
-    for (what, name) in [("game.json", "game.json"), ("main（game.json の \"main\"）", main.as_str())] {
+    for (what, name) in [
+        ("game.json", "game.json"),
+        ("main（game.json の \"main\"）", main.as_str()),
+    ] {
         if let Some(e) = excluded.iter().find(|e| e.path == name) {
             bail!(
                 "{what} が pak から除外されます（{}）。除外規則を見直してください: {name}",
@@ -418,7 +424,11 @@ impl Matcher {
         }
         Ok(Self {
             root,
-            skip: opts.skip_paths.iter().map(|p| canonicalize_lossy(p)).collect(),
+            skip: opts
+                .skip_paths
+                .iter()
+                .map(|p| canonicalize_lossy(p))
+                .collect(),
             patterns,
             default_excludes: opts.default_excludes,
         })
@@ -516,7 +526,11 @@ fn walk(
         };
         if let Some((source, rule)) = m.exclusion(&rel, &lossy, &path) {
             if source == ExcludeSource::Output {
-                excluded.push(ExcludedEntry { path: rel, source, rule });
+                excluded.push(ExcludedEntry {
+                    path: rel,
+                    source,
+                    rule,
+                });
             } else {
                 list_excluded(&path, &rel, source, &rule, excluded);
             }
@@ -654,8 +668,8 @@ mod tests {
 
     #[test]
     fn duplicate_keys_differing_only_in_ascii_case_are_rejected() {
-        let err = check_duplicate_keys(["assets/Room.png", "assets/room.png"].into_iter())
-            .unwrap_err();
+        let err =
+            check_duplicate_keys(["assets/Room.png", "assets/room.png"].into_iter()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("Room.png") && msg.contains("room.png"));
         assert!(check_duplicate_keys(["a/b", "a/c", "a/b2"].into_iter()).is_ok());
@@ -764,9 +778,13 @@ mod tests {
             ..Encoders::default()
         };
         let key = [4u8; 32];
-        let out =
-            pack_with_encoders(root.path(), &key, &PackOptions::new(true, false), &corrupting)
-                .unwrap();
+        let out = pack_with_encoders(
+            root.path(),
+            &key,
+            &PackOptions::new(true, false),
+            &corrupting,
+        )
+        .unwrap();
         assert_eq!(out.report.webp_converted_count, 0);
         assert!(out.warnings.iter().any(|w| w.contains("room.png")));
         let pak = noiria_core::pak::Pak::open(out.pak, &key).unwrap();
@@ -874,8 +892,8 @@ mod tests {
             ..Encoders::default()
         };
         let key = [6u8; 32];
-        let out = pack_with_encoders(root.path(), &key, &PackOptions::new(false, true), &lossy)
-            .unwrap();
+        let out =
+            pack_with_encoders(root.path(), &key, &PackOptions::new(false, true), &lossy).unwrap();
         assert_eq!(out.report.flac_converted_count, 0);
         assert!(out.warnings.iter().any(|w| w.contains("main.wav")));
         assert!(out.entries.iter().all(|e| e.conversion.is_none()));
@@ -898,7 +916,11 @@ mod tests {
     #[test]
     fn game_json_pack_exclude_is_applied_and_reported_with_its_rule() {
         let root = TestRoot::new("pack_project");
-        write(&root, "game.json", game_json_with_pack(r#"{"exclude":["autotest/**"]}"#).as_bytes());
+        write(
+            &root,
+            "game.json",
+            game_json_with_pack(r#"{"exclude":["autotest/**"]}"#).as_bytes(),
+        );
         write(&root, "main.ts", b"x");
         write(&root, "autotest/a.txt", b"x");
         write(&root, "autotest/sub/b.txt", b"x");
@@ -921,7 +943,11 @@ mod tests {
     #[test]
     fn project_cli_and_default_excludes_are_unioned_and_each_can_be_switched_off() {
         let root = TestRoot::new("pack_union");
-        write(&root, "game.json", game_json_with_pack(r#"{"exclude":["*.md"]}"#).as_bytes());
+        write(
+            &root,
+            "game.json",
+            game_json_with_pack(r#"{"exclude":["*.md"]}"#).as_bytes(),
+        );
         write(&root, "main.ts", b"x");
         write(&root, "notes.md", b"x");
         write(&root, "draft.txt", b"x");
@@ -971,13 +997,20 @@ mod tests {
     #[test]
     fn game_json_and_main_cannot_be_excluded() {
         let root = TestRoot::new("pack_protected");
-        write(&root, "game.json", game_json_with_pack(r#"{"exclude":["*.json"]}"#).as_bytes());
+        write(
+            &root,
+            "game.json",
+            game_json_with_pack(r#"{"exclude":["*.json"]}"#).as_bytes(),
+        );
         write(&root, "main.ts", b"x");
         let err = pack_dir_with(root.path(), &[0u8; 32], &PackOptions::new(false, false))
             .err()
             .expect("game.json の除外は error");
         let msg = format!("{err:#}");
-        assert!(msg.contains("game.json") && msg.contains("project: *.json"), "{msg}");
+        assert!(
+            msg.contains("game.json") && msg.contains("project: *.json"),
+            "{msg}"
+        );
 
         // CLI の --exclude でも同じ。main（game.json の "main" が指すファイル）も保護。
         let root = TestRoot::new("pack_protected_main");
@@ -985,12 +1018,18 @@ mod tests {
         write(&root, "main.ts", b"x");
         let mut opts = PackOptions::new(false, false);
         opts.exclude = vec!["main.ts".into()];
-        let err = pack_dir_with(root.path(), &[0u8; 32], &opts).err().expect("main の除外は error");
+        let err = pack_dir_with(root.path(), &[0u8; 32], &opts)
+            .err()
+            .expect("main の除外は error");
         assert!(format!("{err:#}").contains("main"), "{err:#}");
 
         // ディレクトリ配下の main も、ディレクトリごと除外されれば error。
         let root = TestRoot::new("pack_protected_main_dir");
-        write(&root, "game.json", br#"{"title":"t","id":"t","main":"src/main.ts"}"#);
+        write(
+            &root,
+            "game.json",
+            br#"{"title":"t","id":"t","main":"src/main.ts"}"#,
+        );
         write(&root, "src/main.ts", b"x");
         let mut opts = PackOptions::new(false, false);
         opts.exclude = vec!["src".into()];

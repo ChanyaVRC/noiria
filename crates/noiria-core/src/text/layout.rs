@@ -240,4 +240,3 @@ pub(super) fn is_line_end_forbidden(c: char) -> bool {
             | '≪'
     )
 }
-

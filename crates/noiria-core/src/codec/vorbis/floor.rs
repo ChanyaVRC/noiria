@@ -290,7 +290,7 @@ pub struct Floor1 {
 fn low_neighbor(v: &[u32], x: usize) -> usize {
     let mut best: Option<usize> = None;
     for n in 0..x {
-        if v[n] < v[x] && (best.is_none() || v[n] > v[best.unwrap()]) {
+        if v[n] < v[x] && best.is_none_or(|b| v[n] > v[b]) {
             best = Some(n);
         }
     }
@@ -299,7 +299,7 @@ fn low_neighbor(v: &[u32], x: usize) -> usize {
 fn high_neighbor(v: &[u32], x: usize) -> usize {
     let mut best: Option<usize> = None;
     for n in 0..x {
-        if v[n] > v[x] && (best.is_none() || v[n] < v[best.unwrap()]) {
+        if v[n] > v[x] && best.is_none_or(|b| v[n] < v[b]) {
             best = Some(n);
         }
     }

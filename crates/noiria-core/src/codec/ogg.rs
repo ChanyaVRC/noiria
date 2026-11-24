@@ -280,7 +280,10 @@ impl<R: Read> OggPacketReader<R> {
             if !read_header_or_eof(&mut self.reader, &mut header)? {
                 return Ok(false);
             }
-            ensure!(&header[0..4] == b"OggS", "Ogg キャプチャパターンがありません");
+            ensure!(
+                &header[0..4] == b"OggS",
+                "Ogg キャプチャパターンがありません"
+            );
             let version = header[4];
             ensure!(version == 0, "非対応の Ogg バージョン: {version}");
             let header_type = header[5];

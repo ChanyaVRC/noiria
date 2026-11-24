@@ -35,7 +35,10 @@ pub fn draw() -> RgbaImage {
     let mut rng = Rng::new(4242);
     let mut stars: Vec<Star> = Vec::new();
     let sizes: Vec<f32> = {
-        let mut v: Vec<f32> = (0..140).map(|_| rng.r(0.0, 1.0)).map(|t| 22.0 + 52.0 * t * t).collect();
+        let mut v: Vec<f32> = (0..140)
+            .map(|_| rng.r(0.0, 1.0))
+            .map(|t| 22.0 + 52.0 * t * t)
+            .collect();
         v.sort_by(|a, b| b.partial_cmp(a).unwrap());
         v
     };
@@ -51,7 +54,13 @@ pub fn draw() -> RgbaImage {
             });
             if ok {
                 let rot = rng.r(-0.6, 0.6);
-                stars.push(Star { x, y, r, v0: rng.r(30.0, 180.0), pts: star_pts(x, y, r, r * 0.42, rot, 5) });
+                stars.push(Star {
+                    x,
+                    y,
+                    r,
+                    v0: rng.r(30.0, 180.0),
+                    pts: star_pts(x, y, r, r * 0.42, rot, 5),
+                });
                 break;
             }
         }

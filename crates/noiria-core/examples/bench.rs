@@ -75,11 +75,28 @@ fn bench_resolution(label: &str, w: u32, h: u32) {
         dst.lerp_from(black_box(&a), black_box(&b), 0.5);
     });
     bench_n(&format!("universal_from (wipe) {label}"), 3, 60, || {
-        dst.universal_from(black_box(&a), black_box(&b), black_box(&wipe_rule), 0.5, 64.0);
+        dst.universal_from(
+            black_box(&a),
+            black_box(&b),
+            black_box(&wipe_rule),
+            0.5,
+            64.0,
+        );
     });
-    bench_n(&format!("universal_from (noise-rule) {label}"), 3, 60, || {
-        dst.universal_from(black_box(&a), black_box(&b), black_box(&grad_rule), 0.5, 64.0);
-    });
+    bench_n(
+        &format!("universal_from (noise-rule) {label}"),
+        3,
+        60,
+        || {
+            dst.universal_from(
+                black_box(&a),
+                black_box(&b),
+                black_box(&grad_rule),
+                0.5,
+                64.0,
+            );
+        },
+    );
     bench_n(&format!("scroll_from {label}"), 3, 60, || {
         dst.scroll_from(black_box(&a), black_box(&b), ScrollDir::Left, 0.5);
     });
@@ -302,7 +319,8 @@ fn main() {
             black_box(png::decode(black_box(&bg_png)).unwrap());
         });
         let dec = png::decode(&bg_png).unwrap();
-        let thumb = Pixmap::from_rgba_straight(dec.width, dec.height, &dec.rgba).resize_area(240, 135);
+        let thumb =
+            Pixmap::from_rgba_straight(dec.width, dec.height, &dec.rgba).resize_area(240, 135);
         bench_n("png::encode 240x135 thumb", 1, 10, || {
             black_box(png::encode(thumb.width, thumb.height, &thumb.data));
         });
@@ -336,7 +354,8 @@ fn main() {
     bench_n("chacha20::apply_keystream (4 MiB)", 2, 20, || {
         crypto::apply_keystream(&key, &nonce, 0, black_box(&mut crypto_buf));
     });
-    let compressed_payload = noiria_core::codec::deflate::deflate_compress(&vec![0xABu8; 512 * 1024]);
+    let compressed_payload =
+        noiria_core::codec::deflate::deflate_compress(&vec![0xABu8; 512 * 1024]);
     bench_n("inflate (512 KiB compressed)", 2, 30, || {
         black_box(inflate::inflate(&compressed_payload).unwrap());
     });
@@ -352,13 +371,16 @@ fn main() {
     });
 
     println!("\n=== Audio (Vorbis & Mixer) ===");
-    let ogg_path = root.join("crates/noiria-core/tests/vectors_audio/stereo1_kalmykia_anthem_trimmed.ogg");
+    let ogg_path =
+        root.join("crates/noiria-core/tests/vectors_audio/stereo1_kalmykia_anthem_trimmed.ogg");
     if let Ok(ogg_bytes) = std::fs::read(&ogg_path) {
         bench_n("vorbis decode stereo1.ogg", 1, 5, || {
             black_box(vorbis::decode(black_box(&ogg_bytes)).unwrap());
         });
     }
-    let pcm: Vec<f32> = (0..44100 * 2).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
+    let pcm: Vec<f32> = (0..44100 * 2)
+        .map(|i| ((i as f32) * 0.01).sin() * 0.5)
+        .collect();
     let mut mixer = Mixer::new(2, 48000);
     for ch in 0..4 {
         let src = Resampler::new(BufferSource::new(2, 44100, pcm.clone()), 48000);

@@ -597,7 +597,11 @@ mod tests {
             b.push(c as u64, 8);
         }
         b.push(0, 8); // codebook_count - 1
-        b.push(0x56_4342, 24).push(1, 16).push(2, 24).push(0, 1).push(0, 1);
+        b.push(0x56_4342, 24)
+            .push(1, 16)
+            .push(2, 24)
+            .push(0, 1)
+            .push(0, 1);
         b.push(0, 5).push(0, 5); // 2 エントリ、符号長 1
         b.push(0, 4); // lookup_type 0
         b.push(0, 6).push(0, 16); // time domain placeholder

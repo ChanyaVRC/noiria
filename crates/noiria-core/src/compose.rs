@@ -104,15 +104,11 @@ fn pages_time_dependent(scene: &Scene, now: Instant) -> bool {
     if scene.quake.is_some() {
         return true;
     }
-    scene
-        .fore
-        .values()
-        .chain(scene.back.values())
-        .any(|l| {
-            l.reveal_active(now)
-                || l.tween.as_ref().is_some_and(|t| !t.is_finished(now))
-                || l.crop_tween.as_ref().is_some_and(|t| !t.is_finished(now))
-        })
+    scene.fore.values().chain(scene.back.values()).any(|l| {
+        l.reveal_active(now)
+            || l.tween.as_ref().is_some_and(|t| !t.is_finished(now))
+            || l.crop_tween.as_ref().is_some_and(|t| !t.is_finished(now))
+    })
 }
 
 /// レイヤの実効 x/y/opacity。tween 進行中はその時点の補間値、それ以外は基本値。
@@ -220,7 +216,13 @@ fn draw_layer(out: &mut Pixmap, layer: &Layer, now: Instant, offset: (i32, i32))
 }
 
 /// `compose_page` と同じ結果を、変わっていない下層を再利用して描く（`PrefixCache` 参照）。
-fn compose_page_cached(layers: &LayerMap, now: Instant, offset: (i32, i32), out: &mut Pixmap, cache: &mut PrefixCache) {
+fn compose_page_cached(
+    layers: &LayerMap,
+    now: Instant,
+    offset: (i32, i32),
+    out: &mut Pixmap,
+    cache: &mut PrefixCache,
+) {
     cache.order.clear();
     for (&id, l) in layers {
         if l.visible {
@@ -305,10 +307,16 @@ mod tests {
     fn prefix_cache_matches_a_fresh_compose_after_every_kind_of_change() {
         let (w, h) = (24u32, 16u32);
         let mut scene = Scene::new(w, h);
-        let ids: Vec<u32> = (0..6).map(|_| scene.alloc_layer(LayerKind::Image)).collect();
+        let ids: Vec<u32> = (0..6)
+            .map(|_| scene.alloc_layer(LayerKind::Image))
+            .collect();
         for (k, id) in ids.iter().enumerate() {
             let l = scene.layer_mut(Page::Fore, *id).unwrap();
-            l.pixmap = Some(solid(10 + k as u32, 8, [40 * k as u8, 200 - 20 * k as u8, 90, 128 + 20 * k as u8]));
+            l.pixmap = Some(solid(
+                10 + k as u32,
+                8,
+                [40 * k as u8, 200 - 20 * k as u8, 90, 128 + 20 * k as u8],
+            ));
             l.x = 2 * k as i32;
             l.y = k as i32;
             l.z = k as i32;
@@ -331,7 +339,8 @@ mod tests {
         scene.layer_mut(Page::Fore, ids[5]).unwrap().x = 9;
         check(&scene, "最上位の移動");
         check(&scene, "変更なし");
-        scene.layer_mut(Page::Fore, ids[1]).unwrap().pixmap = Some(solid(12, 9, [250, 10, 10, 255]));
+        scene.layer_mut(Page::Fore, ids[1]).unwrap().pixmap =
+            Some(solid(12, 9, [250, 10, 10, 255]));
         check(&scene, "下位の絵の差し替え");
         let extra = scene.alloc_layer(LayerKind::Image);
         {

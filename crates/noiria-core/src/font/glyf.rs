@@ -228,10 +228,8 @@ fn build_contour(points: &[(f32, f32, bool)]) -> Contour {
         return Contour::default();
     }
 
-    let has_on_curve = points.iter().any(|p| p.2);
     let mut rotated: Vec<(f32, f32, bool)> = Vec::with_capacity(n + 1);
-    if has_on_curve {
-        let start_idx = points.iter().position(|p| p.2).unwrap();
+    if let Some(start_idx) = points.iter().position(|p| p.2) {
         rotated.extend_from_slice(&points[start_idx..]);
         rotated.extend_from_slice(&points[..start_idx]);
     } else {

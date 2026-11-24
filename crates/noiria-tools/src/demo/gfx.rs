@@ -168,7 +168,10 @@ impl Path {
     /// 変幅ストローク（丸端）。`pts` は (x, y, 太さ)。花弁・睫毛・髪の房の先細りに使う。
     pub fn stroke(pts: &[(f32, f32, f32)]) -> Path {
         // sin(pi*t).powf(..) が終端で -ε → NaN になるため太さを正規化する
-        let pts: Vec<(f32, f32, f32)> = pts.iter().map(|&(x, y, w)| (x, y, if w.is_finite() { w.max(0.0) } else { 0.0 })).collect();
+        let pts: Vec<(f32, f32, f32)> = pts
+            .iter()
+            .map(|&(x, y, w)| (x, y, if w.is_finite() { w.max(0.0) } else { 0.0 }))
+            .collect();
         let pts = &pts[..];
         let n = pts.len();
         if n < 2 {
@@ -273,7 +276,10 @@ pub fn catmull_rom(pts: &[(f32, f32)], closed: bool) -> Vec<(f32, f32)> {
             let t2 = t * t;
             let t3 = t2 * t;
             let f = |a: f32, b: f32, c: f32, d: f32| {
-                0.5 * (2.0 * b + (-a + c) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (-a + 3.0 * b - 3.0 * c + d) * t3)
+                0.5 * (2.0 * b
+                    + (-a + c) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (-a + 3.0 * b - 3.0 * c + d) * t3)
             };
             out.push((f(p0.0, p1.0, p2.0, p3.0), f(p0.1, p1.1, p2.1, p3.1)));
         }
@@ -361,7 +367,14 @@ impl Mask {
             for i in 0..n {
                 let a = s[i];
                 let b = s[(i + 1) % n];
-                draw_line(&mut acc, stride, w, h, (a.0 - ox, a.1 - oy), (b.0 - ox, b.1 - oy));
+                draw_line(
+                    &mut acc,
+                    stride,
+                    w,
+                    h,
+                    (a.0 - ox, a.1 - oy),
+                    (b.0 - ox, b.1 - oy),
+                );
             }
         }
         let mut out = vec![0.0f32; w * h];
@@ -372,7 +385,13 @@ impl Mask {
                 out[y * w + x] = sum.abs().min(1.0);
             }
         }
-        Mask { x0, y0, w, h, a: out }
+        Mask {
+            x0,
+            y0,
+            w,
+            h,
+            a: out,
+        }
     }
 
     pub fn full(w: usize, h: usize) -> Mask {
@@ -590,7 +609,11 @@ fn draw_line(acc: &mut [f32], stride: usize, w: usize, h: usize, p0: (f32, f32),
     if (p0.1 - p1.1).abs() < 1e-9 {
         return;
     }
-    let (dir, a, b) = if p0.1 < p1.1 { (1.0f32, p0, p1) } else { (-1.0f32, p1, p0) };
+    let (dir, a, b) = if p0.1 < p1.1 {
+        (1.0f32, p0, p1)
+    } else {
+        (-1.0f32, p1, p0)
+    };
     let dxdy = (b.0 - a.0) / (b.1 - a.1);
     let mut x = a.0;
     let ystart = a.1.max(0.0);
@@ -766,7 +789,11 @@ impl Canvas {
                 } else {
                     0.0
                 };
-                let f = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0 + n).round().clamp(0.0, 255.0) as u8;
+                let f = |v: f32| {
+                    ((v / a).clamp(0.0, 1.0) * 255.0 + n)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
                 if (a * 255.0).round() < 1.0 {
                     img.put_pixel(x as u32, y as u32, Rgba([0, 0, 0, 0]));
                     continue;
@@ -821,7 +848,10 @@ impl Xf {
 
     pub fn inverse(&self, x: f32, y: f32) -> (f32, f32) {
         let (sn, cs) = self.rot.sin_cos();
-        let (dx, dy) = ((x - self.cx - self.tx) / self.s, (y - self.cy - self.ty) / self.s);
+        let (dx, dy) = (
+            (x - self.cx - self.tx) / self.s,
+            (y - self.cy - self.ty) / self.s,
+        );
         (self.cx + dx * cs + dy * sn, self.cy - dx * sn + dy * cs)
     }
 }
@@ -875,7 +905,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// 輪郭線（外側へ `w` 設計 px）を先に敷いてから本体を塗る。
-    pub fn fill_outlined(&mut self, m: &Mask, c: &dyn Fn(f32, f32) -> Rgba32, outline: Rgba32, w: f32) {
+    pub fn fill_outlined(
+        &mut self,
+        m: &Mask,
+        c: &dyn Fn(f32, f32) -> Rgba32,
+        outline: Rgba32,
+        w: f32,
+    ) {
         if w > 0.0 {
             let d = self.dilate(m, w);
             let ring = d.sub(&m.scaled(1.0));
@@ -916,12 +952,21 @@ mod tests {
     #[test]
     fn tapered_stroke_stays_thin_and_closed() {
         // sin(pi*t).powf(..) の終端 NaN で太さが矩形に膨らむ不具合の回帰テスト
-        let p = Path::stroke_spline(&[(150.0, 150.0), (146.0, 210.0), (152.0, 270.0), (166.0, 312.0)], |t| {
-            5.5 * (std::f32::consts::PI * t).sin().powf(0.8) + 0.4
-        });
+        let p = Path::stroke_spline(
+            &[
+                (150.0, 150.0),
+                (146.0, 210.0),
+                (152.0, 270.0),
+                (166.0, 312.0),
+            ],
+            |t| 5.5 * (std::f32::consts::PI * t).sin().powf(0.8) + 0.4,
+        );
         let m = Mask::from_path(&p, (500, 900));
         let row = (200 - m.y0) as usize;
         let covered = (0..m.w).filter(|&x| m.a[row * m.w + x] > 0.5).count();
-        assert!((1..=8).contains(&covered), "stroke width at y=200 is {covered}px");
+        assert!(
+            (1..=8).contains(&covered),
+            "stroke width at y=200 is {covered}px"
+        );
     }
 }

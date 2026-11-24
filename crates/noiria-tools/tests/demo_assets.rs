@@ -77,8 +77,13 @@ fn sprites_have_contract_canvas_and_matching_silhouette() {
             let top = (0..900)
                 .find(|&y| (0..500).any(|x| img.get_pixel(x, y)[3] > 128))
                 .unwrap();
-            assert!((50..=70).contains(&top), "{tag}: 頭頂 y={top} (期待 60 付近)");
-            let bottom_opaque = (0..500).filter(|&x| img.get_pixel(x, 899)[3] == 255).count();
+            assert!(
+                (50..=70).contains(&top),
+                "{tag}: 頭頂 y={top} (期待 60 付近)"
+            );
+            let bottom_opaque = (0..500)
+                .filter(|&x| img.get_pixel(x, 899)[3] == 255)
+                .count();
             assert!(bottom_opaque > 40, "{tag}: 下端まで体が続いていない");
             let transparent = img.pixels().filter(|p| p[3] == 0).count();
             assert!(transparent > 100_000, "{tag}: 透過領域が少なすぎる");
@@ -92,7 +97,11 @@ fn sprites_have_contract_canvas_and_matching_silhouette() {
                 .zip(imgs[0].pixels())
                 .filter(|(a, b)| a[3] != b[3])
                 .count();
-            assert_eq!(diff, 0, "{who}_{}: normal と alpha が {diff} 画素異なる", EXPRS[i]);
+            assert_eq!(
+                diff, 0,
+                "{who}_{}: normal と alpha が {diff} 画素異なる",
+                EXPRS[i]
+            );
         }
         // 首より下の RGBA も一致（差し替え時にガタつかない）
         for (i, img) in imgs.iter().enumerate().skip(1) {
@@ -117,7 +126,11 @@ fn sprites_have_contract_canvas_and_matching_silhouette() {
                 .zip(imgs[0].pixels())
                 .filter(|(a, b)| a != b)
                 .count();
-            assert!(diff > 300, "{who}_{}: normal との表情差が小さすぎる ({diff})", EXPRS[i]);
+            assert!(
+                diff > 300,
+                "{who}_{}: normal との表情差が小さすぎる ({diff})",
+                EXPRS[i]
+            );
         }
     }
 }
@@ -137,9 +150,15 @@ fn sprites_have_no_dark_halo_on_translucent_edges() {
         }
         assert!(n > 500);
         let mean = sum / n as f64;
-        assert!(mean > 20.0, "{who}: 半透明エッジが暗く滲んでいる (mean={mean})");
+        assert!(
+            mean > 20.0,
+            "{who}: 半透明エッジが暗く滲んでいる (mean={mean})"
+        );
         // 完全透明画素の RGB は 0（無意味な色を持たない）
-        assert!(img.pixels().filter(|p| p[3] == 0).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
+        assert!(img
+            .pixels()
+            .filter(|p| p[3] == 0)
+            .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
     }
 }
 
@@ -216,7 +235,10 @@ fn sprites_stay_flat_colored() {
         for e in EXPRS {
             let img = load(&format!("assets/fg/{who}_{e}.png"));
             let n = dominant_colors(&img);
-            assert!((8..=DOMINANT_COLOR_MAX).contains(&n), "{who}_{e}: 主要色 {n} 色（上限 {DOMINANT_COLOR_MAX}）");
+            assert!(
+                (8..=DOMINANT_COLOR_MAX).contains(&n),
+                "{who}_{e}: 主要色 {n} 色（上限 {DOMINANT_COLOR_MAX}）"
+            );
         }
     }
 }
@@ -226,11 +248,22 @@ const DOMINANT_COLOR_MAX: usize = 20;
 #[test]
 fn event_cgs_keep_the_figure_small() {
     // 顔のアップは禁止。人物は画面高さの 1/3 以下・面積 3% 以下の引きの構図
-    for (name, (_, meta)) in [("cg_hinata", cg::cg_hinata_with_meta()), ("cg_shiori", cg::cg_shiori_with_meta())] {
+    for (name, (_, meta)) in [
+        ("cg_hinata", cg::cg_hinata_with_meta()),
+        ("cg_shiori", cg::cg_shiori_with_meta()),
+    ] {
         let (x0, y0, x1, y1) = meta.bbox;
         assert!(y1 > y0 && x1 > x0, "{name}: 人物が描かれていない");
-        assert!(y1 - y0 <= 720 / 3, "{name}: 人物の高さ {} px が画面の 1/3 を超える", y1 - y0);
-        assert!(meta.area as f32 <= 1280.0 * 720.0 * 0.03, "{name}: 人物の面積 {} px が大きすぎる", meta.area);
+        assert!(
+            y1 - y0 <= 720 / 3,
+            "{name}: 人物の高さ {} px が画面の 1/3 を超える",
+            y1 - y0
+        );
+        assert!(
+            meta.area as f32 <= 1280.0 * 720.0 * 0.03,
+            "{name}: 人物の面積 {} px が大きすぎる",
+            meta.area
+        );
     }
 }
 
@@ -335,7 +368,10 @@ fn bgm_files_meet_loop_quality() {
             assert!(d < 0.02, "{name}: ループ境界不連続 {d}");
         }
         let (a, b) = (&ch[0], &ch[1]);
-        let (ma, mb) = (a.iter().sum::<f32>() / n as f32, b.iter().sum::<f32>() / n as f32);
+        let (ma, mb) = (
+            a.iter().sum::<f32>() / n as f32,
+            b.iter().sum::<f32>() / n as f32,
+        );
         let (mut cov, mut va, mut vb) = (0.0f32, 0.0f32, 0.0f32);
         for i in 0..n {
             cov += (a[i] - ma) * (b[i] - mb);
@@ -365,10 +401,16 @@ fn se_files_are_mono_clean_and_faded() {
         assert!((lo..=hi).contains(&secs), "{name}: 長さ {secs}s");
         let peak = s.iter().fold(0f32, |m, &v| m.max(v.abs()));
         assert!(peak > 0.05 && peak <= 0.96, "{name}: ピーク {peak}");
-        assert!((s.iter().sum::<f32>() / s.len() as f32).abs() < 1e-3, "{name}: DC");
+        assert!(
+            (s.iter().sum::<f32>() / s.len() as f32).abs() < 1e-3,
+            "{name}: DC"
+        );
         // click は既存 sample と共用（フェード無しの短い KS 音）。新規 SE は末尾が無音であること
         if name != "click" {
-            assert!(s[s.len() - 1].abs() < 2e-3, "{name}: 末尾が無音になっていない");
+            assert!(
+                s[s.len() - 1].abs() < 2e-3,
+                "{name}: 末尾が無音になっていない"
+            );
         }
     }
 }

@@ -155,7 +155,12 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
     let has_flat_band = !s.horizontal && flat_x0 < flat_x1;
 
     // 影も本体も届かない外側領域のカリング境界。
-    let reach_x = hx + if has_shadow { s.shadow_blur.max(0.5) } else { 0.5 } + 0.5;
+    let reach_x =
+        hx + if has_shadow {
+            s.shadow_blur.max(0.5)
+        } else {
+            0.5
+        } + 0.5;
     let min_x = ((cx - reach_x).floor().max(0.0) as u32).min(ow);
     let max_x = ((cx + reach_x).ceil().max(0.0) as u32).min(ow);
 
@@ -285,10 +290,7 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
             for ox in inner_x1..max_x {
                 shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
             }
-        } else if has_flat_band
-            && dy_body >= hy - r
-            && (!has_shadow || dy_shadow >= hy - r)
-        {
+        } else if has_flat_band && dy_body >= hy - r && (!has_shadow || dy_shadow >= hy - r) {
             let fx0 = flat_x0.max(min_x);
             let fx1 = flat_x1.min(max_x);
             for ox in min_x..fx0 {
@@ -452,7 +454,12 @@ mod tests {
     #[test]
     fn flat_fast_path_matches_the_general_path_pixel_for_pixel() {
         let mut variants = Vec::new();
-        for (horizontal, ramp, pad) in [(false, 0.0, 0), (false, 28.0, 3), (true, 0.0, 2), (false, 0.0, 9)] {
+        for (horizontal, ramp, pad) in [
+            (false, 0.0, 0),
+            (false, 28.0, 3),
+            (true, 0.0, 2),
+            (false, 0.0, 9),
+        ] {
             let mut s = spec(37, 53);
             s.top = [6, 9, 24, 242];
             s.bottom = [250, 190, 30, 17];
@@ -464,11 +471,18 @@ mod tests {
         for s in variants {
             let fast = render_panel(&s);
             // 角丸の半径をほぼ 0 にして一般経路を強制する（半径が 0 のときだけ高速経路に入る）
-            let mut g = PanelSpec { radius: 1e-7, ..s.clone() };
+            let mut g = PanelSpec {
+                radius: 1e-7,
+                ..s.clone()
+            };
             g.border_w = 0.0;
             let slow = render_panel(&g);
             assert_eq!((fast.width, fast.height), (slow.width, slow.height));
-            assert_eq!(fast.data, slow.data, "horizontal={} ramp={} pad={}", s.horizontal, s.ramp, s.pad);
+            assert_eq!(
+                fast.data, slow.data,
+                "horizontal={} ramp={} pad={}",
+                s.horizontal, s.ramp, s.pad
+            );
         }
     }
 
@@ -476,8 +490,8 @@ mod tests {
     fn from_slice_rejects_short_input_and_parses_fields() {
         assert!(PanelSpec::from_slice(&[1.0; 5]).is_none());
         let v = [
-            10.0, 20.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 1.5, 8.0,
-            2.0, 0.5, 6.0, 1.0, 30.0,
+            10.0, 20.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 1.5,
+            8.0, 2.0, 0.5, 6.0, 1.0, 30.0,
         ];
         let s = PanelSpec::from_slice(&v).unwrap();
         assert_eq!((s.w, s.h, s.pad), (10, 20, 6));

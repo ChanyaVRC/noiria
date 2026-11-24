@@ -258,7 +258,14 @@ fn assert_engine_matches_direct(path: &str, ch: char) -> Option<()> {
         &style,
     );
     let g = r.glyphs.first()?;
-    let alpha: Vec<u8> = g.pixmap.data.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
+    let alpha: Vec<u8> = g
+        .pixmap
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| px[3])
+        .collect();
 
     assert_eq!(
         g.pixmap.width, direct.width,

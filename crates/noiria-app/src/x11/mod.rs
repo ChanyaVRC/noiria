@@ -8,9 +8,9 @@
 //!   同じキー集合へマッピングする。
 //! - `window`: `run_windowed` 本体（win32.rs と同型のメッセージループ）。
 
-pub mod conn;
-pub mod keymap;
-pub mod proto;
-pub mod window;
+mod conn;
+mod keymap;
+mod proto;
+mod window;
 
-pub use window::{run_windowed, WindowedParams};
+pub(crate) use window::{run_windowed, WindowedParams};

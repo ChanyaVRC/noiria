@@ -94,14 +94,13 @@ impl ModuleHost for NoiriaTsHost {
     }
 }
 
-
 // =====================================================================
 // スクリプトスレッド本体
 // =====================================================================
 
 /// スクリプトスレッドを起動する。スクリプト終了（正常/異常とも）でメインループへ Quit を送る
 /// （V8 版 `script::spawn` と同じ契約）。
-pub fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
+pub(crate) fn spawn(ctx: EngineCtx) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("noiria-script-tsint".into())
         .spawn(move || {
@@ -123,42 +122,13 @@ fn run_script(ctx: EngineCtx) -> Result<(), String> {
 
 /// `run_script` の計測つき版。`wakes` があれば、`drive` が 1 周するたびに加算する（待機中の起床回数の測定用）。
 fn run_script_counted(ctx: EngineCtx, wakes: Option<&AtomicU64>) -> Result<(), String> {
-    let EngineCtx {
-        scene,
-        proxy,
-        input_rx,
-        trans_notify,
-        audio_tx,
-        audio_shared,
-        game_dir,
-        config,
-        start,
-        clock,
-        input_sync,
-        tick_sync,
-        pending_waits,
-        op_log,
-    } = ctx;
-    let main_rel = config.main.clone();
+    let main_rel = ctx.config.main.clone();
     let host = NoiriaTsHost {
-        game_dir: game_dir.clone(),
+        game_dir: ctx.game_dir.clone(),
     };
 
-    let es = Rc::new(RefCell::new(EngineState::new(
-        scene,
-        proxy,
-        trans_notify,
-        audio_tx,
-        audio_shared,
-        game_dir,
-        config,
-        start,
-        clock,
-        input_sync,
-        tick_sync,
-        pending_waits,
-        op_log,
-    )));
+    let (engine_state, input_rx) = EngineState::from_ctx(ctx);
+    let es = Rc::new(RefCell::new(engine_state));
     let pending = Rc::new(RefCell::new(PendingOps::default()));
 
     let mut interp = Interpreter::new();
@@ -203,4 +173,3 @@ fn run_script_counted(ctx: EngineCtx, wakes: Option<&AtomicU64>) -> Result<(), S
         }
     }
 }
-

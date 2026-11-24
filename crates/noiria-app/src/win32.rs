@@ -33,10 +33,11 @@ use tokio::sync::Notify;
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EndPaint, GetDC, SelectObject, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
-    MonitorFromWindow, PatBlt, ReleaseDC, ScreenToClient, SetBrushOrgEx, SetStretchBltMode,
-    StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BLACKNESS, COLORONCOLOR, DIB_RGB_COLORS, HALFTONE,
-    HDC, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+    BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EndPaint,
+    GetDC, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, MonitorFromWindow, PatBlt, ReleaseDC,
+    ScreenToClient, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, BITMAPINFO,
+    BITMAPINFOHEADER, BLACKNESS, COLORONCOLOR, DIB_RGB_COLORS, HALFTONE, HDC, HMONITOR,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -44,23 +45,24 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
-    VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_LEFT,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10, VK_F11,
+    VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_LEFT, VK_NEXT,
+    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GetClientRect,
-    DispatchMessageW, GetCursorPos, GetWindowLongPtrW, GetWindowPlacement, LoadCursorW,
-    KillTimer, MsgWaitForMultipleObjects, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, GWL_STYLE, HICON, HWND_TOP, IDC_ARROW,
-    IMAGE_FLAGS, MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT,
-    WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_SETICON,
-    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    CreateIconFromResourceEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow,
+    DispatchMessageW, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowPlacement,
+    KillTimer, LoadCursorW, MsgWaitForMultipleObjects, PeekMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, GWL_STYLE, HICON,
+    HWND_TOP, IDC_ARROW, IMAGE_FLAGS, MINMAXINFO, MSG, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_DPICHANGED, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_SETICON, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::bridge::{frame_wait, lock_scene, needs_redraw, InputEvent, SharedScene, UserEvent};
@@ -78,24 +80,24 @@ const CLASS_NAME: &str = "NoiriaWindowClass\0";
 const KEY_PREV_STATE: isize = 1 << 30;
 
 /// メインメッセージループの引数一式。
-pub struct WindowedParams {
-    pub title: String,
-    pub game_w: u32,
-    pub game_h: u32,
-    pub scene: SharedScene,
-    pub input_tx: UnboundedSender<InputEvent>,
-    pub trans_notify: Arc<Notify>,
-    pub start: Instant,
-    pub user_rx: crossbeam_channel::Receiver<UserEvent>,
+pub(crate) struct WindowedParams {
+    pub(crate) title: String,
+    pub(crate) game_w: u32,
+    pub(crate) game_h: u32,
+    pub(crate) scene: SharedScene,
+    pub(crate) input_tx: UnboundedSender<InputEvent>,
+    pub(crate) trans_notify: Arc<Notify>,
+    pub(crate) start: Instant,
+    pub(crate) user_rx: crossbeam_channel::Receiver<UserEvent>,
     /// ウィンドウ生成後に hwnd (isize 化) を格納する。`WakeSink::Win32` が
     /// スクリプトスレッドからの `PostMessageW` 起床先として参照する。
-    pub hwnd_slot: Arc<AtomicIsize>,
+    pub(crate) hwnd_slot: Arc<AtomicIsize>,
     /// `WakeSink::Win32` と同じ「起こし投函済み」フラグ（窓ごと）。
-    pub wake_posted: Arc<AtomicBool>,
+    pub(crate) wake_posted: Arc<AtomicBool>,
     /// ウィンドウ/タスクバーアイコン（ゲーム側 icon.png、無ければエンジン既定）。
-    pub icon: AppIcon,
+    pub(crate) icon: AppIcon,
     /// false ならウィンドウを一切可視化しない（テスト用）。
-    pub visible: bool,
+    pub(crate) visible: bool,
 }
 
 /// フルスクリーンへ入る前のウィンドウ状態（復帰用）。
@@ -356,7 +358,11 @@ fn present(hwnd: HWND, shared: &WindowShared, frame: &Pixmap) {
 }
 
 /// `present` と同じで、（BGRX 変換, 拡大, 転送, 転送のメモリ DC 版）の所要時間を返す（`NOIRIA_PROF` 用）。
-fn present_timed(hwnd: HWND, shared: &WindowShared, frame: &Pixmap) -> (Duration, Duration, Duration, Duration) {
+fn present_timed(
+    hwnd: HWND,
+    shared: &WindowShared,
+    frame: &Pixmap,
+) -> (Duration, Duration, Duration, Duration) {
     let t0 = Instant::now();
     {
         let mut buf = shared.last_frame.borrow_mut();
@@ -523,8 +529,11 @@ fn shared_in_wndproc<'a>(hwnd: HWND) -> Option<&'a WindowShared> {
     unsafe { shared_of(hwnd) }
 }
 
-/// 窓プロシージャ。`RegisterClassW` へ渡すために `unsafe extern "system"` だが、本体は `wndproc_impl`（安全な関数）で、
-/// 呼び出し側（OS）に課す条件は「有効な窓ハンドルとそのメッセージ」だけ。
+/// 窓プロシージャ。`RegisterClassW` へ渡すために `unsafe extern "system"` だが、本体は `wndproc_impl`（安全な関数）。
+///
+/// # Safety
+/// OS（Windows）からのウィンドウメッセージ配送コールバックとして、`run_windowed` が登録した
+/// クラスの有効な `hwnd` と対応するメッセージ引数 (`wparam`, `lparam`) で呼ばれること。
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     wndproc_impl(hwnd, msg, wparam, lparam)
 }
@@ -545,10 +554,7 @@ fn wndproc_impl(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         WM_GETMINMAXINFO => {
             // 生成中（WM_NCCREATE より前）にも送られる。その間は既定のまま。
             if let Some(shared) = shared_in_wndproc(hwnd) {
-                let (w, h) = (
-                    (shared.game_w / 4).max(160),
-                    (shared.game_h / 4).max(90),
-                );
+                let (w, h) = ((shared.game_w / 4).max(160), (shared.game_h / 4).max(90));
                 let mut rc = RECT {
                     left: 0,
                     top: 0,
@@ -618,7 +624,12 @@ fn wndproc_impl(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT
         WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => {
             // SAFETY: 自分の窓へのタイマー登録（コールバックなし）。
             unsafe {
-                SetTimer(Some(hwnd), MODAL_TIMER_ID, FRAME_INTERVAL.as_millis() as u32, None);
+                SetTimer(
+                    Some(hwnd),
+                    MODAL_TIMER_ID,
+                    FRAME_INTERVAL.as_millis() as u32,
+                    None,
+                );
             }
             default()
         }
@@ -1083,7 +1094,12 @@ fn tick(hwnd: HWND, shared: &WindowShared) -> Duration {
         scene.settle_finished_tweens(now);
         animating = scene.is_animating(now);
         let revision = scene.revision;
-        if needs_redraw(revision, fl.last_drawn_revision, animating, fl.was_animating) {
+        if needs_redraw(
+            revision,
+            fl.last_drawn_revision,
+            animating,
+            fl.was_animating,
+        ) {
             let due = fl.last_present + FRAME_INTERVAL;
             if now >= due {
                 fl.last_drawn_revision = revision;
@@ -1118,7 +1134,10 @@ fn tick(hwnd: HWND, shared: &WindowShared) -> Duration {
                 animating,
                 fl.wakes,
                 (cw, ch),
-                shared.last_input.get().map(|t| now.saturating_duration_since(t)),
+                shared
+                    .last_input
+                    .get()
+                    .map(|t| now.saturating_duration_since(t)),
             );
             fl.wakes = 0;
         } else {
@@ -1143,7 +1162,7 @@ fn tick(hwnd: HWND, shared: &WindowShared) -> Duration {
 /// シーン合成/present → `MsgWaitForMultipleObjects` で次のイベントまで待機、
 /// を繰り返す。WM_QUIT (WM_DESTROY 経由、または `UserEvent::Quit` / 閉じる猶予切れからの
 /// `DestroyWindow`) で終了する。
-pub fn run_windowed(p: WindowedParams) -> Result<()> {
+pub(crate) fn run_windowed(p: WindowedParams) -> Result<()> {
     // 既定のタイマー分解能は約 15.6ms で、16ms の待ちが 2 周期（約 31ms）に伸びる。スクリプトスレッドの sleep も同様。
     // SAFETY: プロセス全体のタイマー分解能の要求（`timeEndPeriod(1)` と対。ポインタ引数なし）。
     unsafe {
@@ -1411,7 +1430,10 @@ mod tests {
         fn assert_no_event_pending(&mut self) {
             thread::sleep(Duration::from_millis(150));
             while let Ok(ev) = self.input_rx.try_recv() {
-                assert_eq!(ev.kind, "move", "想定外の InputEvent が届いています: {ev:?}");
+                assert_eq!(
+                    ev.kind, "move",
+                    "想定外の InputEvent が届いています: {ev:?}"
+                );
             }
         }
 
@@ -1481,7 +1503,10 @@ mod tests {
     fn join_within(handle: thread::JoinHandle<Result<()>>, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while !handle.is_finished() {
-            assert!(Instant::now() < deadline, "ウィンドウスレッドが終了しません");
+            assert!(
+                Instant::now() < deadline,
+                "ウィンドウスレッドが終了しません"
+            );
             thread::sleep(Duration::from_millis(10));
         }
         handle.join().unwrap().unwrap();
@@ -1521,7 +1546,11 @@ mod tests {
         for (vk, expected) in cases {
             assert_eq!(vk_to_key(vk), Some(expected), "vk={vk:?}");
         }
-        assert_eq!(vk_to_key(VK_F11), None, "F11 はホストが消費しスクリプトへ渡さない");
+        assert_eq!(
+            vk_to_key(VK_F11),
+            None,
+            "F11 はホストが消費しスクリプトへ渡さない"
+        );
         assert_eq!(
             vk_to_key(VIRTUAL_KEY(b'A' as u16)),
             None,
@@ -1616,7 +1645,11 @@ mod tests {
             (cw as f64 / ch as f64 - GAME_W as f64 / GAME_H as f64).abs() < 0.01,
             "アスペクト比が崩れている: {cw}x{ch}"
         );
-        h.post(WM_LBUTTONDOWN, 0, make_lparam((cw / 2) as i16, (ch / 2) as i16));
+        h.post(
+            WM_LBUTTONDOWN,
+            0,
+            make_lparam((cw / 2) as i16, (ch / 2) as i16),
+        );
         let c = h.recv_click();
         assert!(
             (c.x - GAME_W as f64 / 2.0).abs() <= 1.5 && (c.y - GAME_H as f64 / 2.0).abs() <= 1.5,
@@ -1703,7 +1736,11 @@ mod tests {
         assert_eq!(client_rect(h.hwnd), (mw, mh));
 
         // フルスクリーン中のマウス座標はレターボックスを考慮する（中央 = ゲーム中央）。
-        h.post(WM_LBUTTONDOWN, 0, make_lparam((mw / 2) as i16, (mh / 2) as i16));
+        h.post(
+            WM_LBUTTONDOWN,
+            0,
+            make_lparam((mw / 2) as i16, (mh / 2) as i16),
+        );
         let c = h.recv_click();
         assert!(
             (c.x - GAME_W as f64 / 2.0).abs() <= 2.0 && (c.y - GAME_H as f64 / 2.0).abs() <= 2.0,
@@ -1733,7 +1770,11 @@ mod tests {
         assert_eq!((down.kind, down.key.as_deref()), ("key", Some("Control")));
         // オートリピート（lParam bit 30）は送らない。
         for _ in 0..3 {
-            h.post(WM_KEYDOWN, VK_CONTROL.0 as usize, LPARAM(1 | KEY_PREV_STATE));
+            h.post(
+                WM_KEYDOWN,
+                VK_CONTROL.0 as usize,
+                LPARAM(1 | KEY_PREV_STATE),
+            );
         }
         // 印字文字（WM_CHAR）のリピートも送らない。初回は送る。
         h.post(WM_CHAR, 'a' as usize, LPARAM(1));
@@ -1741,7 +1782,11 @@ mod tests {
         // 後続の別キーが来るまでの間に、リピート分が混入していないこと。
         let a = h.recv();
         assert_eq!((a.kind, a.key.as_deref()), ("key", Some("a")));
-        h.post(WM_KEYUP, VK_CONTROL.0 as usize, LPARAM(1 | (1 << 30) | (1 << 31)));
+        h.post(
+            WM_KEYUP,
+            VK_CONTROL.0 as usize,
+            LPARAM(1 | (1 << 30) | (1 << 31)),
+        );
         let up = h.recv();
         assert_eq!((up.kind, up.key.as_deref()), ("keyup", Some("Control")));
 
@@ -1780,7 +1825,10 @@ mod tests {
         let ev = h.recv();
         assert_eq!((ev.kind, ev.key.as_deref()), ("key", Some("WindowClose")));
         thread::sleep(Duration::from_millis(300));
-        assert!(!h.handle.is_finished(), "スクリプトの返答前に閉じてはならない");
+        assert!(
+            !h.handle.is_finished(),
+            "スクリプトの返答前に閉じてはならない"
+        );
         h.quit();
     }
 
@@ -1817,7 +1865,11 @@ mod tests {
     #[test]
     fn wait_ms_rounds_up_and_maps_max_to_infinite() {
         assert_eq!(wait_ms(Duration::ZERO), 0);
-        assert_eq!(wait_ms(Duration::from_micros(1)), 1, "切り捨てると期限の直前に 0ms 待ちで空回りする");
+        assert_eq!(
+            wait_ms(Duration::from_micros(1)),
+            1,
+            "切り捨てると期限の直前に 0ms 待ちで空回りする"
+        );
         assert_eq!(wait_ms(Duration::from_micros(9_300)), 10);
         assert_eq!(wait_ms(Duration::from_millis(16)), 16);
         assert_eq!(wait_ms(Duration::MAX), u32::MAX);
@@ -1846,7 +1898,10 @@ mod tests {
             if h.scene.lock().unwrap().transition.is_none() {
                 break t0.elapsed();
             }
-            assert!(t0.elapsed() < Duration::from_secs(4), "トランジションが完了しません");
+            assert!(
+                t0.elapsed() < Duration::from_secs(4),
+                "トランジションが完了しません"
+            );
             thread::sleep(Duration::from_millis(5));
         };
         assert!(
@@ -1892,7 +1947,10 @@ mod tests {
         h.quit();
         assert_eq!(slot.load(Ordering::SeqCst), 0);
         post_wake(slot.load(Ordering::SeqCst), &posted);
-        assert!(!posted.load(Ordering::SeqCst), "hwnd 0 では投函も旗の更新もしない");
+        assert!(
+            !posted.load(Ordering::SeqCst),
+            "hwnd 0 では投函も旗の更新もしない"
+        );
     }
 
     /// 指摘 12: `blit_dc` は `buf` が `fw`×`fh` に足りなければ描かない（範囲外を読まない）。
@@ -1902,7 +1960,12 @@ mod tests {
         // SAFETY: テスト用の自分の窓の DC を取得して必ず解放する。`blit_dc` は足りないバッファでは何も読まずに戻る。
         unsafe {
             let hdc = GetDC(Some(h.hwnd));
-            let vp = Viewport { x: 0, y: 0, w: 320, h: 240 };
+            let vp = Viewport {
+                x: 0,
+                y: 0,
+                w: 320,
+                h: 240,
+            };
             blit_dc(hdc, &[0u32; 10], 320, 240, 320, 240, vp);
             ReleaseDC(Some(h.hwnd), hdc);
         }

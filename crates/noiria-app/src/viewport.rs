@@ -7,15 +7,15 @@
 
 /// クライアント領域内でゲームフレームを表示する矩形（クライアント座標、px）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Viewport {
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-    pub h: u32,
+pub(crate) struct Viewport {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
 }
 
 /// アスペクト比を保って `client` に収まる最大の矩形を中央寄せで返す（レターボックス）。
-pub fn fit(client_w: u32, client_h: u32, game_w: u32, game_h: u32) -> Viewport {
+pub(crate) fn fit(client_w: u32, client_h: u32, game_w: u32, game_h: u32) -> Viewport {
     let (cw, ch) = (client_w.max(1) as u64, client_h.max(1) as u64);
     let (gw, gh) = (game_w.max(1) as u64, game_h.max(1) as u64);
     let (w, h) = if cw * gh <= ch * gw {
@@ -35,7 +35,7 @@ impl Viewport {
     /// クライアント座標 → ゲーム（論理）座標。レターボックスの黒帯上の座標はゲーム範囲の外
     /// （負値や `game_w` 超え）になる。クランプしないのは、黒帯のクリックが端にある UI
     /// （画面下端のメッセージ窓内の選択肢など）の誤爆にならないようにするため。
-    pub fn to_game(self, px: f64, py: f64, game_w: u32, game_h: u32) -> (f64, f64) {
+    pub(crate) fn to_game(self, px: f64, py: f64, game_w: u32, game_h: u32) -> (f64, f64) {
         let w = self.w.max(1) as f64;
         let h = self.h.max(1) as f64;
         (
@@ -48,7 +48,7 @@ impl Viewport {
 /// 起動時のクライアントサイズ。`dpi/96` 倍（非整数倍も可）を基本とし、`max_*`
 /// （作業領域からウィンドウ枠を引いた、収まる最大のクライアントサイズ）を超える場合は
 /// アスペクト比を保って縮める。
-pub fn initial_client_size(
+pub(crate) fn initial_client_size(
     game_w: u32,
     game_h: u32,
     dpi: u32,
@@ -68,7 +68,7 @@ pub fn initial_client_size(
 /// クライアント領域 (`cw`x`ch`) のうちゲーム領域 `vp` の外側（黒く塗る帯）。左・右・上・下の順で、幅か高さが 0 の帯は含めない。
 /// 各辺を独立に判定する（1281x720 のクライアントに 1280x720 を出すと、余りは右の 1px だけで `vp.x` は 0 になる）。
 #[cfg(any(windows, test))]
-pub fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, i32, i32)> {
+pub(crate) fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, i32, i32)> {
     let (cw, ch) = (cw as i32, ch as i32);
     let (right, bottom) = (vp.x + vp.w as i32, vp.y + vp.h as i32);
     [
@@ -84,23 +84,41 @@ pub fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, i32, i3
 
 fn scale_threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::thread::available_parallelism().map_or(2, |n| n.get()).min(4))
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .min(4)
+    })
 }
 
 /// 表示サイズへ拡大した 1 フレームのキャッシュ。同じ (フレーム世代, 出力サイズ) の再表示（Win32 の WM_PAINT、
 /// X11 の Expose / ConfigureNotify）では拡大し直さない。拡大は `noiria_core::scale::scale_bilinear`（Win32/X11 共通）。
 #[derive(Default)]
-pub struct ScaleCache {
+pub(crate) struct ScaleCache {
     buf: Vec<u32>,
     key: Option<(u64, u32, u32)>,
     /// 拡大を実際に行った回数（キャッシュが効いているかのテスト用）。
-    pub scales: u32,
+    pub(crate) scales: u32,
 }
 
 impl ScaleCache {
     /// `src`（`sw`x`sh`、世代 `generation`）を `dw`x`dh` へ拡大したものを返す。同サイズなら `src` そのもの。
-    pub fn get<'a>(&'a mut self, src: &'a [u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> &'a [u32] {
-        if (sw, sh) == (dw, dh) || sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw as usize * sh as usize {
+    pub(crate) fn get<'a>(
+        &'a mut self,
+        src: &'a [u32],
+        generation: u64,
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+    ) -> &'a [u32] {
+        if (sw, sh) == (dw, dh)
+            || sw == 0
+            || sh == 0
+            || dw == 0
+            || dh == 0
+            || src.len() < sw as usize * sh as usize
+        {
             return src;
         }
         let key = (generation, dw, dh);
@@ -125,23 +143,31 @@ impl ScaleCache {
 /// 拡大したフレームを黒帯つきの `dw`x`dh` 全面バッファに置いたもの（X11 のようにサーバ側拡縮・帯塗りが無い経路用）。
 /// 出力全体のゼロ埋めはクライアントサイズが変わったときだけ行い、同じ (世代, サイズ) の再表示は何もしない。
 #[derive(Default)]
-pub struct LetterboxCache {
+pub(crate) struct LetterboxCache {
     scaled: ScaleCache,
     dst: Vec<u32>,
     dims: (u32, u32),
     key: Option<(u64, u32, u32)>,
     /// 出力全体をゼロ埋めした回数（テスト用）。
-    pub zero_fills: u32,
+    pub(crate) zero_fills: u32,
 }
 
 impl LetterboxCache {
     #[cfg(test)]
-    pub fn scales(&self) -> u32 {
+    pub(crate) fn scales(&self) -> u32 {
         self.scaled.scales
     }
 
     /// `src`（`sw`x`sh`、世代 `generation`）をレターボックス付きで `dw`x`dh` に置いたバッファと、ゲーム領域を返す。
-    pub fn get(&mut self, src: &[u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> (&[u32], Viewport) {
+    pub(crate) fn get(
+        &mut self,
+        src: &[u32],
+        generation: u64,
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+    ) -> (&[u32], Viewport) {
         let vp = fit(dw, dh, sw, sh);
         let key = (generation, dw, dh);
         if self.key == Some(key) {
@@ -169,7 +195,14 @@ impl LetterboxCache {
 
 /// `LetterboxCache` を使い捨てで使う版（テスト用）。
 #[cfg(test)]
-pub fn blit_letterboxed(src: &[u32], sw: u32, sh: u32, dst: &mut Vec<u32>, dw: u32, dh: u32) -> Viewport {
+pub(crate) fn blit_letterboxed(
+    src: &[u32],
+    sw: u32,
+    sh: u32,
+    dst: &mut Vec<u32>,
+    dw: u32,
+    dh: u32,
+) -> Viewport {
     let mut cache = LetterboxCache::default();
     let (px, vp) = cache.get(src, 0, sw, sh, dw, dh);
     dst.clear();
@@ -266,13 +299,22 @@ mod tests {
     #[test]
     fn to_game_roundtrips_through_forward_mapping() {
         // ゲーム座標 → クライアント座標 → ゲーム座標が一致すること（複数のサイズ・端数倍率）。
-        for &(cw, ch) in &[(1280u32, 720u32), (1920, 1080), (1777, 1000), (800, 900), (3840, 2160)] {
+        for &(cw, ch) in &[
+            (1280u32, 720u32),
+            (1920, 1080),
+            (1777, 1000),
+            (800, 900),
+            (3840, 2160),
+        ] {
             let vp = fit(cw, ch, 1280, 720);
             for &(gx, gy) in &[(0.0, 0.0), (640.0, 360.0), (1279.0, 719.0), (333.0, 666.0)] {
                 let px = vp.x as f64 + gx * vp.w as f64 / 1280.0;
                 let py = vp.y as f64 + gy * vp.h as f64 / 720.0;
                 let (rx, ry) = vp.to_game(px, py, 1280, 720);
-                assert!((rx - gx).abs() < 1e-9 && (ry - gy).abs() < 1e-9, "{cw}x{ch}");
+                assert!(
+                    (rx - gx).abs() < 1e-9 && (ry - gy).abs() < 1e-9,
+                    "{cw}x{ch}"
+                );
             }
         }
     }
@@ -280,9 +322,15 @@ mod tests {
     #[test]
     fn initial_size_scales_with_dpi_including_fractional() {
         assert_eq!(initial_client_size(1280, 720, 96, 4000, 4000), (1280, 720));
-        assert_eq!(initial_client_size(1280, 720, 144, 4000, 4000), (1920, 1080));
+        assert_eq!(
+            initial_client_size(1280, 720, 144, 4000, 4000),
+            (1920, 1080)
+        );
         assert_eq!(initial_client_size(1280, 720, 120, 4000, 4000), (1600, 900));
-        assert_eq!(initial_client_size(1280, 720, 168, 4000, 4000), (2240, 1260));
+        assert_eq!(
+            initial_client_size(1280, 720, 168, 4000, 4000),
+            (2240, 1260)
+        );
     }
 
     #[test]
@@ -342,7 +390,10 @@ mod tests {
         let blue: Vec<u32> = dst[..4].iter().map(|p| p & 0xFF).collect();
         assert_eq!(blue[0], 0);
         assert_eq!(blue[3], 255);
-        assert!(blue[1] < blue[2] && blue[1] > 0 && blue[2] < 255, "{blue:?}");
+        assert!(
+            blue[1] < blue[2] && blue[1] > 0 && blue[2] < 255,
+            "{blue:?}"
+        );
     }
 
     fn painted(bands: &[(i32, i32, i32, i32)], cw: i32, ch: i32) -> Vec<bool> {
@@ -372,14 +423,27 @@ mod tests {
 
     #[test]
     fn letterbox_bands_are_exactly_the_complement_of_the_viewport() {
-        for &(cw, ch) in &[(1280u32, 720u32), (1281, 720), (1280, 721), (2000, 720), (1280, 1000), (1777, 1001), (3, 2)] {
+        for &(cw, ch) in &[
+            (1280u32, 720u32),
+            (1281, 720),
+            (1280, 721),
+            (2000, 720),
+            (1280, 1000),
+            (1777, 1001),
+            (3, 2),
+        ] {
             let vp = fit(cw, ch, 1280, 720);
             let bands = letterbox_bands(vp, cw, ch);
             let m = painted(&bands, cw as i32, ch as i32);
             for y in 0..ch as i32 {
                 for x in 0..cw as i32 {
-                    let inside = x >= vp.x && x < vp.x + vp.w as i32 && y >= vp.y && y < vp.y + vp.h as i32;
-                    assert_eq!(m[(y * cw as i32 + x) as usize], !inside, "{cw}x{ch} ({x},{y})");
+                    let inside =
+                        x >= vp.x && x < vp.x + vp.w as i32 && y >= vp.y && y < vp.y + vp.h as i32;
+                    assert_eq!(
+                        m[(y * cw as i32 + x) as usize],
+                        !inside,
+                        "{cw}x{ch} ({x},{y})"
+                    );
                 }
             }
         }
@@ -387,7 +451,9 @@ mod tests {
     }
 
     fn gradient(w: u32, h: u32) -> Vec<u32> {
-        (0..w * h).map(|i| (i.wrapping_mul(2654435761) >> 8) & 0x00FF_FFFF).collect()
+        (0..w * h)
+            .map(|i| (i.wrapping_mul(2654435761) >> 8) & 0x00FF_FFFF)
+            .collect()
     }
 
     /// 指摘 11: 拡大結果は `scale_bilinear`（Win32 と共通）と画素一致し、帯はゼロ。
@@ -399,13 +465,28 @@ mod tests {
             let mut cache = LetterboxCache::default();
             let (px, vp) = cache.get(&src, 1, sw, sh, dw, dh);
             let mut want = vec![0u32; vp.w as usize * vp.h as usize];
-            noiria_core::scale::scale_bilinear(&src, sw as usize, sh as usize, &mut want, vp.w as usize, vp.h as usize, 1);
+            noiria_core::scale::scale_bilinear(
+                &src,
+                sw as usize,
+                sh as usize,
+                &mut want,
+                vp.w as usize,
+                vp.h as usize,
+                1,
+            );
             for y in 0..dh as usize {
                 for x in 0..dw as usize {
-                    let inside = x >= vp.x as usize && x < (vp.x as u32 + vp.w) as usize && y >= vp.y as usize && y < (vp.y as u32 + vp.h) as usize;
+                    let inside = x >= vp.x as usize
+                        && x < (vp.x as u32 + vp.w) as usize
+                        && y >= vp.y as usize
+                        && y < (vp.y as u32 + vp.h) as usize;
                     let got = px[y * dw as usize + x];
                     if inside {
-                        assert_eq!(got, want[(y - vp.y as usize) * vp.w as usize + (x - vp.x as usize)], "{dw}x{dh} ({x},{y})");
+                        assert_eq!(
+                            got,
+                            want[(y - vp.y as usize) * vp.w as usize + (x - vp.x as usize)],
+                            "{dw}x{dh} ({x},{y})"
+                        );
                     } else {
                         assert_eq!(got, 0, "bar {dw}x{dh} ({x},{y})");
                     }
@@ -420,7 +501,10 @@ mod tests {
     fn letterbox_cache_does_not_redo_work_for_the_same_frame_and_size() {
         let (sw, sh) = (64u32, 36u32);
         let a = gradient(sw, sh);
-        let b = gradient(sw, sh).iter().map(|p| !p & 0x00FF_FFFF).collect::<Vec<_>>();
+        let b = gradient(sw, sh)
+            .iter()
+            .map(|p| !p & 0x00FF_FFFF)
+            .collect::<Vec<_>>();
         let mut c = LetterboxCache::default();
         let first = c.get(&a, 1, sw, sh, 200, 54).0.to_vec();
         assert_eq!((c.scales(), c.zero_fills), (1, 1));
@@ -430,7 +514,11 @@ mod tests {
         assert_eq!((c.scales(), c.zero_fills), (1, 1), "再表示では何もしない");
         let second = c.get(&b, 2, sw, sh, 200, 54).0.to_vec();
         assert_ne!(second, first);
-        assert_eq!((c.scales(), c.zero_fills), (2, 1), "新しいフレームは拡大し直すが、全面ゼロ埋めはしない");
+        assert_eq!(
+            (c.scales(), c.zero_fills),
+            (2, 1),
+            "新しいフレームは拡大し直すが、全面ゼロ埋めはしない"
+        );
         // 左右の黒帯は前フレームのまま 0（ゼロ埋めし直さなくても汚れない）。
         assert_eq!(second[0], 0);
         // 幅だけ変わる（ビューポートの大きさは同じ）と、拡大は使い回して配置だけやり直す。
