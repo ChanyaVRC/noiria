@@ -1,13 +1,6 @@
 //! GetKeyboardMapping の結果を keysym テーブルとして保持し、win32.rs と同じ
-//! キー集合（Enter/Escape/Control/space/矢印上下/PageUp,Down/F5/F9）+
-//! Latin-1/Unicode keysym の印字文字へ変換する。IME 非対応
+//! 特殊キー集合 + Latin-1/Unicode keysym の印字文字へ変換する。IME 非対応
 //! （win32.rs の WM_CHAR 最小互換）。
-//!
-//! **win32.rs との差異（意図的）**: 計画書は矢印キーの keysym 範囲として
-//! 0xFF51〜0xFF54（Left/Up/Right/Down）を挙げているが、参照実装である
-//! win32.rs 自体は VK_LEFT/VK_RIGHT を一切ハンドルしていない（VK_UP/VK_DOWN
-//! のみ）。本実装は「win32.rs と同じキー集合のみ」という上位の指示を優先し、
-//! ArrowLeft/ArrowRight は生成しない（win32.rs と完全に挙動を一致させる）。
 
 use anyhow::{bail, Result};
 
@@ -63,38 +56,70 @@ pub fn parse_reply(min_keycode: u8, reply: &[u8]) -> Result<Keymap> {
     })
 }
 
+const KS_BACKSPACE: u32 = 0xFF08;
+const KS_TAB: u32 = 0xFF09;
 pub const KS_RETURN: u32 = 0xFF0D;
 const KS_ESCAPE: u32 = 0xFF1B;
 const KS_CONTROL_L: u32 = 0xFFE3;
 const KS_CONTROL_R: u32 = 0xFFE4;
 const KS_SPACE: u32 = 0x0020;
+const KS_HOME: u32 = 0xFF50;
+const KS_LEFT: u32 = 0xFF51;
 const KS_UP: u32 = 0xFF52;
+const KS_RIGHT: u32 = 0xFF53;
 const KS_DOWN: u32 = 0xFF54;
 const KS_PAGE_UP: u32 = 0xFF55;
 const KS_PAGE_DOWN: u32 = 0xFF56;
+const KS_END: u32 = 0xFF57;
+const KS_DELETE: u32 = 0xFFFF;
+const KS_F1: u32 = 0xFFBE;
+const KS_F2: u32 = 0xFFBF;
+const KS_F3: u32 = 0xFFC0;
+const KS_F4: u32 = 0xFFC1;
 const KS_F5: u32 = 0xFFC2;
+const KS_F6: u32 = 0xFFC3;
+const KS_F7: u32 = 0xFFC4;
+const KS_F8: u32 = 0xFFC5;
 const KS_F9: u32 = 0xFFC6;
+const KS_F10: u32 = 0xFFC7;
 pub const KS_F11: u32 = 0xFFC8;
+const KS_F12: u32 = 0xFFC9;
 const KS_SHIFT_L: u32 = 0xFFE1;
 const KS_SHIFT_R: u32 = 0xFFE2;
 const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
 
 /// keysym → `InputEvent.key` 文字列。win32.rs の WM_KEYDOWN/WM_CHAR 送出集合
-/// と同じ結果を返す（"Enter"/"Escape"/"Control"/" "/"ArrowUp"/"ArrowDown"/
-/// "PageUp"/"PageDown"/"F5"/"F9"、または印字 1 文字）。非対応 keysym は None。
+/// と同じ結果を返す。非対応 keysym は None。
 pub fn to_input_key(keysym: u32) -> Option<String> {
     match keysym {
+        KS_BACKSPACE => Some("Backspace".to_string()),
+        KS_TAB => Some("Tab".to_string()),
         KS_RETURN => Some("Enter".to_string()),
         KS_ESCAPE => Some("Escape".to_string()),
         KS_CONTROL_L | KS_CONTROL_R => Some("Control".to_string()),
         KS_SHIFT_L | KS_SHIFT_R => Some("Shift".to_string()),
         KS_SPACE => Some(" ".to_string()),
+        KS_HOME => Some("Home".to_string()),
+        KS_LEFT => Some("ArrowLeft".to_string()),
         KS_UP => Some("ArrowUp".to_string()),
+        KS_RIGHT => Some("ArrowRight".to_string()),
         KS_DOWN => Some("ArrowDown".to_string()),
         KS_PAGE_UP => Some("PageUp".to_string()),
         KS_PAGE_DOWN => Some("PageDown".to_string()),
+        KS_END => Some("End".to_string()),
+        KS_DELETE => Some("Delete".to_string()),
+        KS_F1 => Some("F1".to_string()),
+        KS_F2 => Some("F2".to_string()),
+        KS_F3 => Some("F3".to_string()),
+        KS_F4 => Some("F4".to_string()),
         KS_F5 => Some("F5".to_string()),
+        KS_F6 => Some("F6".to_string()),
+        KS_F7 => Some("F7".to_string()),
+        KS_F8 => Some("F8".to_string()),
         KS_F9 => Some("F9".to_string()),
+        KS_F10 => Some("F10".to_string()),
+        // F11 はホスト（フルスクリーン切替）が消費するためスクリプトへ渡さない。
+        KS_F12 => Some("F12".to_string()),
         // Latin-1 印字文字（space は上で処理済みなので 0x21 から）。
         0x0021..=0x00FF => char::from_u32(keysym)
             .filter(|c| !c.is_control())
@@ -142,25 +167,42 @@ mod tests {
 
     #[test]
     fn to_input_key_special_set_matches_win32() {
-        assert_eq!(to_input_key(KS_RETURN).as_deref(), Some("Enter"));
-        assert_eq!(to_input_key(KS_ESCAPE).as_deref(), Some("Escape"));
-        assert_eq!(to_input_key(KS_CONTROL_L).as_deref(), Some("Control"));
-        assert_eq!(to_input_key(KS_CONTROL_R).as_deref(), Some("Control"));
-        assert_eq!(to_input_key(KS_SHIFT_L).as_deref(), Some("Shift"));
-        assert_eq!(to_input_key(KS_SHIFT_R).as_deref(), Some("Shift"));
+        let cases = [
+            (KS_BACKSPACE, "Backspace"),
+            (KS_TAB, "Tab"),
+            (KS_RETURN, "Enter"),
+            (KS_ESCAPE, "Escape"),
+            (KS_CONTROL_L, "Control"),
+            (KS_CONTROL_R, "Control"),
+            (KS_SHIFT_L, "Shift"),
+            (KS_SHIFT_R, "Shift"),
+            (KS_SPACE, " "),
+            (KS_HOME, "Home"),
+            (KS_LEFT, "ArrowLeft"),
+            (KS_UP, "ArrowUp"),
+            (KS_RIGHT, "ArrowRight"),
+            (KS_DOWN, "ArrowDown"),
+            (KS_PAGE_UP, "PageUp"),
+            (KS_PAGE_DOWN, "PageDown"),
+            (KS_END, "End"),
+            (KS_DELETE, "Delete"),
+            (KS_F1, "F1"),
+            (KS_F2, "F2"),
+            (KS_F3, "F3"),
+            (KS_F4, "F4"),
+            (KS_F5, "F5"),
+            (KS_F6, "F6"),
+            (KS_F7, "F7"),
+            (KS_F8, "F8"),
+            (KS_F9, "F9"),
+            (KS_F10, "F10"),
+            (KS_F12, "F12"),
+        ];
+        for (ks, expected) in cases {
+            assert_eq!(to_input_key(ks).as_deref(), Some(expected), "ks=0x{ks:X}");
+        }
         // F11 はホスト（フルスクリーン切替）が消費するのでスクリプトへは渡さない。
         assert_eq!(to_input_key(KS_F11), None);
-        assert_eq!(to_input_key(KS_SPACE).as_deref(), Some(" "));
-        assert_eq!(to_input_key(KS_UP).as_deref(), Some("ArrowUp"));
-        assert_eq!(to_input_key(KS_DOWN).as_deref(), Some("ArrowDown"));
-        assert_eq!(to_input_key(KS_PAGE_UP).as_deref(), Some("PageUp"));
-        assert_eq!(to_input_key(KS_PAGE_DOWN).as_deref(), Some("PageDown"));
-        assert_eq!(to_input_key(KS_F5).as_deref(), Some("F5"));
-        assert_eq!(to_input_key(KS_F9).as_deref(), Some("F9"));
-        // win32.rs は ArrowLeft/ArrowRight を送出しないので、対応する keysym
-        // (Left=0xFF51, Right=0xFF53) も意図的に None。
-        assert_eq!(to_input_key(0xFF51), None);
-        assert_eq!(to_input_key(0xFF53), None);
     }
 
     #[test]
