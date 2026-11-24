@@ -331,10 +331,6 @@ fn run() -> anyhow::Result<()> {
         config.height
     );
     let engine_name = args.engine.clone().unwrap_or_else(|| config.engine.clone());
-    // ウィンドウ/タスクバーアイコン: ゲーム側 icon.png（無ければエンジン既定）。
-    // ヘッドレス (--autotest) では未使用だが、単純さのため常に計算する。
-    let icon_png = game_dir.read_bytes("icon.png").ok();
-    let app_icon = icon::AppIcon::from_optional_png(icon_png.as_deref());
 
     let scene = Arc::new(Mutex::new(Scene::new(config.width, config.height)));
     let start = Instant::now();
@@ -416,6 +412,11 @@ fn run() -> anyhow::Result<()> {
             fast: args.autotest_fast,
         });
     }
+
+    // ウィンドウ/タスクバーアイコン: ゲーム側 icon.png（無ければエンジン既定）。
+    // ヘッドレス (--autotest) は上で return しているため、窓を出すときだけ復号する。
+    let icon_png = game_dir.read_bytes("icon.png").ok();
+    let app_icon = icon::AppIcon::from_optional_png(icon_png.as_deref());
 
     // 計測モードは無音: オーディオスレッドを起動せず、受信口は捨てる（送信は黙って失敗する）。
     let _audio_thread = if args.bench.is_some() {

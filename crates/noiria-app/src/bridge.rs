@@ -3,7 +3,8 @@
 #[cfg(windows)]
 use std::sync::atomic::AtomicIsize;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use noiria_core::scene::Scene;
 use serde::Serialize;
@@ -135,22 +136,56 @@ pub struct InputEvent {
 /// レースを閉じる（`docs/implementation-notes.md`「2026-07-13 headless
 /// ロックステップ完全決定論化」参照）。windowed 経路は生成するだけで誰も観測しない
 /// ため挙動に影響しない。
+#[derive(Default)]
+struct InputSyncInner {
+    gen: AtomicU64,
+    mu: Mutex<()>,
+    cv: Condvar,
+}
+
 #[derive(Clone, Default)]
-pub struct InputSync(Arc<AtomicU64>);
+pub struct InputSync(Arc<InputSyncInner>);
 
 impl InputSync {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(0)))
+        Self(Arc::new(InputSyncInner::default()))
     }
 
-    /// スクリプトスレッド側: 「次の入力待ちへ戻った」ことを記録する。
+    /// スクリプトスレッド側: 「次の入力待ちへ戻った」ことを記録し、待機中の headless を即座に起こす。
     pub fn ack(&self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.0.gen.fetch_add(1, Ordering::SeqCst);
+        let _guard = self.0.mu.lock_unpoisoned();
+        self.0.cv.notify_all();
     }
 
     /// headless.rs 側: 現在の世代値を読む。
     pub fn generation(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
+        self.0.gen.load(Ordering::SeqCst)
+    }
+
+    /// headless.rs 側: 世代が `gen_before` より進むまで `timeout` 上限で Condvar 待機する。
+    /// 進んだら `true`、タイムアウトしたら `false`。
+    pub fn wait_after(&self, gen_before: u64, timeout: Duration) -> bool {
+        if self.generation() > gen_before {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.0.mu.lock_unpoisoned();
+        while self.generation() <= gen_before {
+            let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            if rem.is_zero() {
+                return false;
+            }
+            let (g, _) = self
+                .0
+                .cv
+                .wait_timeout(guard, rem)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = g;
+        }
+        true
     }
 }
 
@@ -195,6 +230,9 @@ impl InputSync {
 pub struct TickSync {
     requested: Arc<AtomicU64>,
     completed: Arc<AtomicU64>,
+    wake_seq: Arc<AtomicU64>,
+    req_notify: Arc<(Mutex<()>, Condvar)>,
+    done_notify: Arc<(Mutex<()>, Condvar)>,
     v8: Arc<Mutex<V8TickState>>,
     deferred_count: Arc<AtomicI64>,
 }
@@ -211,6 +249,9 @@ impl TickSync {
         Self {
             requested: Arc::new(AtomicU64::new(0)),
             completed: Arc::new(AtomicU64::new(0)),
+            wake_seq: Arc::new(AtomicU64::new(0)),
+            req_notify: Arc::new((Mutex::new(()), Condvar::new())),
+            done_notify: Arc::new((Mutex::new(()), Condvar::new())),
             v8: Arc::new(Mutex::new(V8TickState::default())),
             deferred_count: Arc::new(AtomicI64::new(0)),
         }
@@ -221,7 +262,39 @@ impl TickSync {
     /// **後**に呼ぶ（型のドキュメント参照。呼び出し順は `headless.rs` を参照し、
     /// 変更しないこと）。V8 は [`request_for`][Self::request_for] を使う。
     pub fn request(&self) -> u64 {
-        self.requested.fetch_add(1, Ordering::SeqCst) + 1
+        let gen = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        let _g = self.req_notify.0.lock_unpoisoned();
+        self.req_notify.1.notify_all();
+        gen
+    }
+
+    /// headless 側: 入力送信やトランジション完了などで tsint の待機ループを即座に起こす。
+    pub fn notify_script(&self) {
+        self.wake_seq.fetch_add(1, Ordering::SeqCst);
+        let _g = self.req_notify.0.lock_unpoisoned();
+        self.req_notify.1.notify_all();
+    }
+
+    /// tsint 側: `notify_script` の現在世代を読む。
+    pub fn wake_generation(&self) -> u64 {
+        self.wake_seq.load(Ordering::SeqCst)
+    }
+
+    /// tsint 側（ヘッドレス `Intake::Direct` 用）: 新しい tick 要求または `notify_script` が
+    /// 届くまで Condvar で待機する（従来の `thread::sleep(1ms)` ポーリングによる遅延を排除）。
+    pub fn wait_for_request_or_wake(&self, seen_req: u64, seen_wake: u64, timeout: Duration) {
+        if self.requested.load(Ordering::SeqCst) > seen_req
+            || self.wake_seq.load(Ordering::SeqCst) > seen_wake
+        {
+            return;
+        }
+        let guard = self.req_notify.0.lock_unpoisoned();
+        if self.requested.load(Ordering::SeqCst) > seen_req
+            || self.wake_seq.load(Ordering::SeqCst) > seen_wake
+        {
+            return;
+        }
+        let _ = self.req_notify.1.wait_timeout(guard, timeout);
     }
 
     /// headless 側（V8 専用）: `Clock::advance()` の**前**に呼ぶ。`expected_reactors`
@@ -256,7 +329,11 @@ impl TickSync {
     /// 「全 `op_wait` が反応し終わるまで待つ」保証が壊れるため、V8 からは
     /// 呼ばないこと）。
     pub fn mark_complete(&self, gen: u64) {
-        self.completed.fetch_max(gen, Ordering::SeqCst);
+        let prev = self.completed.fetch_max(gen, Ordering::SeqCst);
+        if gen > prev {
+            let _g = self.done_notify.0.lock_unpoisoned();
+            self.done_notify.1.notify_all();
+        }
     }
 
     /// スクリプトスレッド側（V8 の `op_wait` のみ）: 自分がこの世代の仮想クロック
@@ -316,6 +393,30 @@ impl TickSync {
     /// headless 側: 完了世代を読む。
     pub fn completed_generation(&self) -> u64 {
         self.completed.load(Ordering::SeqCst)
+    }
+
+    /// headless 側: `completed_generation() >= target_gen` になるまで `timeout` 上限で Condvar 待機する。
+    pub fn wait_complete(&self, target_gen: u64, timeout: Duration) -> bool {
+        if self.completed_generation() >= target_gen {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.done_notify.0.lock_unpoisoned();
+        while self.completed_generation() < target_gen {
+            let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            if rem.is_zero() {
+                return false;
+            }
+            let (g, _) = self
+                .done_notify
+                .1
+                .wait_timeout(guard, rem)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = g;
+        }
+        true
     }
 }
 

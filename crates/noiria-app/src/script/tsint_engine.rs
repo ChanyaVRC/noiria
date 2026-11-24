@@ -2022,12 +2022,23 @@ impl Intake {
         }
     }
 
-    /// 次に起きるまで眠る。`Direct` は従来どおりの短いポーリング、`Forwarded` は期限か呼び鈴まで。
-    fn sleep(&self, timeout: Option<Duration>) {
+    /// 次に起きるまで眠る。`Direct` は `TickSync` の Condvar で tick 要求/入力通知を即座に受け、
+    /// `Forwarded` は期限か呼び鈴まで眠る。
+    fn sleep(
+        &self,
+        timeout: Option<Duration>,
+        tick_sync: &crate::bridge::TickSync,
+        seen_req: u64,
+        seen_wake: u64,
+    ) {
         match self {
             Intake::Direct(_) => {
                 let t = timeout.map_or(IDLE_POLL_MAX, |t| t.min(IDLE_POLL_MAX));
-                std::thread::sleep(t.max(Duration::from_millis(1)));
+                tick_sync.wait_for_request_or_wake(
+                    seen_req,
+                    seen_wake,
+                    t.max(Duration::from_millis(1)),
+                );
             }
             Intake::Forwarded(f) => f.bell.wait(timeout.unwrap_or(MAX_SLEEP).min(MAX_SLEEP)),
         }
@@ -2055,7 +2066,8 @@ fn drive(
         if let Some(w) = wakes {
             w.fetch_add(1, AtomicOrdering::Relaxed);
         }
-        // 1) 入力を取り込む。
+        // 1) 入力を取り込む前に wake 世代を読んでおき、drain〜sleep の間に届いた通知を取りこぼさない。
+        let wake_seen = es.borrow().tick_sync.wake_generation();
         intake.drain(pending);
 
         // ヘッドレスの tick ドレインバリア（`crate::bridge::TickSync` 参照）:
@@ -2211,7 +2223,8 @@ fn drive(
                 let trans = (!p.trans.is_empty()).then_some(TRANS_POLL);
                 [next_timer, audio, trans].into_iter().flatten().min()
             };
-            intake.sleep(sleep_for);
+            let tick_sync = es.borrow().tick_sync.clone();
+            intake.sleep(sleep_for, &tick_sync, tick_req, wake_seen);
         }
     }
 }
