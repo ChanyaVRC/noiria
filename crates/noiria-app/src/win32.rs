@@ -44,8 +44,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F11, VK_F5, VK_F9, VK_NEXT, VK_PRIOR,
-    VK_RETURN, VK_SHIFT, VK_SPACE, VK_UP,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
+    VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_LEFT,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconFromResourceEx, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GetClientRect,
@@ -228,17 +229,34 @@ fn is_autorepeat(lparam: isize) -> bool {
 /// 仮想キー → スクリプトへ渡す key 名（特殊キーのみ。印字文字は WM_CHAR 経由）。
 fn vk_to_key(vk: VIRTUAL_KEY) -> Option<&'static str> {
     match vk {
+        VK_BACK => Some("Backspace"),
+        VK_TAB => Some("Tab"),
         VK_RETURN => Some("Enter"),
         VK_ESCAPE => Some("Escape"),
         VK_CONTROL => Some("Control"),
         VK_SHIFT => Some("Shift"),
         VK_SPACE => Some(" "),
-        VK_UP => Some("ArrowUp"),
-        VK_DOWN => Some("ArrowDown"),
         VK_PRIOR => Some("PageUp"),
         VK_NEXT => Some("PageDown"),
+        VK_END => Some("End"),
+        VK_HOME => Some("Home"),
+        VK_LEFT => Some("ArrowLeft"),
+        VK_UP => Some("ArrowUp"),
+        VK_RIGHT => Some("ArrowRight"),
+        VK_DOWN => Some("ArrowDown"),
+        VK_DELETE => Some("Delete"),
+        VK_F1 => Some("F1"),
+        VK_F2 => Some("F2"),
+        VK_F3 => Some("F3"),
+        VK_F4 => Some("F4"),
         VK_F5 => Some("F5"),
+        VK_F6 => Some("F6"),
+        VK_F7 => Some("F7"),
+        VK_F8 => Some("F8"),
         VK_F9 => Some("F9"),
+        VK_F10 => Some("F10"),
+        // F11 はホストがフルスクリーン切替で消費するためスクリプトへ渡さない。
+        VK_F12 => Some("F12"),
         _ => None,
     }
 }
@@ -1471,13 +1489,71 @@ mod tests {
 
     #[test]
     fn vk_mapping_and_autorepeat_flag() {
-        assert_eq!(vk_to_key(VK_SHIFT), Some("Shift"));
-        assert_eq!(vk_to_key(VK_CONTROL), Some("Control"));
-        assert_eq!(vk_to_key(VK_RETURN), Some("Enter"));
-        assert_eq!(vk_to_key(VK_SPACE), Some(" "));
+        let cases = [
+            (VK_BACK, "Backspace"),
+            (VK_TAB, "Tab"),
+            (VK_RETURN, "Enter"),
+            (VK_ESCAPE, "Escape"),
+            (VK_CONTROL, "Control"),
+            (VK_SHIFT, "Shift"),
+            (VK_SPACE, " "),
+            (VK_PRIOR, "PageUp"),
+            (VK_NEXT, "PageDown"),
+            (VK_END, "End"),
+            (VK_HOME, "Home"),
+            (VK_LEFT, "ArrowLeft"),
+            (VK_UP, "ArrowUp"),
+            (VK_RIGHT, "ArrowRight"),
+            (VK_DOWN, "ArrowDown"),
+            (VK_DELETE, "Delete"),
+            (VK_F1, "F1"),
+            (VK_F2, "F2"),
+            (VK_F3, "F3"),
+            (VK_F4, "F4"),
+            (VK_F5, "F5"),
+            (VK_F6, "F6"),
+            (VK_F7, "F7"),
+            (VK_F8, "F8"),
+            (VK_F9, "F9"),
+            (VK_F10, "F10"),
+            (VK_F12, "F12"),
+        ];
+        for (vk, expected) in cases {
+            assert_eq!(vk_to_key(vk), Some(expected), "vk={vk:?}");
+        }
         assert_eq!(vk_to_key(VK_F11), None, "F11 はホストが消費しスクリプトへ渡さない");
+        assert_eq!(
+            vk_to_key(VIRTUAL_KEY(b'A' as u16)),
+            None,
+            "印字文字は WM_CHAR 経路を使うため vk_to_key では返さない"
+        );
         assert!(!is_autorepeat(0x0001_0001));
         assert!(is_autorepeat(0x4001_0001));
+    }
+
+    #[test]
+    fn navigation_and_editing_keys_dispatch_without_wm_char_duplicates() {
+        let mut h = spawn_window();
+        for (vk, expected) in [
+            (VK_LEFT, "ArrowLeft"),
+            (VK_RIGHT, "ArrowRight"),
+            (VK_UP, "ArrowUp"),
+            (VK_DOWN, "ArrowDown"),
+            (VK_BACK, "Backspace"),
+            (VK_TAB, "Tab"),
+            (VK_DELETE, "Delete"),
+            (VK_HOME, "Home"),
+            (VK_END, "End"),
+        ] {
+            h.post(WM_KEYDOWN, vk.0 as usize, LPARAM(1));
+            let ev = h.recv();
+            assert_eq!((ev.kind, ev.key.as_deref()), ("key", Some(expected)));
+        }
+        // Backspace/Tab の WM_CHAR 制御文字は WM_KEYDOWN 側と重複させない。
+        h.post(WM_CHAR, 0x08, LPARAM(1));
+        h.post(WM_CHAR, 0x09, LPARAM(1));
+        h.assert_no_event_pending();
+        h.quit();
     }
 
     #[test]
