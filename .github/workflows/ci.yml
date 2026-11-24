@@ -14,13 +14,15 @@ permissions:
 
 jobs:
   lint:
-    name: clippy
+    name: rustfmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      - name: Install clippy
-        run: rustup component add clippy
+      - name: Install rustfmt + clippy
+        run: rustup component add rustfmt clippy
+      - name: Format check
+        run: cargo fmt --all --check
       - name: Clippy (noiria-core, noiria-tools)
         run: cargo clippy -p noiria-core -p noiria-tools --all-targets -- -D warnings
       - name: Clippy (noiria-app, engine-tsint + dist)
