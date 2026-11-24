@@ -72,6 +72,8 @@ impl LayerSig {
 /// 結果は毎回ゼロから描いた場合と画素単位で同じ（テストで固定）。
 struct PrefixCache {
     prev: Vec<LayerSig>,
+    cur: Vec<LayerSig>,
+    order: Vec<(i32, u32)>,
     prev_offset: (i32, i32),
     /// `checkpoint` が含む層の数（0 = 無効）。
     len: usize,
@@ -86,6 +88,8 @@ impl ComposeBufs {
             cached_revision: None,
             prefix: PrefixCache {
                 prev: Vec::new(),
+                cur: Vec::new(),
+                order: Vec::new(),
                 prev_offset: (0, 0),
                 len: 0,
                 checkpoint: Pixmap::new(width, height),
@@ -217,13 +221,29 @@ fn draw_layer(out: &mut Pixmap, layer: &Layer, now: Instant, offset: (i32, i32))
 
 /// `compose_page` と同じ結果を、変わっていない下層を再利用して描く（`PrefixCache` 参照）。
 fn compose_page_cached(layers: &LayerMap, now: Instant, offset: (i32, i32), out: &mut Pixmap, cache: &mut PrefixCache) {
-    let mut sorted: Vec<(&u32, &Layer)> = layers.iter().filter(|(_, l)| l.visible).collect();
-    sorted.sort_by_key(|(id, l)| (l.z, **id));
-    let sigs: Vec<LayerSig> = sorted.iter().map(|(id, l)| LayerSig::of(**id, l, now, offset)).collect();
+    cache.order.clear();
+    for (&id, l) in layers {
+        if l.visible {
+            cache.order.push((l.z, id));
+        }
+    }
+    cache.order.sort_unstable();
+
+    cache.cur.clear();
+    for &(_, id) in &cache.order {
+        let l = &layers[&id];
+        cache.cur.push(LayerSig::of(id, l, now, offset));
+    }
+
     let same_size = cache.checkpoint.width == out.width && cache.checkpoint.height == out.height;
     // 前フレームと署名が一致する先頭の層数
     let common = if same_size && cache.prev_offset == offset {
-        sigs.iter().zip(cache.prev.iter()).take_while(|(a, b)| a.same(b)).count()
+        cache
+            .cur
+            .iter()
+            .zip(cache.prev.iter())
+            .take_while(|(a, b)| a.same(b))
+            .count()
     } else {
         0
     };
@@ -235,15 +255,15 @@ fn compose_page_cached(layers: &LayerMap, now: Instant, offset: (i32, i32), out:
         0
     };
     let mut saved = start == common && start > 0;
-    for (i, (_, layer)) in sorted.iter().enumerate().skip(start) {
+    for (i, &(_, id)) in cache.order.iter().enumerate().skip(start) {
         if i == common && common > 0 && same_size {
             cache.checkpoint.data.copy_from_slice(&out.data);
             cache.len = common;
             saved = true;
         }
-        draw_layer(out, layer, now, offset);
+        draw_layer(out, &layers[&id], now, offset);
     }
-    if !saved && common >= sorted.len() && common > 0 && same_size {
+    if !saved && common >= cache.order.len() && common > 0 && same_size {
         cache.checkpoint.data.copy_from_slice(&out.data);
         cache.len = common;
         saved = true;
@@ -251,7 +271,7 @@ fn compose_page_cached(layers: &LayerMap, now: Instant, offset: (i32, i32), out:
     if !saved {
         cache.len = 0;
     }
-    cache.prev = sigs;
+    std::mem::swap(&mut cache.prev, &mut cache.cur);
     cache.prev_offset = offset;
 }
 

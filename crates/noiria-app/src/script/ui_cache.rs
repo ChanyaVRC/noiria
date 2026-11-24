@@ -131,6 +131,63 @@ pub struct ScaledKey {
     pub h: u32,
 }
 
+/// ユニバーサルトランジションのルール輝度プレーン用 LRU（バイト上限付き）。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RuleKey {
+    pub path: String,
+    pub w: u32,
+    pub h: u32,
+}
+
+pub struct RuleLru {
+    map: HashMap<RuleKey, (Arc<Vec<u8>>, u64)>,
+    bytes: usize,
+    cap_bytes: usize,
+    tick: u64,
+}
+
+impl RuleLru {
+    pub fn new(cap_bytes: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            bytes: 0,
+            cap_bytes,
+            tick: 0,
+        }
+    }
+
+    pub fn get(&mut self, k: &RuleKey) -> Option<Arc<Vec<u8>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(k).map(|(p, t)| {
+            *t = tick;
+            p.clone()
+        })
+    }
+
+    pub fn insert(&mut self, k: RuleKey, v: Arc<Vec<u8>>) {
+        let sz = v.len();
+        if let Some((old, _)) = self.map.remove(&k) {
+            self.bytes -= old.len();
+        }
+        if sz > self.cap_bytes {
+            return;
+        }
+        self.tick += 1;
+        self.map.insert(k, (v, self.tick));
+        self.bytes += sz;
+        while self.bytes > self.cap_bytes {
+            let Some(oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((p, _)) = self.map.remove(&oldest) {
+                self.bytes -= p.len();
+            }
+        }
+    }
+}
+
 pub const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
 
 pub struct UiCaches {
@@ -138,6 +195,7 @@ pub struct UiCaches {
     pub thumbs: PixmapLru<ThumbKey>,
     pub scaled: PixmapLru<ScaledKey>,
     pub images: PixmapLru<String>,
+    pub rules: RuleLru,
 }
 
 impl UiCaches {
@@ -147,6 +205,7 @@ impl UiCaches {
             thumbs: PixmapLru::new(16 << 20),
             scaled: PixmapLru::new(24 << 20),
             images: PixmapLru::new(IMAGE_CACHE_MAX_BYTES),
+            rules: RuleLru::new(16 << 20),
         }
     }
 
@@ -240,19 +299,56 @@ pub fn load_scaled_cached(
         w,
         h,
     };
-    if let Some(p) = cache.lock_unpoisoned().scaled.get(&key) {
-        return Ok(p);
-    }
-    checked_dims(w, h)?;
-    let pixmap = load_image_checked(game_dir, path)?;
-    let pixmap = if pixmap.width == w && pixmap.height == h {
-        pixmap
-    } else {
-        pixmap.resize_area(w, h)
+    let existing_full = {
+        let mut guard = cache.lock_unpoisoned();
+        if let Some(p) = guard.scaled.get(&key) {
+            return Ok(p);
+        }
+        guard.images.get(path)
     };
-    let pixmap = Arc::new(pixmap);
+    checked_dims(w, h)?;
+    let pixmap = if let Some(full) = existing_full {
+        if full.width == w && full.height == h {
+            full
+        } else {
+            Arc::new(full.resize_area(w, h))
+        }
+    } else {
+        let decoded = load_image_checked(game_dir, path)?;
+        let resized = if decoded.width == w && decoded.height == h {
+            decoded
+        } else {
+            decoded.resize_area(w, h)
+        };
+        Arc::new(resized)
+    };
     cache.lock_unpoisoned().scaled.insert(key, pixmap.clone());
     Ok(pixmap)
+}
+
+/// ユニバーサルトランジションのルール画像をスクリーン寸法の輝度プレーンとしてキャッシュする。
+pub fn load_rule_cached(
+    cache: &Mutex<UiCaches>,
+    game_dir: &GameDir,
+    path: &str,
+    scene_w: u32,
+    scene_h: u32,
+) -> Result<Arc<Vec<u8>>, String> {
+    let key = RuleKey {
+        path: path.to_string(),
+        w: scene_w,
+        h: scene_h,
+    };
+    if let Some(plane) = cache.lock_unpoisoned().rules.get(&key) {
+        return Ok(plane);
+    }
+    let (w, h, rgba) = game_dir.load_image_rgba(path).map_err(|e| e.to_string())?;
+    checked_dims(w, h).map_err(|e| format!("{path}: {e}"))?;
+    let plane = Arc::new(noiria_core::transition::rule_plane_from_rgba(
+        w, h, &rgba, scene_w, scene_h,
+    ));
+    cache.lock_unpoisoned().rules.insert(key, plane.clone());
+    Ok(plane)
 }
 
 enum Job {

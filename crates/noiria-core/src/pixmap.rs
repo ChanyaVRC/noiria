@@ -305,6 +305,15 @@ impl Pixmap {
         let pixels = self.data.len().min(a.data.len()).min(b.data.len()) / 4;
         assert!(rule.len() >= pixels);
         let bytes = pixels * 4;
+        // lut は r に対して単調非増加: 全画素が a のみ / b のみになる端を短絡する。
+        if lut[0] == 0 {
+            self.data[..bytes].copy_from_slice(&a.data[..bytes]);
+            return;
+        }
+        if lut[255] == 256 {
+            self.data[..bytes].copy_from_slice(&b.data[..bytes]);
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 availability was checked above.
@@ -422,36 +431,164 @@ impl Pixmap {
         if self.width == 0 || self.height == 0 || new_w == 0 || new_h == 0 {
             return out;
         }
-        let sx = self.width as f64 / new_w as f64;
-        let sy = self.height as f64 / new_h as f64;
         let src_w = self.width as usize;
-        for oy in 0..new_h as usize {
-            let y0 = oy as f64 * sy;
-            let y1 = y0 + sy;
-            for ox in 0..new_w as usize {
-                let x0 = ox as f64 * sx;
-                let x1 = x0 + sx;
-                let mut acc = [0f64; 4];
-                let mut weight = 0f64;
-                let iy_end = (y1.ceil() as usize).min(self.height as usize);
-                let ix_end = (x1.ceil() as usize).min(src_w);
-                for iy in (y0.floor() as usize)..iy_end {
-                    let wy = (y1.min(iy as f64 + 1.0) - y0.max(iy as f64)).max(0.0);
-                    for ix in (x0.floor() as usize)..ix_end {
-                        let wx = (x1.min(ix as f64 + 1.0) - x0.max(ix as f64)).max(0.0);
-                        let w = wx * wy;
-                        let o = (iy * src_w + ix) * 4;
-                        for (c, a) in acc.iter_mut().enumerate() {
-                            *a += self.data[o + c] as f64 * w;
-                        }
-                        weight += w;
+        let src_h = self.height as usize;
+        let dst_w = new_w as usize;
+        let dst_h = new_h as usize;
+        let sx = src_w as f64 / dst_w as f64;
+        let sy = src_h as f64 / dst_h as f64;
+
+        #[derive(Clone, Copy)]
+        struct Span {
+            start: usize,
+            end: usize,
+            w_first: f64,
+            w_last: f64,
+            w_sum: f64,
+        }
+
+        let build_spans = |dst_len: usize, src_len: usize, scale: f64| -> Vec<Span> {
+            let mut spans = Vec::with_capacity(dst_len);
+            for o in 0..dst_len {
+                let p0 = o as f64 * scale;
+                let p1 = p0 + scale;
+                let start = p0.floor() as usize;
+                let end = (p1.ceil() as usize).min(src_len);
+                if end <= start {
+                    spans.push(Span {
+                        start,
+                        end,
+                        w_first: 0.0,
+                        w_last: 0.0,
+                        w_sum: 0.0,
+                    });
+                } else if end == start + 1 {
+                    let w = (p1.min(start as f64 + 1.0) - p0.max(start as f64)).max(0.0);
+                    spans.push(Span {
+                        start,
+                        end,
+                        w_first: w,
+                        w_last: 0.0,
+                        w_sum: w,
+                    });
+                } else {
+                    let w_first = (p1.min(start as f64 + 1.0) - p0.max(start as f64)).max(0.0);
+                    let last = end - 1;
+                    let w_last = (p1.min(last as f64 + 1.0) - p0.max(last as f64)).max(0.0);
+                    let middle = (end - start - 2) as f64;
+                    spans.push(Span {
+                        start,
+                        end,
+                        w_first,
+                        w_last,
+                        w_sum: w_first + middle + w_last,
+                    });
+                }
+            }
+            spans
+        };
+
+        let x_spans = build_spans(dst_w, src_w, sx);
+        let y_spans = build_spans(dst_h, src_h, sy);
+
+        let horiz_reduce = |iy: usize, dst_row: &mut [[f64; 4]]| {
+            let row = &self.data[iy * src_w * 4..(iy + 1) * src_w * 4];
+            let px_row = row.as_chunks::<4>().0;
+            for (dst, sp) in dst_row.iter_mut().zip(&x_spans) {
+                if sp.end <= sp.start {
+                    *dst = [0.0; 4];
+                } else if sp.end == sp.start + 1 {
+                    let p = px_row[sp.start];
+                    let w = sp.w_first;
+                    *dst = [
+                        p[0] as f64 * w,
+                        p[1] as f64 * w,
+                        p[2] as f64 * w,
+                        p[3] as f64 * w,
+                    ];
+                } else {
+                    let pf = px_row[sp.start];
+                    let wf = sp.w_first;
+                    let pl = px_row[sp.end - 1];
+                    let wl = sp.w_last;
+                    let mut m0 = 0u32;
+                    let mut m1 = 0u32;
+                    let mut m2 = 0u32;
+                    let mut m3 = 0u32;
+                    for p in &px_row[sp.start + 1..sp.end - 1] {
+                        m0 += p[0] as u32;
+                        m1 += p[1] as u32;
+                        m2 += p[2] as u32;
+                        m3 += p[3] as u32;
+                    }
+                    *dst = [
+                        pf[0] as f64 * wf + m0 as f64 + pl[0] as f64 * wl,
+                        pf[1] as f64 * wf + m1 as f64 + pl[1] as f64 * wl,
+                        pf[2] as f64 * wf + m2 as f64 + pl[2] as f64 * wl,
+                        pf[3] as f64 * wf + m3 as f64 + pl[3] as f64 * wl,
+                    ];
+                }
+            }
+        };
+
+        let mut cached_iy = usize::MAX;
+        let mut cached_h = vec![[0.0f64; 4]; dst_w];
+        let mut row_acc = vec![[0.0f64; 4]; dst_w];
+        let mut h_tmp = vec![[0.0f64; 4]; dst_w];
+
+        let out_pixels = out.data.as_chunks_mut::<4>().0;
+        for (oy, ysp) in y_spans.iter().enumerate() {
+            if ysp.end <= ysp.start || ysp.w_sum <= 0.0 {
+                continue;
+            }
+            row_acc.fill([0.0; 4]);
+            for iy in ysp.start..ysp.end {
+                let wy = if iy == ysp.start {
+                    ysp.w_first
+                } else if iy == ysp.end - 1 {
+                    ysp.w_last
+                } else {
+                    1.0
+                };
+                if wy == 0.0 {
+                    continue;
+                }
+                let h_row: &[[f64; 4]] = if iy == cached_iy {
+                    &cached_h
+                } else if iy == ysp.end - 1 {
+                    horiz_reduce(iy, &mut cached_h);
+                    cached_iy = iy;
+                    &cached_h
+                } else {
+                    horiz_reduce(iy, &mut h_tmp);
+                    &h_tmp
+                };
+                if wy == 1.0 {
+                    for (a, h) in row_acc.iter_mut().zip(h_row) {
+                        a[0] += h[0];
+                        a[1] += h[1];
+                        a[2] += h[2];
+                        a[3] += h[3];
+                    }
+                } else {
+                    for (a, h) in row_acc.iter_mut().zip(h_row) {
+                        a[0] += h[0] * wy;
+                        a[1] += h[1] * wy;
+                        a[2] += h[2] * wy;
+                        a[3] += h[3] * wy;
                     }
                 }
+            }
+            let out_row = &mut out_pixels[oy * dst_w..(oy + 1) * dst_w];
+            for ((dst, acc), xsp) in out_row.iter_mut().zip(&row_acc).zip(&x_spans) {
+                let weight = xsp.w_sum * ysp.w_sum;
                 if weight > 0.0 {
-                    let o = (oy * new_w as usize + ox) * 4;
-                    for (c, a) in acc.iter().enumerate() {
-                        out.data[o + c] = (a / weight).round().clamp(0.0, 255.0) as u8;
-                    }
+                    *dst = [
+                        (acc[0] / weight).round().clamp(0.0, 255.0) as u8,
+                        (acc[1] / weight).round().clamp(0.0, 255.0) as u8,
+                        (acc[2] / weight).round().clamp(0.0, 255.0) as u8,
+                        (acc[3] / weight).round().clamp(0.0, 255.0) as u8,
+                    ];
                 }
             }
         }
@@ -972,12 +1109,38 @@ mod simd {
         let pixels = rule.len();
         let zero = _mm256_setzero_si256();
         let v256 = _mm256_set1_epi16(256);
+
+        // lut は r に関して単調非増加:
+        // r <= max_b_rule なら lut[r] == 256 (純粋に b)、r >= min_a_rule なら lut[r] == 0 (純粋に a)。
+        let max_b_rule = lut.iter().rposition(|&v| v == 256);
+        let min_a_rule = lut.iter().position(|&v| v == 0);
+        let v_max_b = max_b_rule.map(|v| _mm_set1_epi8(v as i8));
+        let v_min_a = min_a_rule.map(|v| _mm_set1_epi8(v as i8));
+
         let mut p = 0;
         let out_ptr = out.as_mut_ptr();
         let a_ptr = a.as_ptr();
         let b_ptr = b.as_ptr();
+        let rule_ptr = rule.as_ptr();
         while p + 8 <= pixels {
             let off = p * 4;
+            let vr = _mm_loadl_epi64(rule_ptr.add(p) as *const __m128i);
+            if let Some(vb_thr) = v_max_b {
+                if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(vr, vb_thr), vb_thr)) & 0xFF) == 0xFF {
+                    let vb = _mm256_loadu_si256(b_ptr.add(off) as *const __m256i);
+                    _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, vb);
+                    p += 8;
+                    continue;
+                }
+            }
+            if let Some(va_thr) = v_min_a {
+                if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(vr, va_thr), va_thr)) & 0xFF) == 0xFF {
+                    let va = _mm256_loadu_si256(a_ptr.add(off) as *const __m256i);
+                    _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, va);
+                    p += 8;
+                    continue;
+                }
+            }
             let va = _mm256_loadu_si256(a_ptr.add(off) as *const __m256i);
             let vb = _mm256_loadu_si256(b_ptr.add(off) as *const __m256i);
             let rep = |k: usize| (lut[*rule.get_unchecked(p + k) as usize] as i64).wrapping_mul(0x0001_0001_0001_0001);

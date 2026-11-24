@@ -137,66 +137,176 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
         fill_flat(s, &mut out);
         return out;
     }
-    for oy in 0..oh {
-        let py = oy as f32 + 0.5;
-        for ox in 0..ow {
-            let px = ox as f32 + 0.5;
-            let d = sdf_round_rect(px, py, cx, cy, hx, hy, r);
-            let cov = (0.5 - d).clamp(0.0, 1.0);
-            // 外側へ出た画素は影だけ
-            let (mut pr, mut pg, mut pb, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            if cov > 0.0 {
-                let along = if s.horizontal {
-                    px - s.pad as f32
-                } else {
-                    py - s.pad as f32
-                };
-                let t = if s.ramp > 0.0 {
-                    smoothstep(0.0, 1.0, along / s.ramp)
-                } else {
-                    (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
-                };
-                let fr = lerp(s.top[0] as f32, s.bottom[0] as f32, t);
-                let fg = lerp(s.top[1] as f32, s.bottom[1] as f32, t);
-                let fb = lerp(s.top[2] as f32, s.bottom[2] as f32, t);
-                let fa = lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0;
-                let inner = if has_border {
-                    (0.5 - (d + s.border_w)).clamp(0.0, 1.0).min(cov)
-                } else {
-                    cov
-                };
-                let ring = cov - inner;
-                let fill_a = fa * inner;
-                pr += fr * fill_a;
-                pg += fg * fill_a;
-                pb += fb * fill_a;
-                pa += fill_a;
-                if ring > 0.0 {
-                    let ba = s.border[3] as f32 / 255.0 * ring;
-                    // 枠線は塗りの上に重ねる（半透明の塗りの縁でも枠線が見える）
-                    let inv = 1.0 - ba;
-                    pr = pr * inv + s.border[0] as f32 * ba;
-                    pg = pg * inv + s.border[1] as f32 * ba;
-                    pb = pb * inv + s.border[2] as f32 * ba;
-                    pa = pa * inv + ba;
-                }
+
+    // 内側フラット領域（cov==1, inner==1, ring==0, sa==0 が確実に成立する矩形）:
+    // SDF/影計算を一切行わず、グラデーション塗りだけを一括で行う。
+    let inset = r.max(if has_border { s.border_w } else { 0.0 }) + 1.0;
+    let pad_f = s.pad as f32;
+    let inner_x0 = ((pad_f + inset).ceil().max(0.0) as u32).min(ow);
+    let inner_x1 = ((pad_f + s.w as f32 - inset).floor().max(0.0) as u32).min(ow);
+    let inner_y0 = ((pad_f + inset).ceil().max(0.0) as u32).min(oh);
+    let inner_y1 = ((pad_f + s.h as f32 - inset).floor().max(0.0) as u32).min(oh);
+    let has_inner = inner_x0 < inner_x1 && inner_y0 < inner_y1;
+
+    // 縦グラデーション時、上下の直線枠・影帯では |px - cx| <= hx - r の範囲で
+    // qx <= 0 となり SDF・影距離ともに x 非依存になるため、1 画素だけ計算して fill できる。
+    let flat_x0 = ((cx - (hx - r)).ceil().max(0.0) as u32).min(ow);
+    let flat_x1 = ((cx + (hx - r)).floor().max(0.0) as u32).min(ow);
+    let has_flat_band = !s.horizontal && flat_x0 < flat_x1;
+
+    // 影も本体も届かない外側領域のカリング境界。
+    let reach_x = hx + if has_shadow { s.shadow_blur.max(0.5) } else { 0.5 } + 0.5;
+    let min_x = ((cx - reach_x).floor().max(0.0) as u32).min(ow);
+    let max_x = ((cx + reach_x).ceil().max(0.0) as u32).min(ow);
+
+    let grad_at = |along: f32| -> (f32, f32, f32, f32) {
+        let t = if s.ramp > 0.0 {
+            smoothstep(0.0, 1.0, along / s.ramp)
+        } else {
+            (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
+        };
+        (
+            lerp(s.top[0] as f32, s.bottom[0] as f32, t),
+            lerp(s.top[1] as f32, s.bottom[1] as f32, t),
+            lerp(s.top[2] as f32, s.bottom[2] as f32, t),
+            lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0,
+        )
+    };
+    let quantize_fill = |(fr, fg, fb, fa): (f32, f32, f32, f32)| -> [u8; 4] {
+        if fa > 0.0 {
+            [
+                (fr * fa).round().clamp(0.0, 255.0) as u8,
+                (fg * fa).round().clamp(0.0, 255.0) as u8,
+                (fb * fa).round().clamp(0.0, 255.0) as u8,
+                (fa * 255.0).round().clamp(0.0, 255.0) as u8,
+            ]
+        } else {
+            [0, 0, 0, 0]
+        }
+    };
+
+    let horiz_grad: Vec<(f32, f32, f32, f32)> = if s.horizontal {
+        (0..ow).map(|ox| grad_at(ox as f32 + 0.5 - pad_f)).collect()
+    } else {
+        Vec::new()
+    };
+    let horiz_px: Vec<[u8; 4]> = if s.horizontal && has_inner {
+        horiz_grad.iter().map(|&g| quantize_fill(g)).collect()
+    } else {
+        Vec::new()
+    };
+
+    let border_r = s.border[0] as f32;
+    let border_g = s.border[1] as f32;
+    let border_b = s.border[2] as f32;
+    let border_a = s.border[3] as f32 / 255.0;
+    let shadow_e0 = -s.shadow_blur * 0.25;
+
+    let shade_pixel = |ox: u32, py: f32, row_grad: (f32, f32, f32, f32), dst: &mut [u8; 4]| {
+        let px = ox as f32 + 0.5;
+        let d = sdf_round_rect(px, py, cx, cy, hx, hy, r);
+        let cov = (0.5 - d).clamp(0.0, 1.0);
+        let (mut pr, mut pg, mut pb, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        if cov > 0.0 {
+            let (fr, fg, fb, fa) = if s.horizontal {
+                horiz_grad[ox as usize]
+            } else {
+                row_grad
+            };
+            let inner = if has_border {
+                (0.5 - (d + s.border_w)).clamp(0.0, 1.0).min(cov)
+            } else {
+                cov
+            };
+            let ring = cov - inner;
+            let fill_a = fa * inner;
+            pr += fr * fill_a;
+            pg += fg * fill_a;
+            pb += fb * fill_a;
+            pa += fill_a;
+            if ring > 0.0 {
+                let ba = border_a * ring;
+                let inv = 1.0 - ba;
+                pr = pr * inv + border_r * ba;
+                pg = pg * inv + border_g * ba;
+                pb = pb * inv + border_b * ba;
+                pa = pa * inv + ba;
             }
-            if has_shadow {
-                let sd = sdf_round_rect(px, py - s.shadow_dy, cx, cy, hx, hy, r);
-                let sa = s.shadow_alpha * (1.0 - smoothstep(-s.shadow_blur * 0.25, s.shadow_blur, sd));
-                // パネル本体の内側（カバレッジ分）には影を透かさない
+        }
+        if has_shadow && cov < 1.0 {
+            let sd = sdf_round_rect(px, py - s.shadow_dy, cx, cy, hx, hy, r);
+            if sd < s.shadow_blur {
+                let sa = s.shadow_alpha * (1.0 - smoothstep(shadow_e0, s.shadow_blur, sd));
                 let sa = sa * (1.0 - cov);
                 if sa > 0.0 {
                     let inv = 1.0 - pa;
                     pa += sa * inv;
                 }
             }
-            if pa > 0.0 {
-                let i = ((oy * ow + ox) * 4) as usize;
-                out.data[i] = pr.round().clamp(0.0, 255.0) as u8;
-                out.data[i + 1] = pg.round().clamp(0.0, 255.0) as u8;
-                out.data[i + 2] = pb.round().clamp(0.0, 255.0) as u8;
-                out.data[i + 3] = (pa * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        if pa > 0.0 {
+            *dst = [
+                pr.round().clamp(0.0, 255.0) as u8,
+                pg.round().clamp(0.0, 255.0) as u8,
+                pb.round().clamp(0.0, 255.0) as u8,
+                (pa * 255.0).round().clamp(0.0, 255.0) as u8,
+            ];
+        }
+    };
+
+    for oy in 0..oh {
+        let py = oy as f32 + 0.5;
+        let dy_body = (py - cy).abs();
+        let dy_shadow = (py - s.shadow_dy - cy).abs();
+        if dy_body > hy + 0.5 && (!has_shadow || dy_shadow > hy + s.shadow_blur + 0.5) {
+            continue;
+        }
+        let row_grad = if s.horizontal {
+            (0.0, 0.0, 0.0, 0.0)
+        } else {
+            grad_at(py - pad_f)
+        };
+        let row_pixels =
+            &mut out.data.as_chunks_mut::<4>().0[(oy * ow) as usize..((oy + 1) * ow) as usize];
+
+        if has_inner && oy >= inner_y0 && oy < inner_y1 {
+            for ox in min_x..inner_x0 {
+                shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
+            }
+            if s.horizontal {
+                row_pixels[inner_x0 as usize..inner_x1 as usize]
+                    .copy_from_slice(&horiz_px[inner_x0 as usize..inner_x1 as usize]);
+            } else {
+                let c = quantize_fill(row_grad);
+                if c[3] > 0 {
+                    row_pixels[inner_x0 as usize..inner_x1 as usize].fill(c);
+                }
+            }
+            for ox in inner_x1..max_x {
+                shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
+            }
+        } else if has_flat_band
+            && dy_body >= hy - r
+            && (!has_shadow || dy_shadow >= hy - r)
+        {
+            let fx0 = flat_x0.max(min_x);
+            let fx1 = flat_x1.min(max_x);
+            for ox in min_x..fx0 {
+                shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
+            }
+            if fx0 < fx1 {
+                let mut sample = [0u8; 4];
+                shade_pixel(fx0, py, row_grad, &mut sample);
+                if sample[3] > 0 {
+                    row_pixels[fx0 as usize..fx1 as usize].fill(sample);
+                }
+            }
+            for ox in fx1..max_x {
+                shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
+            }
+        } else {
+            for ox in min_x..max_x {
+                shade_pixel(ox, py, row_grad, &mut row_pixels[ox as usize]);
             }
         }
     }
@@ -377,5 +487,138 @@ mod tests {
         assert!(s.horizontal);
         assert_eq!(s.ramp, 30.0);
         assert!((s.shadow_alpha - 0.5).abs() < 1e-6);
+    }
+
+    /// 最適化前の全画素 SDF 参照実装と画素単位で完全一致すること。
+    #[test]
+    fn optimized_render_panel_matches_naive_sdf_pixel_for_pixel() {
+        fn render_naive(s: &PanelSpec) -> Pixmap {
+            let ow = s.w + s.pad * 2;
+            let oh = s.h + s.pad * 2;
+            let mut out = Pixmap::new(ow, oh);
+            if s.w == 0 || s.h == 0 {
+                return out;
+            }
+            let hx = s.w as f32 / 2.0;
+            let hy = s.h as f32 / 2.0;
+            let r = s.radius.min(hx).min(hy);
+            let cx = s.pad as f32 + hx;
+            let cy = s.pad as f32 + hy;
+            let has_border = s.border_w > 0.0 && s.border[3] > 0;
+            let has_shadow = s.shadow_blur > 0.0 && s.shadow_alpha > 0.0 && s.pad > 0;
+            for oy in 0..oh {
+                let py = oy as f32 + 0.5;
+                for ox in 0..ow {
+                    let px = ox as f32 + 0.5;
+                    let d = sdf_round_rect(px, py, cx, cy, hx, hy, r);
+                    let cov = (0.5 - d).clamp(0.0, 1.0);
+                    let (mut pr, mut pg, mut pb, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    if cov > 0.0 {
+                        let along = if s.horizontal {
+                            px - s.pad as f32
+                        } else {
+                            py - s.pad as f32
+                        };
+                        let t = if s.ramp > 0.0 {
+                            smoothstep(0.0, 1.0, along / s.ramp)
+                        } else {
+                            (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
+                        };
+                        let fr = lerp(s.top[0] as f32, s.bottom[0] as f32, t);
+                        let fg = lerp(s.top[1] as f32, s.bottom[1] as f32, t);
+                        let fb = lerp(s.top[2] as f32, s.bottom[2] as f32, t);
+                        let fa = lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0;
+                        let inner = if has_border {
+                            (0.5 - (d + s.border_w)).clamp(0.0, 1.0).min(cov)
+                        } else {
+                            cov
+                        };
+                        let ring = cov - inner;
+                        let fill_a = fa * inner;
+                        pr += fr * fill_a;
+                        pg += fg * fill_a;
+                        pb += fb * fill_a;
+                        pa += fill_a;
+                        if ring > 0.0 {
+                            let ba = s.border[3] as f32 / 255.0 * ring;
+                            let inv = 1.0 - ba;
+                            pr = pr * inv + s.border[0] as f32 * ba;
+                            pg = pg * inv + s.border[1] as f32 * ba;
+                            pb = pb * inv + s.border[2] as f32 * ba;
+                            pa = pa * inv + ba;
+                        }
+                    }
+                    if has_shadow {
+                        let sd = sdf_round_rect(px, py - s.shadow_dy, cx, cy, hx, hy, r);
+                        let sa = s.shadow_alpha
+                            * (1.0 - smoothstep(-s.shadow_blur * 0.25, s.shadow_blur, sd));
+                        let sa = sa * (1.0 - cov);
+                        if sa > 0.0 {
+                            let inv = 1.0 - pa;
+                            pa += sa * inv;
+                        }
+                    }
+                    if pa > 0.0 {
+                        let i = ((oy * ow + ox) * 4) as usize;
+                        out.data[i] = pr.round().clamp(0.0, 255.0) as u8;
+                        out.data[i + 1] = pg.round().clamp(0.0, 255.0) as u8;
+                        out.data[i + 2] = pb.round().clamp(0.0, 255.0) as u8;
+                        out.data[i + 3] = (pa * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            out
+        }
+
+        let cases = [
+            PanelSpec {
+                w: 80,
+                h: 48,
+                radius: 10.0,
+                top: [24, 30, 52, 232],
+                bottom: [12, 16, 30, 240],
+                horizontal: false,
+                border: [180, 190, 220, 120],
+                border_w: 1.5,
+                shadow_blur: 14.0,
+                shadow_dy: 4.0,
+                shadow_alpha: 0.45,
+                pad: 16,
+                ramp: 0.0,
+            },
+            PanelSpec {
+                w: 75,
+                h: 41,
+                radius: 8.0,
+                top: [255, 200, 100, 0],
+                bottom: [40, 80, 200, 210],
+                horizontal: true,
+                border: [255, 255, 255, 200],
+                border_w: 2.0,
+                shadow_blur: 10.0,
+                shadow_dy: -3.0,
+                shadow_alpha: 0.5,
+                pad: 12,
+                ramp: 30.0,
+            },
+            PanelSpec {
+                w: 12,
+                h: 10,
+                radius: 5.0,
+                top: [10, 20, 30, 255],
+                bottom: [200, 150, 100, 128],
+                horizontal: false,
+                border: [255, 0, 0, 255],
+                border_w: 3.0,
+                shadow_blur: 0.0,
+                shadow_dy: 0.0,
+                shadow_alpha: 0.0,
+                pad: 2,
+                ramp: 0.0,
+            },
+        ];
+        for (idx, s) in cases.iter().enumerate() {
+            assert_eq!(render_panel(s).data, render_naive(s).data, "case {idx}");
+        }
     }
 }

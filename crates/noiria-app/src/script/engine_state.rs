@@ -27,7 +27,7 @@ use noiria_core::scene::{
 use noiria_core::text::{
     GlyphRect, LocateArgs, TextAlign, TextEngine, TextSegment, TextStyle,
 };
-use noiria_core::transition::{rule_plane_from_rgba, TransMethod, Transition};
+use noiria_core::transition::{TransMethod, Transition};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
@@ -39,8 +39,8 @@ use crate::script::numconv::{
     de_opt_coord, de_opt_i32, de_opt_u32, de_opt_u8, de_time_ms, de_u32, to_u8,
 };
 use crate::script::ui_cache::{
-    load_image_cached, load_image_checked, load_scaled_cached, load_thumb_cached, panel_key,
-    Prefetcher, UiCaches,
+    load_image_cached, load_image_checked, load_rule_cached, load_scaled_cached, load_thumb_cached,
+    panel_key, Prefetcher, UiCaches,
 };
 
 /// エンジン非依存のエラー型。V8 側は `JsErrorBox::generic`、tsint 側は
@@ -1555,14 +1555,15 @@ impl EngineState {
                     let scene = self.scene.lock_unpoisoned();
                     (scene.width, scene.height)
                 };
-                let (w, h, rgba) = self
-                    .game_dir
-                    .load_image_rgba(rule_path)
-                    .map_err(|e| e.to_string())?;
-                checked_dims(w, h).map_err(|e| format!("{rule_path}: {e}"))?;
-                let plane = rule_plane_from_rgba(w, h, &rgba, scene_w, scene_h);
+                let rule = load_rule_cached(
+                    &self.ui_cache,
+                    &self.game_dir,
+                    rule_path,
+                    scene_w,
+                    scene_h,
+                )?;
                 TransMethod::Universal {
-                    rule: Arc::new(plane),
+                    rule,
                     vague: args.vague.unwrap_or(64.0),
                 }
             }
