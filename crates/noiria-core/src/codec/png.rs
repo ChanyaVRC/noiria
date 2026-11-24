@@ -130,9 +130,10 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     );
     let stride = w * channels;
     let expected = h * (stride + 1);
-    let raw =
+    let mut raw =
         zlib_decompress_limited_with_capacity(idat, expected.saturating_add(IDAT_SLACK), expected)
             .context("IDAT の展開に失敗")?;
+    drop(idat_buf);
     ensure!(
         raw.len() >= expected,
         "画像データが不足しています (期待 {} 実際 {})",
@@ -140,73 +141,75 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
         raw.len()
     );
 
-    // フィルタ解除（直前行のコピー確保なし: split_at_mut で in-place 参照）
-    let mut lines: Vec<u8> = vec![0; h * stride];
-    let zero_row = vec![0u8; stride];
-    for y in 0..h {
-        let src = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
-        let filter = src[0];
-        let row = &src[1..];
-        let (prev, dst): (&[u8], &mut [u8]) = if y == 0 {
-            (&zero_row, &mut lines[..stride])
-        } else {
-            let (before, after) = lines.split_at_mut(y * stride);
-            (&before[(y - 1) * stride..], &mut after[..stride])
-        };
-        unfilter_row(filter, row, prev, channels, dst)?;
+    if ihdr.color_type == 6 {
+        // RGBA8: row y の出力先 [y*stride..] は入力 [y*(stride+1)+1..] より常に前方なので in-place でフィルタ解除できる。
+        let zero_row = vec![0u8; stride];
+        for y in 0..h {
+            let src_start = y * (stride + 1);
+            let filter = raw[src_start];
+            let dst_start = y * stride;
+            let shift = (src_start + 1) - dst_start;
+            if y == 0 {
+                unfilter_row_in_place(filter, &mut raw, shift, &zero_row, channels, stride)?;
+            } else {
+                let (before, rest) = raw.split_at_mut(dst_start);
+                let prev = &before[(y - 1) * stride..dst_start];
+                unfilter_row_in_place(filter, rest, shift, prev, channels, stride)?;
+            }
+        }
+        raw.truncate(h * stride);
+        raw.shrink_to_fit();
+        return Ok(DecodedPng {
+            width: ihdr.width,
+            height: ihdr.height,
+            rgba: raw,
+        });
     }
 
-    // RGBA へ変換
-    let rgba = match ihdr.color_type {
-        0 => {
-            let mut out = vec![0u8; w * h * 4];
-            for (dst, &g) in out.as_chunks_mut::<4>().0.iter_mut().zip(&lines) {
-                *dst = [g, g, g, 255];
+    if ihdr.color_type == 3 {
+        ensure!(!palette.is_empty(), "パレットがありません");
+    }
+
+    // 非 RGBA8: 2 行分の走査線バッファだけでフィルタ解除しつつ直接 RGBA8 へ展開する。
+    let mut out = vec![0u8; w * h * 4];
+    let mut prev_row = vec![0u8; stride];
+    let mut cur_row = vec![0u8; stride];
+    for y in 0..h {
+        let src = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
+        unfilter_row(src[0], &src[1..], &prev_row, channels, &mut cur_row)?;
+        let dst_pixels = &mut out.as_chunks_mut::<4>().0[y * w..(y + 1) * w];
+        match ihdr.color_type {
+            0 => {
+                for (dst, &g) in dst_pixels.iter_mut().zip(&cur_row) {
+                    *dst = [g, g, g, 255];
+                }
             }
-            out
-        }
-        2 => {
-            let mut out = vec![0u8; w * h * 4];
-            for (dst, px) in out
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(lines.as_chunks::<3>().0)
-            {
-                *dst = [px[0], px[1], px[2], 255];
+            2 => {
+                for (dst, px) in dst_pixels.iter_mut().zip(cur_row.as_chunks::<3>().0) {
+                    *dst = [px[0], px[1], px[2], 255];
+                }
             }
-            out
-        }
-        3 => {
-            ensure!(!palette.is_empty(), "パレットがありません");
-            let mut out = vec![0u8; w * h * 4];
-            for (dst, &idx) in out.as_chunks_mut::<4>().0.iter_mut().zip(&lines) {
-                let c = palette.get(idx as usize).context("パレット添字が範囲外")?;
-                let a = trns.get(idx as usize).copied().unwrap_or(255);
-                *dst = [c[0], c[1], c[2], a];
+            3 => {
+                for (dst, &idx) in dst_pixels.iter_mut().zip(&cur_row) {
+                    let c = palette.get(idx as usize).context("パレット添字が範囲外")?;
+                    let a = trns.get(idx as usize).copied().unwrap_or(255);
+                    *dst = [c[0], c[1], c[2], a];
+                }
             }
-            out
-        }
-        4 => {
-            let mut out = vec![0u8; w * h * 4];
-            for (dst, px) in out
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(lines.as_chunks::<2>().0)
-            {
-                *dst = [px[0], px[0], px[0], px[1]];
+            4 => {
+                for (dst, px) in dst_pixels.iter_mut().zip(cur_row.as_chunks::<2>().0) {
+                    *dst = [px[0], px[0], px[0], px[1]];
+                }
             }
-            out
+            _ => unreachable!(),
         }
-        6 => lines,
-        _ => unreachable!(),
-    };
+        std::mem::swap(&mut prev_row, &mut cur_row);
+    }
 
     Ok(DecodedPng {
         width: ihdr.width,
         height: ihdr.height,
-        rgba,
+        rgba: out,
     })
 }
 
@@ -225,6 +228,59 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     } else {
         c as u8
     }
+}
+
+fn unfilter_row_in_place(
+    filter: u8,
+    buf: &mut [u8],
+    shift: usize,
+    prev: &[u8],
+    channels: usize,
+    stride: usize,
+) -> Result<()> {
+    if shift >= stride {
+        let (dst, tail) = buf.split_at_mut(shift);
+        return unfilter_row(filter, &tail[..stride], prev, channels, &mut dst[..stride]);
+    }
+    let buf = &mut buf[..shift + stride];
+    let prev = &prev[..stride];
+    match filter {
+        0 => buf.copy_within(shift..shift + stride, 0),
+        1 => {
+            buf.copy_within(shift..shift + channels, 0);
+            for i in channels..stride {
+                buf[i] = buf[shift + i].wrapping_add(buf[i - channels]);
+            }
+        }
+        2 => {
+            for i in 0..stride {
+                buf[i] = buf[shift + i].wrapping_add(prev[i]);
+            }
+        }
+        3 => {
+            for i in 0..channels {
+                buf[i] = buf[shift + i].wrapping_add(prev[i] >> 1);
+            }
+            for i in channels..stride {
+                let avg = ((buf[i - channels] as u16 + prev[i] as u16) >> 1) as u8;
+                buf[i] = buf[shift + i].wrapping_add(avg);
+            }
+        }
+        4 => {
+            for i in 0..channels {
+                buf[i] = buf[shift + i].wrapping_add(prev[i]);
+            }
+            for i in channels..stride {
+                buf[i] = buf[shift + i].wrapping_add(paeth(
+                    buf[i - channels],
+                    prev[i],
+                    prev[i - channels],
+                ));
+            }
+        }
+        f => bail!("非対応のフィルタタイプ: {f}"),
+    }
+    Ok(())
 }
 
 fn unfilter_row(
@@ -348,19 +404,21 @@ fn build_filtered_raw(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(height as usize * (stride + 1));
     let zero_row = vec![0u8; stride];
     let mut prev: &[u8] = &zero_row;
-    let mut candidates: Vec<Vec<u8>> = (0..5).map(|_| vec![0u8; stride]).collect();
+    let mut best_buf = vec![0u8; stride];
+    let mut trial_buf = vec![0u8; stride];
     for row in rgba.chunks_exact(stride) {
-        let mut best = 0usize;
+        let mut best = 0u8;
         let mut best_cost = u64::MAX;
-        for (f, cand) in candidates.iter_mut().enumerate() {
-            let cost = apply_filter_and_msad(f as u8, row, prev, CHANNELS, cand);
+        for f in 0u8..5 {
+            let cost = apply_filter_and_msad(f, row, prev, CHANNELS, &mut trial_buf);
             if cost < best_cost {
                 best_cost = cost;
                 best = f;
+                std::mem::swap(&mut best_buf, &mut trial_buf);
             }
         }
-        raw.push(best as u8);
-        raw.extend_from_slice(&candidates[best]);
+        raw.push(best);
+        raw.extend_from_slice(&best_buf);
         prev = row;
     }
     raw
@@ -375,17 +433,21 @@ pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         "rgba のサイズが width*height*4 と一致しません"
     );
 
-    let raw = build_filtered_raw(width, height, rgba);
+    let compressed = {
+        let raw = build_filtered_raw(width, height, rgba);
+        zlib_compress(&raw)
+    };
 
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(8 + 25 + 12 + compressed.len() + 12);
     out.extend_from_slice(&SIGNATURE);
 
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth 8, color type 6 (RGBA), compression/filter/interlace 0
+    let wb = width.to_be_bytes();
+    let hb = height.to_be_bytes();
+    let ihdr = [
+        wb[0], wb[1], wb[2], wb[3], hb[0], hb[1], hb[2], hb[3], 8, 6, 0, 0, 0,
+    ];
     write_chunk(&mut out, b"IHDR", &ihdr);
-    write_chunk(&mut out, b"IDAT", &zlib_compress(&raw));
+    write_chunk(&mut out, b"IDAT", &compressed);
     write_chunk(&mut out, b"IEND", &[]);
     out
 }

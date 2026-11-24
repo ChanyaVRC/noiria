@@ -482,9 +482,9 @@ impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
         loop {
             match self.ogg.next_packet()? {
                 Some(pkt) => {
-                    let pcm = self.decoder.decode_packet(&pkt)?;
-                    if !pcm.is_empty() {
-                        self.pcm_buf = pcm;
+                    self.pcm_buf.clear();
+                    self.decoder.decode_packet_into(&pkt, &mut self.pcm_buf)?;
+                    if !self.pcm_buf.is_empty() {
                         self.pcm_pos = 0;
                         return Ok(());
                     }
@@ -503,20 +503,22 @@ impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
         }
         loop {
             match self.ogg.next_packet() {
-                Ok(Some(pkt)) => match self.decoder.decode_packet(&pkt) {
-                    Ok(pcm) => {
-                        if !pcm.is_empty() {
-                            self.pcm_buf = pcm;
-                            self.pcm_pos = 0;
-                            return true;
+                Ok(Some(pkt)) => {
+                    self.pcm_buf.clear();
+                    match self.decoder.decode_packet_into(&pkt, &mut self.pcm_buf) {
+                        Ok(()) => {
+                            if !self.pcm_buf.is_empty() {
+                                self.pcm_pos = 0;
+                                return true;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("OGG/Vorbis デコードエラー（再生を終了します）: {e:#}");
+                            self.ended = true;
+                            return false;
                         }
                     }
-                    Err(e) => {
-                        log::warn!("OGG/Vorbis デコードエラー（再生を終了します）: {e:#}");
-                        self.ended = true;
-                        return false;
-                    }
-                },
+                }
                 Ok(None) => {
                     self.ended = true;
                     return false;

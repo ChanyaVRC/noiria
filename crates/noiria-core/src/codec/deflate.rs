@@ -99,6 +99,7 @@ fn dist_code(dist: usize) -> (u16, u8, u16) {
 // ---------------------------------------------------------------------
 
 const WINDOW: usize = 32768;
+const WINDOW_MASK: usize = WINDOW - 1;
 const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 258;
 const MAX_CHAIN: usize = 128;
@@ -133,7 +134,7 @@ impl<'a> Lz77State<'a> {
         Self {
             data,
             head: vec![-1; HASH_SIZE],
-            prev: vec![-1; data.len().max(1)],
+            prev: vec![-1; WINDOW],
         }
     }
 
@@ -151,7 +152,7 @@ impl<'a> Lz77State<'a> {
             return;
         }
         let h = self.hash_at(pos) as usize;
-        self.prev[pos] = self.head[h];
+        self.prev[pos & WINDOW_MASK] = self.head[h];
         self.head[h] = pos as i32;
     }
 
@@ -212,7 +213,10 @@ impl<'a> Lz77State<'a> {
                     }
                 }
             }
-            cand = self.prev[c];
+            if dist == WINDOW {
+                break;
+            }
+            cand = self.prev[c & WINDOW_MASK];
             steps += 1;
         }
         if best_len >= MIN_MATCH {

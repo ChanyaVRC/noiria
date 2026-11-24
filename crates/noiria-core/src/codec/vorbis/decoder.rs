@@ -4,7 +4,7 @@ use super::bitreader::BitReader;
 use super::codebook::{ilog, Codebook};
 use super::floor::{reject_floor0, Floor1};
 use super::mdct::{build_window, Imdct, ImdctScratch};
-use super::residue::ResidueSetup;
+use super::residue::{ResidueScratch, ResidueSetup};
 use anyhow::{bail, ensure, Result};
 
 enum FloorConfig {
@@ -34,6 +34,20 @@ pub struct DecodedVorbis {
     pub samples: Vec<f32>,
 }
 
+/// パケット毎に再利用する中間ワークバッファ。
+#[derive(Default)]
+struct PacketScratch {
+    spectral: Vec<Vec<f32>>,
+    floor_curves: Vec<Vec<f32>>,
+    floor_present: Vec<bool>,
+    no_residue: Vec<bool>,
+    residue_vec: Vec<Vec<f32>>,
+    submap_chs: Vec<usize>,
+    do_not_decode: Vec<bool>,
+    submap_out: Vec<Vec<f32>>,
+    residue: ResidueScratch,
+}
+
 /// パケット単位でストリーミングデコードするためのデコーダ状態。
 pub struct VorbisStreamDecoder {
     channels: u16,
@@ -48,6 +62,7 @@ pub struct VorbisStreamDecoder {
     imdct0: Imdct,
     imdct1: Imdct,
     imdct_scratch: ImdctScratch,
+    scratch: PacketScratch,
     win_short: Vec<f32>,
     win_long: [Vec<f32>; 4],
     /// オーバーラップ加算用の状態: 直前ブロックの「窓掛け済み全長データ」とその長さ。
@@ -102,6 +117,7 @@ impl VorbisStreamDecoder {
             imdct0: Imdct::new(blocksize_0),
             imdct1: Imdct::new(blocksize_1),
             imdct_scratch: ImdctScratch::default(),
+            scratch: PacketScratch::default(),
             win_short,
             win_long,
             prev_block: None,
@@ -126,17 +142,24 @@ impl VorbisStreamDecoder {
     /// 1 音声パケットをデコードし、確定したインターリーブ PCM サンプルを返す
     /// (最初のパケットや非音声パケットの場合は空 Vec)。
     pub fn decode_packet(&mut self, packet: &[u8]) -> Result<Vec<f32>> {
+        let mut out = Vec::new();
+        self.decode_packet_into(packet, &mut out)?;
+        Ok(out)
+    }
+
+    /// 1 音声パケットをデコードし、確定したインターリーブ PCM サンプルを `out` へ追記する。
+    pub fn decode_packet_into(&mut self, packet: &[u8], out: &mut Vec<f32>) -> Result<()> {
         let mut br = BitReader::new(packet);
         if br.read_bool() {
             // packet_type ビットが 1 = 非音声パケット。無視する。
-            return Ok(Vec::new());
+            return Ok(());
         }
         let mode_count = self.modes.len() as u32;
         ensure!(mode_count > 0, "モードが設定されていません");
         let mode_number = br.read(ilog(mode_count as i64 - 1)) as usize;
         if mode_number >= self.modes.len() {
             // 不正なモード番号: 壊れたパケットとして無視する。
-            return Ok(Vec::new());
+            return Ok(());
         }
         let blockflag = self.modes[mode_number].blockflag;
         let n = if blockflag {
@@ -152,7 +175,7 @@ impl VorbisStreamDecoder {
         };
         if br.eof {
             // ウィンドウ確定前の EOP はパケット破棄。
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         let window: &[f32] = if blockflag {
@@ -168,75 +191,105 @@ impl VorbisStreamDecoder {
 
         let ch = self.channels as usize;
         let half = n / 2;
-        let mut spectral = vec![vec![0f32; half]; ch];
+        let sc = &mut self.scratch;
+        sc.spectral.resize_with(ch, Vec::new);
+        for v in &mut sc.spectral[..ch] {
+            v.clear();
+            v.resize(half, 0.0);
+        }
         let mut zero_all = br.eof;
 
         if !zero_all {
             // --- floor curve decode (4.3.2) ---
-            let mut floor_curve: Vec<Option<Vec<f32>>> = Vec::with_capacity(ch);
+            sc.floor_curves.resize_with(ch, Vec::new);
+            sc.floor_present.clear();
+            sc.floor_present.resize(ch, false);
             {
                 let mapping = &self.mappings[mapping_idx];
                 for i in 0..ch {
                     let submap = mux_of(mapping, i);
                     let floor_number = mapping.submap_floor[submap as usize] as usize;
-                    let curve = match &self.floors[floor_number] {
-                        FloorConfig::Type1(f1) => f1.decode(&mut br, &self.codebooks, n)?,
+                    let present = match &self.floors[floor_number] {
+                        FloorConfig::Type1(f1) => {
+                            f1.decode_into(&mut br, &self.codebooks, n, &mut sc.floor_curves[i])?
+                        }
                     };
                     if br.eof {
                         zero_all = true;
                     }
-                    floor_curve.push(curve);
+                    sc.floor_present[i] = present;
                 }
             }
 
-            if zero_all {
-                // 4.3.2: floor decode 中の EOP は全チャンネルをゼロにして overlap へ。
-                spectral = vec![vec![0f32; half]; ch];
-            } else {
+            if !zero_all {
                 let mapping = &self.mappings[mapping_idx];
-                let mut no_residue: Vec<bool> = floor_curve.iter().map(|c| c.is_none()).collect();
+                sc.no_residue.clear();
+                sc.no_residue
+                    .extend(sc.floor_present[..ch].iter().map(|&p| !p));
 
                 // 4.3.3: nonzero vector propagate
                 for &(mag, ang) in &mapping.coupling {
-                    if no_residue[mag as usize] || no_residue[ang as usize] {
-                        no_residue[mag as usize] = true;
-                        no_residue[ang as usize] = true;
+                    if sc.no_residue[mag as usize] || sc.no_residue[ang as usize] {
+                        sc.no_residue[mag as usize] = true;
+                        sc.no_residue[ang as usize] = true;
                     }
                 }
 
                 // 4.3.4: residue decode (submap 順)
-                let mut residue_vec: Vec<Vec<f32>> = vec![vec![0f32; half]; ch];
-                for submap in 0..mapping.submaps {
-                    let mut chs: Vec<usize> = Vec::new();
-                    for j in 0..ch {
-                        if mux_of(mapping, j) == submap {
-                            chs.push(j);
-                        }
-                    }
-                    if chs.is_empty() {
-                        continue;
-                    }
-                    let residue_number = mapping.submap_residue[submap as usize] as usize;
-                    let do_not_decode: Vec<bool> = chs.iter().map(|&j| no_residue[j]).collect();
-                    let decoded = self.residues[residue_number].decode(
+                sc.residue_vec.resize_with(ch, Vec::new);
+                if mapping.submaps <= 1 {
+                    let residue_number = mapping.submap_residue[0] as usize;
+                    self.residues[residue_number].decode_into(
                         &mut br,
                         &self.codebooks,
-                        chs.len(),
+                        ch,
                         half,
-                        &do_not_decode,
+                        &sc.no_residue[..ch],
+                        &mut sc.residue_vec[..ch],
+                        &mut sc.residue,
                     )?;
-                    for (j, vec) in chs.into_iter().zip(decoded) {
-                        residue_vec[j] = vec;
+                } else {
+                    for v in &mut sc.residue_vec[..ch] {
+                        v.clear();
+                        v.resize(half, 0.0);
+                    }
+                    for submap in 0..mapping.submaps {
+                        sc.submap_chs.clear();
+                        sc.do_not_decode.clear();
+                        for j in 0..ch {
+                            if mux_of(mapping, j) == submap {
+                                sc.submap_chs.push(j);
+                                sc.do_not_decode.push(sc.no_residue[j]);
+                            }
+                        }
+                        let sub_ch = sc.submap_chs.len();
+                        if sub_ch == 0 {
+                            continue;
+                        }
+                        let residue_number = mapping.submap_residue[submap as usize] as usize;
+                        sc.submap_out.resize_with(sub_ch, Vec::new);
+                        self.residues[residue_number].decode_into(
+                            &mut br,
+                            &self.codebooks,
+                            sub_ch,
+                            half,
+                            &sc.do_not_decode,
+                            &mut sc.submap_out[..sub_ch],
+                            &mut sc.residue,
+                        )?;
+                        for (idx, &j) in sc.submap_chs.iter().enumerate() {
+                            std::mem::swap(&mut sc.residue_vec[j], &mut sc.submap_out[idx]);
+                        }
                     }
                 }
 
                 // 4.3.5: inverse coupling (逆順)
                 for &(mag, ang) in mapping.coupling.iter().rev() {
                     let (mv, av) = if mag < ang {
-                        let (left, right) = residue_vec.split_at_mut(ang as usize);
+                        let (left, right) = sc.residue_vec.split_at_mut(ang as usize);
                         (&mut left[mag as usize], &mut right[0])
                     } else {
-                        let (left, right) = residue_vec.split_at_mut(mag as usize);
+                        let (left, right) = sc.residue_vec.split_at_mut(mag as usize);
                         (&mut right[0], &mut left[ang as usize])
                     };
                     for (m, a) in mv.iter_mut().zip(av.iter_mut()) {
@@ -258,9 +311,12 @@ impl VorbisStreamDecoder {
 
                 // 4.3.6: dot product (floor * residue)
                 for j in 0..ch {
-                    if let Some(curve) = &floor_curve[j] {
+                    if sc.floor_present[j] {
+                        let curve = &sc.floor_curves[j];
+                        let res = &sc.residue_vec[j];
+                        let spec = &mut sc.spectral[j];
                         for k in 0..half {
-                            spectral[j][k] = curve[k] * residue_vec[j][k];
+                            spec[k] = curve[k] * res[k];
                         }
                     }
                 }
@@ -275,7 +331,7 @@ impl VorbisStreamDecoder {
         };
         let mut cur_block = std::mem::take(&mut self.reuse_block);
         cur_block.resize_with(ch, || Vec::with_capacity(self.blocksize_1));
-        for (pcm, spec) in cur_block.iter_mut().zip(&spectral) {
+        for (pcm, spec) in cur_block.iter_mut().zip(&self.scratch.spectral[..ch]) {
             pcm.resize(n, 0.0);
             imdct.transform_into(spec, &mut self.imdct_scratch, pcm);
             for (p, &w) in pcm.iter_mut().zip(window) {
@@ -283,14 +339,13 @@ impl VorbisStreamDecoder {
             }
         }
 
-        let output = match &self.prev_block {
-            None => Vec::new(),
-            Some((prev_data, prev_n)) => overlap_add(prev_data, *prev_n, &cur_block, n, ch),
-        };
+        if let Some((prev_data, prev_n)) = &self.prev_block {
+            overlap_add_into(prev_data, *prev_n, &cur_block, n, ch, out);
+        }
         if let Some((old_prev, _)) = self.prev_block.replace((cur_block, n)) {
             self.reuse_block = old_prev;
         }
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -303,17 +358,20 @@ fn mux_of(mapping: &Mapping, channel: usize) -> u32 {
 }
 
 /// prev(長さ prev_n, 各チャンネル窓掛け済み全長データ) と cur(長さ cur_n) から
-/// 確定したインターリーブ PCM を生成する (仕様書 4.3.8 / A.2 overlap_add)。
-fn overlap_add(
+/// 確定したインターリーブ PCM を `out` へ追記する (仕様書 4.3.8 / A.2 overlap_add)。
+fn overlap_add_into(
     prev: &[Vec<f32>],
     prev_n: usize,
     cur: &[Vec<f32>],
     cur_n: usize,
     ch: usize,
-) -> Vec<f32> {
+    out: &mut Vec<f32>,
+) {
     let returned_len = prev_n / 4 + cur_n / 4;
     let cur_offset: i64 = prev_n as i64 / 4 - cur_n as i64 / 4;
-    let mut out = vec![0f32; returned_len * ch];
+    let base = out.len();
+    out.resize(base + returned_len * ch, 0.0);
+    let dst = &mut out[base..];
     for t in 0..returned_len {
         for c in 0..ch {
             let mut v = 0f32;
@@ -324,10 +382,9 @@ fn overlap_add(
             if cur_idx >= 0 && (cur_idx as usize) < cur_n {
                 v += cur[c][cur_idx as usize];
             }
-            out[t * ch + c] = v;
+            dst[t * ch + c] = v;
         }
     }
-    out
 }
 
 fn parse_identification(data: &[u8]) -> Result<(u16, u32, usize, usize)> {
@@ -514,8 +571,7 @@ pub fn decode_packets(packets: &[Vec<u8>]) -> Result<DecodedVorbis> {
     let mut dec = VorbisStreamDecoder::new(&packets[0], &packets[2])?;
     let mut samples = Vec::new();
     for packet in &packets[3..] {
-        let chunk = dec.decode_packet(packet)?;
-        samples.extend_from_slice(&chunk);
+        dec.decode_packet_into(packet, &mut samples)?;
     }
     Ok(DecodedVorbis {
         channels: dec.channels(),
@@ -540,7 +596,8 @@ mod tests {
         let ch = 1;
         let prev = vec![(0..n).map(|i| i as f32).collect::<Vec<f32>>()];
         let cur = vec![(0..n).map(|i| (100 + i) as f32).collect::<Vec<f32>>()];
-        let out = overlap_add(&prev, n, &cur, n, ch);
+        let mut out = Vec::new();
+        overlap_add_into(&prev, n, &cur, n, ch, &mut out);
         // returned_len = n/4+n/4 = n/2 = 4
         assert_eq!(out.len(), 4);
         // out[t] = prev[n/2+t] + cur[t]

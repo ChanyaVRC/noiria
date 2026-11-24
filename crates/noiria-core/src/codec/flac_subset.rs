@@ -135,20 +135,27 @@ pub fn decode_wav_limited(blob: &[u8], max_out: usize) -> Result<Vec<u8>> {
         "wav-flac の復元サイズ {out_len} が上限 {max_out} を超えます"
     );
 
-    let mut reader = BitReader::new(stream);
-    let mut channel_samples: Vec<Vec<i16>> = Vec::with_capacity(channels);
-    for _ in 0..channels {
-        channel_samples.push(decode_channel(&mut reader, num_frames)?);
-    }
+    let mut out = vec![0u8; out_len as usize];
+    out[..prefix.len()].copy_from_slice(prefix);
+    let pcm_start = prefix.len();
+    let suffix_start = out.len() - suffix.len();
+    out[suffix_start..].copy_from_slice(suffix);
 
-    let mut out = Vec::with_capacity(out_len as usize);
-    out.extend_from_slice(prefix);
-    for i in 0..num_frames {
-        for samples in &channel_samples {
-            out.extend_from_slice(&samples[i].to_le_bytes());
+    let mut reader = BitReader::new(stream);
+    let mut block_buf = Vec::with_capacity(num_frames.min(BLOCK_SIZE));
+    for ch in 0..channels {
+        let mut frame = 0usize;
+        while frame < num_frames {
+            let block_len = (num_frames - frame).min(BLOCK_SIZE);
+            block_buf.clear();
+            decode_block(&mut reader, block_len, &mut block_buf)?;
+            for (i, &sample) in block_buf.iter().enumerate() {
+                let off = pcm_start + ((frame + i) * channels + ch) * 2;
+                out[off..off + 2].copy_from_slice(&sample.to_le_bytes());
+            }
+            frame += block_len;
         }
     }
-    out.extend_from_slice(suffix);
     Ok(out)
 }
 
@@ -161,17 +168,6 @@ fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32> {
     let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     *pos += 4;
     Ok(v)
-}
-
-fn decode_channel(reader: &mut BitReader, num_frames: usize) -> Result<Vec<i16>> {
-    let mut out = Vec::with_capacity(num_frames);
-    let mut remaining = num_frames;
-    while remaining > 0 {
-        let block_len = remaining.min(BLOCK_SIZE);
-        decode_block(reader, block_len, &mut out)?;
-        remaining -= block_len;
-    }
-    Ok(out)
 }
 
 fn decode_block(reader: &mut BitReader, block_len: usize, out: &mut Vec<i16>) -> Result<()> {
@@ -228,10 +224,10 @@ fn decode_block(reader: &mut BitReader, block_len: usize, out: &mut Vec<i16>) ->
                 "wav-flac のLPC予測次数がブロック長を超えています"
             );
 
-            let mut coeffs = Vec::with_capacity(order);
-            for _ in 0..order {
+            let mut coeffs = [0i64; 8];
+            for coeff in &mut coeffs[..order] {
                 let raw = reader.read_bits(precision)?;
-                coeffs.push(sign_extend(raw, precision));
+                *coeff = sign_extend(raw, precision);
             }
             for _ in 0..order {
                 let v = reader.read_bits(16)? as u16 as i16;
@@ -240,7 +236,7 @@ fn decode_block(reader: &mut BitReader, block_len: usize, out: &mut Vec<i16>) ->
             for _ in order..block_len {
                 let zz = reader.read_rice(k)?;
                 let residual = unzigzag(zz);
-                let pred = lpc_predict(&coeffs, shift, out);
+                let pred = lpc_predict(&coeffs[..order], shift, out);
                 let x = residual.wrapping_add(pred);
                 ensure!(
                     (i16::MIN as i64..=i16::MAX as i64).contains(&x),

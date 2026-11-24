@@ -32,12 +32,15 @@ const fn build_crc_table() -> [u32; 256] {
 
 static CRC_TABLE: [u32; 256] = build_crc_table();
 
-fn crc32(data: &[u8]) -> u32 {
-    let mut reg: u32 = 0;
+fn crc32_update(mut reg: u32, data: &[u8]) -> u32 {
     for &b in data {
         reg = (reg << 8) ^ CRC_TABLE[(((reg >> 24) as u8) ^ b) as usize];
     }
     reg
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    crc32_update(0, data)
 }
 
 /// パースされた 1 ページ。`body` は元バッファへの参照。
@@ -104,14 +107,12 @@ pub fn parse_page(data: &[u8]) -> Result<(Page<'_>, usize)> {
     );
     let body = &data[body_start..body_start + body_len];
 
-    // CRC は「CRC フィールドを 0 にしたページ全体」に対して計算する。
+    // CRC は「CRC フィールドを 0 にしたページ全体」に対して計算する（コピー確保なし）。
     let total = body_start + body_len;
-    let mut crc_buf = data[0..total].to_vec();
-    crc_buf[22] = 0;
-    crc_buf[23] = 0;
-    crc_buf[24] = 0;
-    crc_buf[25] = 0;
-    let computed = crc32(&crc_buf);
+    let computed = crc32_update(
+        crc32_update(crc32_update(0, &data[0..22]), &[0u8; 4]),
+        &data[26..total],
+    );
     ensure!(computed == crc_stored, "Ogg ページの CRC32 が一致しません");
 
     Ok((
