@@ -625,11 +625,11 @@ fn decode_scan(
                 let cb_row = &p_cb[cy * cbw..];
                 let cr_row = &p_cr[cy2 * crw..];
                 let dst_row = &mut dst_pixels[py * width..(py + 1) * width];
-                for px in 0..width {
+                for (px, dst) in dst_row.iter_mut().enumerate() {
                     let lx = px * comps[0].h / hmax;
                     let cx = px * comps[1].h / hmax;
                     let cx2 = px * comps[2].h / hmax;
-                    dst_row[px] = ycbcr_to_rgba(y_row[lx], cb_row[cx], cr_row[cx2]);
+                    *dst = ycbcr_to_rgba(y_row[lx], cb_row[cx], cr_row[cx2]);
                 }
             }
         }

@@ -313,7 +313,9 @@ fn main() {
         let mut jpg_bytes = Vec::new();
         let rgb: Vec<u8> = dec
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg_bytes, 85)

@@ -93,11 +93,10 @@ fn vert_row(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 availability was checked above.
             unsafe { vert_row_avx2(r0, r1, wy, dst) };
-            return;
+        } else {
+            // SAFETY: SSE2 is guaranteed on x86_64.
+            unsafe { vert_row_sse2(r0, r1, wy, dst) };
         }
-        // SAFETY: SSE2 is guaranteed on x86_64.
-        unsafe { vert_row_sse2(r0, r1, wy, dst) };
-        return;
     }
     #[cfg(not(target_arch = "x86_64"))]
     vert_row_scalar(r0, r1, wy, dst);
