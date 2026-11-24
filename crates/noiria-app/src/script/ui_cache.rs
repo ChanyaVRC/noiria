@@ -29,19 +29,32 @@ pub fn load_image_checked(game_dir: &GameDir, path: &str) -> Result<Pixmap, Stri
     Ok(pixmap)
 }
 
-/// 総バイト数で上限を持つ LRU（エントリ数は数十個なので、追い出しは最古の走査で足りる）。
-pub struct PixmapLru<K: Eq + Hash + Clone> {
-    map: HashMap<K, (Arc<Pixmap>, u64)>,
+/// バイト上限付き LRU に載せる値の占有バイト数を返すトレイト。
+pub trait ByteSized {
+    fn byte_size(&self) -> usize;
+}
+
+impl ByteSized for Arc<Pixmap> {
+    fn byte_size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl ByteSized for Arc<Vec<u8>> {
+    fn byte_size(&self) -> usize {
+        self.len()
+    }
+}
+
+/// 総バイト数で上限を持つ汎用 LRU（エントリ数は数十個なので、追い出しは最古の走査で足りる）。
+pub struct ByteLru<K: Eq + Hash + Clone, V: Clone + ByteSized> {
+    map: HashMap<K, (V, u64)>,
     bytes: usize,
     cap_bytes: usize,
     tick: u64,
 }
 
-fn size_of(p: &Pixmap) -> usize {
-    p.data.len()
-}
-
-impl<K: Eq + Hash + Clone> PixmapLru<K> {
+impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
     pub fn new(cap_bytes: usize) -> Self {
         Self {
             map: HashMap::new(),
@@ -51,23 +64,23 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         }
     }
 
-    pub fn get<Q>(&mut self, k: &Q) -> Option<Arc<Pixmap>>
+    pub fn get<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
         self.tick += 1;
         let tick = self.tick;
-        self.map.get_mut(k).map(|(p, t)| {
+        self.map.get_mut(k).map(|(v, t)| {
             *t = tick;
-            p.clone()
+            v.clone()
         })
     }
 
-    pub fn insert(&mut self, k: K, v: Arc<Pixmap>) {
-        let sz = size_of(&v);
+    pub fn insert(&mut self, k: K, v: V) {
+        let sz = v.byte_size();
         if let Some((old, _)) = self.map.remove(&k) {
-            self.bytes -= size_of(&old);
+            self.bytes -= old.byte_size();
         }
         if sz > self.cap_bytes {
             return;
@@ -81,7 +94,7 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
                 break;
             };
             if let Some((p, _)) = self.map.remove(&oldest) {
-                self.bytes -= size_of(&p);
+                self.bytes -= p.byte_size();
             }
         }
     }
@@ -90,7 +103,7 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         let doomed: Vec<K> = self.map.keys().filter(|k| f(k)).cloned().collect();
         for k in doomed {
             if let Some((p, _)) = self.map.remove(&k) {
-                self.bytes -= size_of(&p);
+                self.bytes -= p.byte_size();
             }
         }
     }
@@ -105,6 +118,9 @@ impl<K: Eq + Hash + Clone> PixmapLru<K> {
         self.bytes
     }
 }
+
+pub type PixmapLru<K> = ByteLru<K, Arc<Pixmap>>;
+pub type RuleLru = ByteLru<RuleKey, Arc<Vec<u8>>>;
 
 /// `layer.panel` の数値列（`PanelSpec::from_slice` が読むもの）を鍵にする。
 pub type PanelKey = Vec<u64>;
@@ -131,6 +147,14 @@ pub struct ScaledKey {
     pub h: u32,
 }
 
+/// ユニバーサルトランジションのルール輝度プレーン用の鍵: パス・シーン寸法。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RuleKey {
+    pub path: String,
+    pub w: u32,
+    pub h: u32,
+}
+
 pub const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
 
 pub struct UiCaches {
@@ -138,6 +162,7 @@ pub struct UiCaches {
     pub thumbs: PixmapLru<ThumbKey>,
     pub scaled: PixmapLru<ScaledKey>,
     pub images: PixmapLru<String>,
+    pub rules: RuleLru,
 }
 
 impl UiCaches {
@@ -147,6 +172,7 @@ impl UiCaches {
             thumbs: PixmapLru::new(16 << 20),
             scaled: PixmapLru::new(24 << 20),
             images: PixmapLru::new(IMAGE_CACHE_MAX_BYTES),
+            rules: RuleLru::new(16 << 20),
         }
     }
 
@@ -240,19 +266,56 @@ pub fn load_scaled_cached(
         w,
         h,
     };
-    if let Some(p) = cache.lock_unpoisoned().scaled.get(&key) {
-        return Ok(p);
-    }
-    checked_dims(w, h)?;
-    let pixmap = load_image_checked(game_dir, path)?;
-    let pixmap = if pixmap.width == w && pixmap.height == h {
-        pixmap
-    } else {
-        pixmap.resize_area(w, h)
+    let existing_full = {
+        let mut guard = cache.lock_unpoisoned();
+        if let Some(p) = guard.scaled.get(&key) {
+            return Ok(p);
+        }
+        guard.images.get(path)
     };
-    let pixmap = Arc::new(pixmap);
+    checked_dims(w, h)?;
+    let pixmap = if let Some(full) = existing_full {
+        if full.width == w && full.height == h {
+            full
+        } else {
+            Arc::new(full.resize_area(w, h))
+        }
+    } else {
+        let decoded = load_image_checked(game_dir, path)?;
+        let resized = if decoded.width == w && decoded.height == h {
+            decoded
+        } else {
+            decoded.resize_area(w, h)
+        };
+        Arc::new(resized)
+    };
     cache.lock_unpoisoned().scaled.insert(key, pixmap.clone());
     Ok(pixmap)
+}
+
+/// ユニバーサルトランジションのルール画像をスクリーン寸法の輝度プレーンとしてキャッシュする。
+pub fn load_rule_cached(
+    cache: &Mutex<UiCaches>,
+    game_dir: &GameDir,
+    path: &str,
+    scene_w: u32,
+    scene_h: u32,
+) -> Result<Arc<Vec<u8>>, String> {
+    let key = RuleKey {
+        path: path.to_string(),
+        w: scene_w,
+        h: scene_h,
+    };
+    if let Some(plane) = cache.lock_unpoisoned().rules.get(&key) {
+        return Ok(plane);
+    }
+    let (w, h, rgba) = game_dir.load_image_rgba(path).map_err(|e| e.to_string())?;
+    checked_dims(w, h).map_err(|e| format!("{path}: {e}"))?;
+    let plane = Arc::new(noiria_core::transition::rule_plane_from_rgba(
+        w, h, &rgba, scene_w, scene_h,
+    ));
+    cache.lock_unpoisoned().rules.insert(key, plane.clone());
+    Ok(plane)
 }
 
 enum Job {

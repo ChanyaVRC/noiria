@@ -16,6 +16,8 @@
 //!   循環はこの深さ上限だけで対策する（W1 設計判断: 追加のループ検出は行わない）。
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -157,13 +159,188 @@ impl FontRegistry {
             if ext_lower != "ttf" && ext_lower != "ttc" {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else {
+            self.index_file(&path);
+        }
+    }
+
+    /// 1 ファイルを最小限のシーク読込（ヘッダ・テーブルディレクトリ・小さな検証用テーブル・
+    /// `name` テーブルのみ）で索引する。全ファイル読込＋`glyf` 読み込みを避けて起動時間を短縮する。
+    fn index_file(&mut self, path: &Path) {
+        let Ok(mut file) = File::open(path) else {
+            return;
+        };
+        let Ok(file_len) = file.metadata().map(|m| m.len()) else {
+            return;
+        };
+        if file_len < 12 {
+            return;
+        }
+        let mut hdr = [0u8; 12];
+        if file.read_exact(&mut hdr).is_err() {
+            return;
+        }
+        let sfnt_offsets: Vec<u64> = if &hdr[0..4] == b"ttcf" {
+            let declared = u32::from_be_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
+            let fits = ((file_len - 12) / 4).min(u32::MAX as u64) as u32;
+            let count = declared.min(fits).min(1024);
+            if count == 0 {
+                return;
+            }
+            let mut raw = vec![0u8; count as usize * 4];
+            if file.read_exact(&mut raw).is_err() {
+                return;
+            }
+            raw.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_be_bytes(*c) as u64)
+                .collect()
+        } else {
+            vec![0]
+        };
+
+        let mut dir_buf = Vec::new();
+        let mut name_buf = Vec::new();
+        let mut cmap_hdr = Vec::new();
+        for (index, sfnt_offset) in sfnt_offsets.into_iter().enumerate() {
+            let Some(sfnt_end) = sfnt_offset.checked_add(12) else {
                 continue;
             };
-            self.index_bytes(&bytes, |index| FontKey {
-                source: FontSource::Path(path.clone()),
-                index,
-            });
+            if sfnt_end > file_len || file.seek(SeekFrom::Start(sfnt_offset)).is_err() {
+                continue;
+            }
+            let mut sh = [0u8; 12];
+            if file.read_exact(&mut sh).is_err() {
+                continue;
+            }
+            let version = u32::from_be_bytes([sh[0], sh[1], sh[2], sh[3]]);
+            if version != 0x0001_0000 && version != 0x7472_7565 {
+                continue;
+            }
+            let num_tables = u16::from_be_bytes([sh[4], sh[5]]) as usize;
+            let records_len = num_tables * 16;
+            if sfnt_end.saturating_add(records_len as u64) > file_len {
+                continue;
+            }
+            dir_buf.resize(records_len, 0);
+            if file.read_exact(&mut dir_buf).is_err() {
+                continue;
+            }
+
+            let mut head_loc = None;
+            let mut maxp_loc = None;
+            let mut hhea_loc = None;
+            let mut hmtx_loc = None;
+            let mut cmap_loc = None;
+            let mut loca_loc = None;
+            let mut glyf_loc = None;
+            let mut name_loc = None;
+            for rec in dir_buf.as_chunks::<16>().0 {
+                let tag: [u8; 4] = [rec[0], rec[1], rec[2], rec[3]];
+                let off = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]) as u64;
+                let len = u32::from_be_bytes([rec[12], rec[13], rec[14], rec[15]]) as u64;
+                let slot = match &tag {
+                    b"head" => &mut head_loc,
+                    b"maxp" => &mut maxp_loc,
+                    b"hhea" => &mut hhea_loc,
+                    b"hmtx" => &mut hmtx_loc,
+                    b"cmap" => &mut cmap_loc,
+                    b"loca" => &mut loca_loc,
+                    b"glyf" => &mut glyf_loc,
+                    b"name" => &mut name_loc,
+                    _ => continue,
+                };
+                *slot = Some((off, len));
+            }
+
+            let (
+                Some((head_off, head_len)),
+                Some((maxp_off, maxp_len)),
+                Some((hhea_off, hhea_len)),
+                Some((hmtx_off, hmtx_len)),
+                Some((cmap_off, cmap_len)),
+                Some((loca_off, loca_len)),
+                Some((glyf_off, glyf_len)),
+            ) = (
+                head_loc, maxp_loc, hhea_loc, hmtx_loc, cmap_loc, loca_loc, glyf_loc,
+            )
+            else {
+                continue;
+            };
+
+            let fits_file = |off: u64, len: u64| off.checked_add(len).is_some_and(|e| e <= file_len);
+            if !fits_file(head_off, head_len)
+                || !fits_file(maxp_off, maxp_len)
+                || !fits_file(hhea_off, hhea_len)
+                || !fits_file(hmtx_off, hmtx_len)
+                || !fits_file(cmap_off, cmap_len)
+                || !fits_file(loca_off, loca_len)
+                || !fits_file(glyf_off, glyf_len)
+            {
+                continue;
+            }
+            if head_len < 54 || maxp_len < 6 || hhea_len < 36 || cmap_len < 4 {
+                continue;
+            }
+
+            let mut head_bytes = [0u8; 54];
+            if read_exact_at(&mut file, head_off, &mut head_bytes).is_err() {
+                continue;
+            }
+            let Ok(head) = tables::parse_head(&head_bytes) else {
+                continue;
+            };
+            let mut maxp_bytes = [0u8; 6];
+            if read_exact_at(&mut file, maxp_off, &mut maxp_bytes).is_err() {
+                continue;
+            }
+            let Ok(num_glyphs) = tables::parse_maxp_num_glyphs(&maxp_bytes) else {
+                continue;
+            };
+            let mut hhea_bytes = [0u8; 36];
+            if read_exact_at(&mut file, hhea_off, &mut hhea_bytes).is_err() {
+                continue;
+            }
+            let Ok(hhea) = tables::parse_hhea(&hhea_bytes) else {
+                continue;
+            };
+            if hmtx_len < (hhea.number_of_h_metrics as u64) * 4 {
+                continue;
+            }
+            let loca_entry_bytes = if head.index_to_loc_format == 1 { 4u64 } else { 2u64 };
+            if loca_len < (num_glyphs as u64 + 1) * loca_entry_bytes {
+                continue;
+            }
+            if !file_has_supported_cmap(&mut file, cmap_off, cmap_len, &mut cmap_hdr) {
+                continue;
+            }
+
+            let key = FontKey {
+                source: FontSource::Path(path.to_path_buf()),
+                index: index as u32,
+            };
+            if let Some((name_off, name_len)) = name_loc {
+                if fits_file(name_off, name_len) && name_len <= 16 << 20 {
+                    name_buf.resize(name_len as usize, 0);
+                    if read_exact_at(&mut file, name_off, &mut name_buf).is_ok() {
+                        self.register_name_table(&name_buf, &key);
+                    }
+                }
+            }
+            self.all.push(Entry { key });
+        }
+    }
+
+    fn register_name_table(&mut self, name_bytes: &[u8], key: &FontKey) {
+        if let Some(primary) = tables::parse_family_name(name_bytes) {
+            if !primary.is_empty() {
+                self.register(&primary, key.clone());
+            }
+        }
+        for (_, _, alt_family) in tables::parse_family_names(name_bytes) {
+            if !alt_family.is_empty() {
+                self.register(&alt_family, key.clone());
+            }
         }
     }
 
@@ -195,25 +372,53 @@ impl FontRegistry {
     fn index_bytes(&mut self, bytes: &[u8], key_for: impl Fn(u32) -> FontKey) {
         let count = probe_font_count(bytes);
         for index in 0..count {
-            // 個々のフォントを解析（失敗＝壊れている/未対応 'OTTO' はスキップ）。
-            let font = match Font::from_bytes(bytes.to_vec(), index) {
-                Ok(f) => f,
-                Err(_) => continue,
+            let Ok(dir) = sfnt::parse_table_directory(bytes, index) else {
+                continue;
             };
-            let key = key_for(index);
-            let primary_family = font.family_name().to_string();
-            if !primary_family.is_empty() {
-                self.register(&primary_family, key.clone());
+            let Ok(head_bytes) = dir.require(bytes, b"head") else {
+                continue;
+            };
+            let Ok(head) = tables::parse_head(head_bytes) else {
+                continue;
+            };
+            let Ok(maxp_bytes) = dir.require(bytes, b"maxp") else {
+                continue;
+            };
+            let Ok(num_glyphs) = tables::parse_maxp_num_glyphs(maxp_bytes) else {
+                continue;
+            };
+            let Ok(hhea_bytes) = dir.require(bytes, b"hhea") else {
+                continue;
+            };
+            let Ok(hhea) = tables::parse_hhea(hhea_bytes) else {
+                continue;
+            };
+            let Ok(hmtx_bytes) = dir.require(bytes, b"hmtx") else {
+                continue;
+            };
+            if hmtx_bytes.len() < (hhea.number_of_h_metrics as usize) * 4 {
+                continue;
             }
-            // name テーブルの全レコード（ローカライズ名含む）も索引へ加える。
-            if let Ok(dir) = sfnt::parse_table_directory(bytes, index) {
-                if let Ok(Some(name_bytes)) = dir.find_slice(bytes, b"name") {
-                    for (_, _, alt_family) in tables::parse_family_names(name_bytes) {
-                        if !alt_family.is_empty() {
-                            self.register(&alt_family, key.clone());
-                        }
-                    }
-                }
+            let Ok(cmap_bytes) = dir.require(bytes, b"cmap") else {
+                continue;
+            };
+            if !slice_has_supported_cmap(cmap_bytes) {
+                continue;
+            }
+            let Ok(loca_bytes) = dir.require(bytes, b"loca") else {
+                continue;
+            };
+            let loca_entry_bytes = if head.index_to_loc_format == 1 { 4 } else { 2 };
+            if loca_bytes.len() < (num_glyphs as usize + 1) * loca_entry_bytes {
+                continue;
+            }
+            if dir.require(bytes, b"glyf").is_err() {
+                continue;
+            }
+
+            let key = key_for(index);
+            if let Ok(Some(name_bytes)) = dir.find_slice(bytes, b"name") {
+                self.register_name_table(name_bytes, &key);
             }
             self.all.push(Entry { key });
         }
@@ -247,6 +452,66 @@ impl FontRegistry {
     pub fn is_empty(&self) -> bool {
         self.all.is_empty()
     }
+}
+
+fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buf)
+}
+
+fn file_has_supported_cmap(file: &mut File, cmap_off: u64, cmap_len: u64, buf: &mut Vec<u8>) -> bool {
+    let mut hdr = [0u8; 4];
+    if read_exact_at(file, cmap_off, &mut hdr).is_err() {
+        return false;
+    }
+    let num_tables = u16::from_be_bytes([hdr[2], hdr[3]]) as u64;
+    let recs_len = num_tables * 8;
+    if 4 + recs_len > cmap_len {
+        return false;
+    }
+    buf.resize(recs_len as usize, 0);
+    if file.read_exact(buf).is_err() {
+        return false;
+    }
+    for rec in buf.as_chunks::<8>().0 {
+        let sub_off = u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;
+        if sub_off + 2 > cmap_len {
+            continue;
+        }
+        let mut fmt_bytes = [0u8; 2];
+        if read_exact_at(file, cmap_off + sub_off, &mut fmt_bytes).is_err() {
+            continue;
+        }
+        let fmt = u16::from_be_bytes(fmt_bytes);
+        if fmt == 4 && sub_off + 14 <= cmap_len {
+            return true;
+        }
+        if fmt == 12 && sub_off + 16 <= cmap_len {
+            return true;
+        }
+    }
+    false
+}
+
+fn slice_has_supported_cmap(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let num_tables = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if 4 + num_tables * 8 > data.len() {
+        return false;
+    }
+    for rec in data[4..4 + num_tables * 8].as_chunks::<8>().0 {
+        let sub_off = u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]) as usize;
+        if sub_off + 2 > data.len() {
+            continue;
+        }
+        let fmt = u16::from_be_bytes([data[sub_off], data[sub_off + 1]]);
+        if (fmt == 4 && sub_off + 14 <= data.len()) || (fmt == 12 && sub_off + 16 <= data.len()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize(family: &str) -> String {

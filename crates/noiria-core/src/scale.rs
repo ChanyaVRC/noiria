@@ -3,6 +3,7 @@
 //! ここは整数演算の双一次補間（2 チャンネルずつ SWAR）を行ごとに分けて常駐ワーカースレッドで並列に回す。
 //! 1920x1080 へ 1 フレーム約 1〜2ms。画素の位置は中心合わせ（`(dx + 0.5) * sw / dw - 0.5`）。
 
+use std::cell::RefCell;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 const MAX_THREADS: usize = 16;
@@ -62,17 +63,244 @@ impl AxisCache {
     }
 }
 
-fn scale_rows(src: &[u32], sw: usize, xs: &[AxisTap], ys: &[AxisTap], y_start: usize, dst: &mut [u32]) {
-    let dw = xs.len();
-    for (r, row) in dst.chunks_exact_mut(dw).enumerate() {
-        let (y0, y1, wy) = ys[y_start + r];
-        let (r0, r1) = (&src[y0 as usize * sw..][..sw], &src[y1 as usize * sw..][..sw]);
-        for (o, &(x0, x1, wx)) in row.iter_mut().zip(xs.iter()) {
-            let top = lerp_px(r0[x0 as usize], r0[x1 as usize], wx);
-            let bot = lerp_px(r1[x0 as usize], r1[x1 as usize], wx);
-            *o = lerp_px(top, bot, wy);
+/// 1 本の入力行 `src_row` を `xs` に従って水平補間し `dst` へ書き込む。
+#[inline]
+fn horiz_row(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability was checked above.
+        unsafe { horiz_row_avx2(src_row, xs, dst) };
+        return;
+    }
+    for (o, &(x0, x1, wx)) in dst.iter_mut().zip(xs.iter()) {
+        *o = lerp_px(src_row[x0 as usize], src_row[x1 as usize], wx);
+    }
+}
+
+/// 2 本の水平補間済み行 `r0`, `r1` を重み `wy` (0..=256) で垂直補間して `dst` へ書き込む。
+#[inline]
+fn vert_row(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
+    if wy == 0 {
+        dst.copy_from_slice(r0);
+        return;
+    }
+    if wy == 256 {
+        dst.copy_from_slice(r1);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 availability was checked above.
+            unsafe { vert_row_avx2(r0, r1, wy, dst) };
+        } else {
+            // SAFETY: SSE2 is guaranteed on x86_64.
+            unsafe { vert_row_sse2(r0, r1, wy, dst) };
         }
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    vert_row_scalar(r0, r1, wy, dst);
+}
+
+#[inline]
+fn vert_row_scalar(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
+    for ((o, &a), &b) in dst.iter_mut().zip(r0.iter()).zip(r1.iter()) {
+        *o = lerp_px(a, b, wy);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn horiz_row_avx2(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
+    use std::arch::x86_64::*;
+
+    let dw = xs.len().min(dst.len());
+    let src_ptr = src_row.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let v128 = _mm256_set1_epi16(128);
+    let v256 = _mm256_set1_epi16(256);
+    let mut i = 0usize;
+    while i + 8 <= dw {
+        let t0 = *xs.get_unchecked(i);
+        let t1 = *xs.get_unchecked(i + 1);
+        let t2 = *xs.get_unchecked(i + 2);
+        let t3 = *xs.get_unchecked(i + 3);
+        let t4 = *xs.get_unchecked(i + 4);
+        let t5 = *xs.get_unchecked(i + 5);
+        let t6 = *xs.get_unchecked(i + 6);
+        let t7 = *xs.get_unchecked(i + 7);
+
+        let a_lo = _mm256_cvtepu8_epi16(_mm_setr_epi32(
+            *src_ptr.add(t0.0 as usize) as i32,
+            *src_ptr.add(t1.0 as usize) as i32,
+            *src_ptr.add(t2.0 as usize) as i32,
+            *src_ptr.add(t3.0 as usize) as i32,
+        ));
+        let b_lo = _mm256_cvtepu8_epi16(_mm_setr_epi32(
+            *src_ptr.add(t0.1 as usize) as i32,
+            *src_ptr.add(t1.1 as usize) as i32,
+            *src_ptr.add(t2.1 as usize) as i32,
+            *src_ptr.add(t3.1 as usize) as i32,
+        ));
+        let w_lo = _mm256_setr_epi64x(
+            (t0.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t1.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t2.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t3.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+        );
+        let iw_lo = _mm256_sub_epi16(v256, w_lo);
+        let res_lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+            _mm256_add_epi16(_mm256_mullo_epi16(a_lo, iw_lo), _mm256_mullo_epi16(b_lo, w_lo)),
+            v128,
+        ));
+
+        let a_hi = _mm256_cvtepu8_epi16(_mm_setr_epi32(
+            *src_ptr.add(t4.0 as usize) as i32,
+            *src_ptr.add(t5.0 as usize) as i32,
+            *src_ptr.add(t6.0 as usize) as i32,
+            *src_ptr.add(t7.0 as usize) as i32,
+        ));
+        let b_hi = _mm256_cvtepu8_epi16(_mm_setr_epi32(
+            *src_ptr.add(t4.1 as usize) as i32,
+            *src_ptr.add(t5.1 as usize) as i32,
+            *src_ptr.add(t6.1 as usize) as i32,
+            *src_ptr.add(t7.1 as usize) as i32,
+        ));
+        let w_hi = _mm256_setr_epi64x(
+            (t4.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t5.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t6.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+            (t7.2 as i64).wrapping_mul(0x0001_0001_0001_0001),
+        );
+        let iw_hi = _mm256_sub_epi16(v256, w_hi);
+        let res_hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+            _mm256_add_epi16(_mm256_mullo_epi16(a_hi, iw_hi), _mm256_mullo_epi16(b_hi, w_hi)),
+            v128,
+        ));
+
+        let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi16(res_lo, res_hi));
+        _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, packed);
+        i += 8;
+    }
+    while i < dw {
+        let (x0, x1, wx) = xs[i];
+        dst[i] = lerp_px(src_row[x0 as usize], src_row[x1 as usize], wx);
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn vert_row_avx2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len().min(r0.len()).min(r1.len());
+    let zero = _mm256_setzero_si256();
+    let v_w = _mm256_set1_epi16(wy as i16);
+    let v_iw = _mm256_set1_epi16((256 - wy) as i16);
+    let v128 = _mm256_set1_epi16(128);
+    let p0 = r0.as_ptr();
+    let p1 = r1.as_ptr();
+    let pd = dst.as_mut_ptr();
+    let mut i = 0usize;
+    while i + 8 <= len {
+        let va = _mm256_loadu_si256(p0.add(i) as *const __m256i);
+        let vb = _mm256_loadu_si256(p1.add(i) as *const __m256i);
+        let a_lo = _mm256_unpacklo_epi8(va, zero);
+        let a_hi = _mm256_unpackhi_epi8(va, zero);
+        let b_lo = _mm256_unpacklo_epi8(vb, zero);
+        let b_hi = _mm256_unpackhi_epi8(vb, zero);
+        let lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+            _mm256_add_epi16(_mm256_mullo_epi16(a_lo, v_iw), _mm256_mullo_epi16(b_lo, v_w)),
+            v128,
+        ));
+        let hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
+            _mm256_add_epi16(_mm256_mullo_epi16(a_hi, v_iw), _mm256_mullo_epi16(b_hi, v_w)),
+            v128,
+        ));
+        _mm256_storeu_si256(pd.add(i) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+        i += 8;
+    }
+    vert_row_scalar(&r0[i..len], &r1[i..len], wy, &mut dst[i..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn vert_row_sse2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len().min(r0.len()).min(r1.len());
+    let zero = _mm_setzero_si128();
+    let v_w = _mm_set1_epi16(wy as i16);
+    let v_iw = _mm_set1_epi16((256 - wy) as i16);
+    let v128 = _mm_set1_epi16(128);
+    let p0 = r0.as_ptr();
+    let p1 = r1.as_ptr();
+    let pd = dst.as_mut_ptr();
+    let mut i = 0usize;
+    while i + 4 <= len {
+        let va = _mm_loadu_si128(p0.add(i) as *const __m128i);
+        let vb = _mm_loadu_si128(p1.add(i) as *const __m128i);
+        let a_lo = _mm_unpacklo_epi8(va, zero);
+        let a_hi = _mm_unpackhi_epi8(va, zero);
+        let b_lo = _mm_unpacklo_epi8(vb, zero);
+        let b_hi = _mm_unpackhi_epi8(vb, zero);
+        let lo = _mm_srli_epi16::<8>(_mm_add_epi16(
+            _mm_add_epi16(_mm_mullo_epi16(a_lo, v_iw), _mm_mullo_epi16(b_lo, v_w)),
+            v128,
+        ));
+        let hi = _mm_srli_epi16::<8>(_mm_add_epi16(
+            _mm_add_epi16(_mm_mullo_epi16(a_hi, v_iw), _mm_mullo_epi16(b_hi, v_w)),
+            v128,
+        ));
+        _mm_storeu_si128(pd.add(i) as *mut __m128i, _mm_packus_epi16(lo, hi));
+        i += 4;
+    }
+    vert_row_scalar(&r0[i..len], &r1[i..len], wy, &mut dst[i..len]);
+}
+
+thread_local! {
+    static ROW_CACHE: RefCell<(Vec<u32>, Vec<u32>)> = const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+fn scale_rows(src: &[u32], sw: usize, xs: &[AxisTap], ys: &[AxisTap], y_start: usize, dst: &mut [u32]) {
+    let dw = xs.len();
+    ROW_CACHE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let (ref mut h0, ref mut h1) = *guard;
+        if h0.len() < dw {
+            h0.resize(dw, 0);
+            h1.resize(dw, 0);
+        }
+        let mut cached_y0 = usize::MAX;
+        let mut cached_y1 = usize::MAX;
+
+        for (r, row) in dst.chunks_exact_mut(dw).enumerate() {
+            let (y0, y1, wy) = ys[y_start + r];
+            let y0 = y0 as usize;
+            let y1 = y1 as usize;
+
+            if y0 != cached_y0 {
+                if y0 == cached_y1 {
+                    std::mem::swap(h0, h1);
+                    std::mem::swap(&mut cached_y0, &mut cached_y1);
+                } else {
+                    horiz_row(&src[y0 * sw..][..sw], xs, &mut h0[..dw]);
+                    cached_y0 = y0;
+                }
+            }
+
+            if wy == 0 || y0 == y1 {
+                row.copy_from_slice(&h0[..dw]);
+            } else {
+                if y1 != cached_y1 {
+                    horiz_row(&src[y1 * sw..][..sw], xs, &mut h1[..dw]);
+                    cached_y1 = y1;
+                }
+                vert_row(&h0[..dw], &h1[..dw], wy, row);
+            }
+        }
+    });
 }
 
 #[derive(Clone, Copy)]

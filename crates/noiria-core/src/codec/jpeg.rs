@@ -99,8 +99,13 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// ハフマン表: (符号長ごとの個数, 値) から高速テーブルなしの逐次デコード。
+const FAST_BITS: u32 = 9;
+const FAST_SIZE: usize = 1 << FAST_BITS;
+
+/// ハフマン表: 9bit 直接参照テーブル + 10..=16bit 用 mincode/maxcode フォールバック。
 struct Huffman {
+    /// 上位 8bit = 符号長 (0 なら 10bit 以上/未登録)、下位 8bit = 値
+    fast: [u16; FAST_SIZE],
     /// mincode/maxcode/valptr 方式 (ITU-T T.81 F.2.2.3)
     mincode: [i32; 17],
     maxcode: [i32; 17],
@@ -110,6 +115,7 @@ struct Huffman {
 
 impl Huffman {
     fn new(counts: &[u8; 16], values: Vec<u8>) -> Self {
+        let mut fast = [0u16; FAST_SIZE];
         let mut mincode = [0i32; 17];
         let mut maxcode = [-1i32; 17];
         let mut valptr = [0i32; 17];
@@ -118,12 +124,25 @@ impl Huffman {
         for len in 1..=16usize {
             valptr[len] = k;
             mincode[len] = code;
-            code += counts[len - 1] as i32;
-            k += counts[len - 1] as i32;
+            let cnt = counts[len - 1] as usize;
+            if len <= FAST_BITS as usize {
+                let shift = FAST_BITS as usize - len;
+                for j in 0..cnt {
+                    if let Some(&val) = values.get(k as usize + j) {
+                        let base = ((code as usize) + j) << shift;
+                        let fill = 1usize << shift;
+                        let entry = ((len as u16) << 8) | (val as u16);
+                        fast[base..base + fill].fill(entry);
+                    }
+                }
+            }
+            code += cnt as i32;
+            k += cnt as i32;
             maxcode[len] = code - 1;
             code <<= 1;
         }
         Self {
+            fast,
             mincode,
             maxcode,
             valptr,
@@ -131,10 +150,22 @@ impl Huffman {
         }
     }
 
+    #[inline(always)]
     fn decode(&self, br: &mut BitReader) -> Result<u8> {
-        let peek = br.peek16()? as i32;
+        let peek = br.peek16()?;
+        let entry = self.fast[(peek >> (16 - FAST_BITS)) as usize];
+        let fast_len = (entry >> 8) as u32;
+        if fast_len != 0 {
+            br.consume(fast_len);
+            return Ok(entry as u8);
+        }
+        self.decode_slow(br, peek as i32)
+    }
+
+    #[cold]
+    fn decode_slow(&self, br: &mut BitReader, peek: i32) -> Result<u8> {
         let mut code = 0i32;
-        for len in 1..=16usize {
+        for len in (FAST_BITS as usize + 1)..=16usize {
             code = peek >> (16 - len);
             if self.maxcode[len] >= 0 && code <= self.maxcode[len] && code >= self.mincode[len] {
                 br.consume(len as u32);
@@ -164,50 +195,77 @@ const ZIGZAG: [usize; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// IDCT 用テーブル: T[x][u] = c(u) * cos((2x+1)uπ/16) * 0.5
-fn idct_table() -> &'static [[f32; 8]; 8] {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<[[f32; 8]; 8]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = [[0f32; 8]; 8];
-        for (x, row) in t.iter_mut().enumerate() {
-            for (u, v) in row.iter_mut().enumerate() {
-                let c = if u == 0 {
-                    std::f32::consts::FRAC_1_SQRT_2
-                } else {
-                    1.0
-                };
-                *v = c
-                    * (((2 * x + 1) as f32) * (u as f32) * std::f32::consts::PI / 16.0).cos()
-                    * 0.5;
-            }
-        }
-        t
-    })
+// 0.5 * cos(k * π / 16)
+const IDCT_C1: f32 = 0.490_392_64;
+const IDCT_C2: f32 = 0.461_939_77;
+const IDCT_C3: f32 = 0.415_734_8;
+const IDCT_C4: f32 = 0.353_553_4; // 0.5 / sqrt(2)
+const IDCT_C5: f32 = 0.277_785_12;
+const IDCT_C6: f32 = 0.191_341_72;
+const IDCT_C7: f32 = 0.097_545_16;
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn idct_1d(x0: f32, x1: f32, x2: f32, x3: f32, x4: f32, x5: f32, x6: f32, x7: f32) -> [f32; 8] {
+    if x1 == 0.0 && x2 == 0.0 && x3 == 0.0 && x4 == 0.0 && x5 == 0.0 && x6 == 0.0 && x7 == 0.0 {
+        return [x0 * IDCT_C4; 8];
+    }
+    let t0 = (x0 + x4) * IDCT_C4;
+    let t1 = (x0 - x4) * IDCT_C4;
+    let t2 = x2 * IDCT_C2 + x6 * IDCT_C6;
+    let t3 = x2 * IDCT_C6 - x6 * IDCT_C2;
+    let e0 = t0 + t2;
+    let e1 = t1 + t3;
+    let e2 = t1 - t3;
+    let e3 = t0 - t2;
+
+    let o0 = x1 * IDCT_C1 + x3 * IDCT_C3 + x5 * IDCT_C5 + x7 * IDCT_C7;
+    let o1 = x1 * IDCT_C3 - x3 * IDCT_C7 - x5 * IDCT_C1 - x7 * IDCT_C5;
+    let o2 = x1 * IDCT_C5 - x3 * IDCT_C1 + x5 * IDCT_C7 + x7 * IDCT_C3;
+    let o3 = x1 * IDCT_C7 - x3 * IDCT_C5 + x5 * IDCT_C3 - x7 * IDCT_C1;
+
+    [
+        e0 + o0,
+        e1 + o1,
+        e2 + o2,
+        e3 + o3,
+        e3 - o3,
+        e2 - o2,
+        e1 - o1,
+        e0 - o0,
+    ]
 }
 
-/// 8x8 逆 DCT（分離型・テーブル参照）。
+/// 8x8 逆 DCT（偶奇対称バタフライ分解 + 全 AC ゼロ短絡）。
 fn idct8x8(block: &[f32; 64], out: &mut [f32; 64]) {
-    let t = idct_table();
     let mut tmp = [0f32; 64];
-    // 行方向
     for y in 0..8 {
-        for x in 0..8 {
-            let mut s = 0f32;
-            for u in 0..8 {
-                s += t[x][u] * block[y * 8 + u];
-            }
-            tmp[y * 8 + x] = s;
-        }
+        let b = y * 8;
+        let r = idct_1d(
+            block[b],
+            block[b + 1],
+            block[b + 2],
+            block[b + 3],
+            block[b + 4],
+            block[b + 5],
+            block[b + 6],
+            block[b + 7],
+        );
+        tmp[b..b + 8].copy_from_slice(&r);
     }
-    // 列方向
     for x in 0..8 {
+        let c = idct_1d(
+            tmp[x],
+            tmp[8 + x],
+            tmp[16 + x],
+            tmp[24 + x],
+            tmp[32 + x],
+            tmp[40 + x],
+            tmp[48 + x],
+            tmp[56 + x],
+        );
         for y in 0..8 {
-            let mut s = 0f32;
-            for v in 0..8 {
-                s += t[y][v] * tmp[v * 8 + x];
-            }
-            out[y * 8 + x] = s;
+            out[y * 8 + x] = c[y];
         }
     }
 }
@@ -491,36 +549,88 @@ fn decode_scan(
 
     // YCbCr → RGBA（クロマは最近傍アップサンプル）
     rgba.clear();
-    rgba.reserve(width * height * 4);
+    rgba.resize(width * height * 4, 255);
+    let dst_pixels = rgba.as_chunks_mut::<4>().0;
     if comps.len() == 1 {
         let plane_w = mcus_x * comps[0].h * 8;
+        let plane = &planes[0];
         for y in 0..height {
-            for x in 0..width {
-                let g = planes[0][y * plane_w + x];
-                rgba.extend_from_slice(&[g, g, g, 255]);
+            let src_row = &plane[y * plane_w..y * plane_w + width];
+            let dst_row = &mut dst_pixels[y * width..(y + 1) * width];
+            for (dst, &g) in dst_row.iter_mut().zip(src_row) {
+                *dst = [g, g, g, 255];
             }
         }
     } else {
         let yw = mcus_x * comps[0].h * 8;
         let cbw = mcus_x * comps[1].h * 8;
         let crw = mcus_x * comps[2].h * 8;
-        for py in 0..height {
-            for px in 0..width {
-                // 輝度も含めて各成分を自身のサンプリング比で引く（輝度がクロマより粗い JPEG でも
-                // 範囲内。輝度が最大サンプリングの通常の JPEG では px / py と同じ位置になる）。
+        let p_y = &planes[0];
+        let p_cb = &planes[1];
+        let p_cr = &planes[2];
+        #[inline(always)]
+        fn ycbcr_to_rgba(y: u8, cb: u8, cr: u8) -> [u8; 4] {
+            let yy = y as f32;
+            let cb = cb as f32 - 128.0;
+            let cr = cr as f32 - 128.0;
+            [
+                (yy + 1.402 * cr).clamp(0.0, 255.0) as u8,
+                (yy - 0.344136 * cb - 0.714136 * cr).clamp(0.0, 255.0) as u8,
+                (yy + 1.772 * cb).clamp(0.0, 255.0) as u8,
+                255,
+            ]
+        }
+        let is_444 = comps[0].h == hmax
+            && comps[0].v == vmax
+            && comps[1].h == hmax
+            && comps[1].v == vmax
+            && comps[2].h == hmax
+            && comps[2].v == vmax;
+        let is_420 = hmax == 2
+            && vmax == 2
+            && comps[0].h == 2
+            && comps[0].v == 2
+            && comps[1].h == 1
+            && comps[1].v == 1
+            && comps[2].h == 1
+            && comps[2].v == 1;
+        if is_444 {
+            for py in 0..height {
+                let y_row = &p_y[py * yw..py * yw + width];
+                let cb_row = &p_cb[py * cbw..py * cbw + width];
+                let cr_row = &p_cr[py * crw..py * crw + width];
+                let dst_row = &mut dst_pixels[py * width..(py + 1) * width];
+                for px in 0..width {
+                    dst_row[px] = ycbcr_to_rgba(y_row[px], cb_row[px], cr_row[px]);
+                }
+            }
+        } else if is_420 {
+            for py in 0..height {
+                let y_row = &p_y[py * yw..py * yw + width];
+                let cy = py >> 1;
+                let cb_row = &p_cb[cy * cbw..];
+                let cr_row = &p_cr[cy * crw..];
+                let dst_row = &mut dst_pixels[py * width..(py + 1) * width];
+                for px in 0..width {
+                    let cx = px >> 1;
+                    dst_row[px] = ycbcr_to_rgba(y_row[px], cb_row[cx], cr_row[cx]);
+                }
+            }
+        } else {
+            for py in 0..height {
                 let ly = py * comps[0].v / vmax;
-                let lx = px * comps[0].h / hmax;
-                let yy = planes[0][ly * yw + lx] as f32;
                 let cy = py * comps[1].v / vmax;
-                let cx = px * comps[1].h / hmax;
-                let cb = planes[1][cy * cbw + cx] as f32 - 128.0;
                 let cy2 = py * comps[2].v / vmax;
-                let cx2 = px * comps[2].h / hmax;
-                let cr = planes[2][cy2 * crw + cx2] as f32 - 128.0;
-                let r = (yy + 1.402 * cr).clamp(0.0, 255.0) as u8;
-                let g = (yy - 0.344136 * cb - 0.714136 * cr).clamp(0.0, 255.0) as u8;
-                let b = (yy + 1.772 * cb).clamp(0.0, 255.0) as u8;
-                rgba.extend_from_slice(&[r, g, b, 255]);
+                let y_row = &p_y[ly * yw..];
+                let cb_row = &p_cb[cy * cbw..];
+                let cr_row = &p_cr[cy2 * crw..];
+                let dst_row = &mut dst_pixels[py * width..(py + 1) * width];
+                for (px, dst) in dst_row.iter_mut().enumerate() {
+                    let lx = px * comps[0].h / hmax;
+                    let cx = px * comps[1].h / hmax;
+                    let cx2 = px * comps[2].h / hmax;
+                    *dst = ycbcr_to_rgba(y_row[lx], cb_row[cx], cr_row[cx2]);
+                }
             }
         }
     }

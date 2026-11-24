@@ -54,20 +54,19 @@ fn lookup1_values(entries: u32, dims: u32) -> u32 {
     r as u32
 }
 
-/// カノニカルハフマン復号表。
+const FAST_BITS: u32 = 10;
+const FAST_SIZE: usize = 1 << FAST_BITS;
+
+/// カノニカルハフマン復号表（10bit 高速ルックアップテーブル + 2 分木フォールバック）。
 ///
-/// 重要: Vorbis のコードワード割当ては DEFLATE (inflate.rs) の「長さ全体の総数を事前予約する」
-/// 方式とは**異なる**。仕様書 3.2.1 曰く「each used codebook entry is assigned, in order, the
-/// lowest valued unused binary Huffman codeword possible」——つまり entry 番号の昇順に、その時点
-/// までに割り当て済みのコードワードだけを考慮して貪欲に最小値を割り当てる、順序依存のアルゴリズム。
-/// (仕様書の例: 長さ [2,4,4,4,4,2,3,3] で entry1(長さ4) の符号語は "0100" になる。このため
-/// 同じ長さのコードワードが数値的に連続するとは限らず (この例では長さ2は 0 と 2 で 1 は
-/// 長さ4系列のプレフィックスとして使われる)、DEFLATE 式の「range 比較」復号は使えない。
-/// 代わりに (長さ,コード値) -> entry のテーブルで厳密一致するビット逐次木探索を行う。
+/// Vorbis のコードワード割当ては entry 番号昇順に貪欲割当てを行うため、
+/// 構築時に 2 分木と 10bit 反転テーブルを展開して O(1) 復号できるようにする。
 struct Huffman {
-    /// (符号長, コード値) -> entry 番号。
-    table: std::collections::HashMap<(u8, u64), u32>,
-    max_len: u8,
+    /// 先読み `FAST_BITS` ビット（LSB ファースト）に対する `(entry, len)`。
+    /// `len == 0` は `FAST_BITS` 超（`nodes` を辿る）。
+    fast: Vec<(u32, u8)>,
+    /// 2 分木ノード。正の値は子ノード添字、負の値 `-(entry as i32) - 1` は葉、0 は無効。
+    nodes: Vec<[i32; 2]>,
     /// 仕様書 Errata 20150226: used entry がちょうど1個の特殊ケース。
     single_entry: Option<u32>,
 }
@@ -84,27 +83,16 @@ impl Huffman {
                 "単一エントリコードブックの符号長は 1 でなければなりません"
             );
             return Ok(Self {
-                table: std::collections::HashMap::new(),
-                max_len: 1,
+                fast: Vec::new(),
+                nodes: Vec::new(),
                 single_entry: Some(e),
             });
         }
 
-        // 貪欲割当てアルゴリズム (仕様書 3.2.1): entry 番号の昇順に、その時点で使用可能な
-        // 最小のコードワードを割り当てる。
-        //
-        // 単純な「1本のカウンタを深さ方向にシフトして使い回す」実装 (DEFLATE 風、あるいは
-        // 直前に処理した長さからの単純な繰り上げ/繰り下げ) では正しく動かない: ある entry が
-        // 深く潜った後、次の entry が浅い長さを要求すると、その深い潜り込みの「兄弟」に
-        // まだ空きがあっても、その空きは (浅い要求のせいで) 一旦通り過ぎて捨てられてしまう。
-        // しかし *その後さらに別の entry が深い長さを要求した* とき、その捨てられていない
-        // 空き (兄弟ノード) がまだ使えることがあり、単一カウンタでは表現できない。
-        // そこで「未使用のまま残っている部分木」の一覧を左から右の順で保持し、要求された
-        // 深さに届くまで逐次分割していく、明示的な木構築で実装する。
         let mut open: std::collections::VecDeque<(u8, u64)> = std::collections::VecDeque::new();
         open.push_back((0u8, 0u64));
-        let mut table = std::collections::HashMap::with_capacity(used.len());
-        let mut max_len = 0u8;
+        let mut fast = vec![(0u32, 0u8); FAST_SIZE];
+        let mut nodes: Vec<[i32; 2]> = vec![[0, 0]];
         for &e in &used {
             let l = lengths[e as usize];
             ensure!(l as usize <= 32 && l > 0, "コードブックの符号長が不正です");
@@ -114,14 +102,43 @@ impl Huffman {
                 .ok_or_else(|| anyhow::anyhow!("コードブックのハフマン符号割当が過剰です"))?;
             let (mut d, mut p) = open.remove(pos).unwrap();
             while d < l {
-                // (d,p) を左右の子に分割する。右の子はその場 (pos) に挿入し、左の子は
-                // このままループを継続してさらに分割する (深さ優先で左優先)。
                 open.insert(pos, (d + 1, 2 * p + 1));
                 d += 1;
                 p *= 2;
             }
-            table.insert((l, p), e);
-            max_len = max_len.max(l);
+            if (l as u32) <= FAST_BITS {
+                // MSB ファーストの符号語 p（長さ l）を LSB ファーストの先読み添字へ反転展開。
+                let mut rev = 0usize;
+                for i in 0..l {
+                    if (p >> (l - 1 - i)) & 1 != 0 {
+                        rev |= 1 << i;
+                    }
+                }
+                let step = 1usize << l;
+                let mut idx = rev;
+                while idx < FAST_SIZE {
+                    fast[idx] = (e, l);
+                    idx += step;
+                }
+            } else {
+                let mut cur = 0usize;
+                for i in 0..l {
+                    let bit = ((p >> (l - 1 - i)) & 1) as usize;
+                    if i + 1 == l {
+                        nodes[cur][bit] = -(e as i32) - 1;
+                    } else {
+                        let next = nodes[cur][bit];
+                        if next == 0 {
+                            let new_idx = nodes.len();
+                            nodes.push([0, 0]);
+                            nodes[cur][bit] = new_idx as i32;
+                            cur = new_idx;
+                        } else {
+                            cur = next as usize;
+                        }
+                    }
+                }
+            }
         }
         // 完成木チェック: 未使用のまま残っている部分木があれば underspecified。
         ensure!(
@@ -130,28 +147,45 @@ impl Huffman {
         );
 
         Ok(Self {
-            table,
-            max_len,
+            fast,
+            nodes,
             single_entry: None,
         })
     }
 
+    #[inline]
     fn decode(&self, br: &mut BitReader) -> Result<u32> {
         if let Some(e) = self.single_entry {
             br.read(1); // 値は 0/1 どちらでも許容 (Errata 20150226)
             return Ok(e);
         }
-        let mut code: u64 = 0;
-        for len in 1..=self.max_len {
-            code = (code << 1) | br.read(1) as u64;
-            if let Some(&e) = self.table.get(&(len, code)) {
-                return Ok(e);
+        let peek = br.peek(FAST_BITS) as usize;
+        let (entry, len) = self.fast[peek];
+        if len != 0 {
+            br.consume(len as u32);
+            if br.eof {
+                bail!("パケット終端でコードブック復号が続行できません");
+            }
+            return Ok(entry);
+        }
+        let mut cur = 0usize;
+        loop {
+            let bit = br.read(1) as usize;
+            let next = self.nodes[cur][bit];
+            if next < 0 {
+                if br.eof {
+                    bail!("パケット終端でコードブック復号が続行できません");
+                }
+                return Ok((-next - 1) as u32);
             }
             if br.eof {
                 bail!("パケット終端でコードブック復号が続行できません");
             }
+            if next == 0 {
+                bail!("不正なハフマン符号 (コードブック)");
+            }
+            cur = next as usize;
         }
-        bail!("不正なハフマン符号 (コードブック)");
     }
 }
 

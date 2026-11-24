@@ -41,7 +41,7 @@
 //!   ヒンティングなしの AA レンダラである cosmic-text (swash) を本エンジンが
 //!   F3 で自作スタックへ置き換えるまで実際に使ってきた実績で確認済み。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use super::{Contour, Outline, Point, Segment};
 
@@ -205,8 +205,14 @@ fn contour_points_bbox(outline: &Outline, scale: f32) -> Option<(f32, f32, f32, 
 }
 
 /// 1 つの閉路を行スペースの折れ線 (polyline) へ変換する。
-fn contour_to_polyline(contour: &Contour, scale: f32, left: i32, top: i32) -> Vec<(f32, f32)> {
-    let mut poly: Vec<(f32, f32)> = Vec::new();
+fn contour_to_polyline(
+    contour: &Contour,
+    scale: f32,
+    left: i32,
+    top: i32,
+    poly: &mut Vec<(f32, f32)>,
+) {
+    poly.clear();
     for seg in &contour.segments {
         match *seg {
             Segment::Line(p0, p1) => {
@@ -222,11 +228,10 @@ fn contour_to_polyline(contour: &Contour, scale: f32, left: i32, top: i32) -> Ve
                 if poly.is_empty() {
                     poly.push(rp0);
                 }
-                flatten_quad(rp0, rctrl, rp1, &mut poly, 0);
+                flatten_quad(rp0, rctrl, rp1, poly, 0);
             }
         }
     }
-    poly
 }
 
 /// 区間 [xa, xb) （行スペース、ピクセル単位）の被覆を `weight` 倍して `row` に積算する。
@@ -289,9 +294,10 @@ pub fn rasterize(outline: &Outline, scale: f32) -> GlyphMask {
     }
 
     // 1) 全閉路を行スペースの折れ線へ変換し、有向エッジ列を組み立てる。
-    let mut edges: Vec<Edge> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::with_capacity(outline.contours.len() * 16);
+    let mut poly: Vec<(f32, f32)> = Vec::with_capacity(64);
     for contour in &outline.contours {
-        let poly = contour_to_polyline(contour, scale, left, top);
+        contour_to_polyline(contour, scale, left, top, &mut poly);
         if poly.len() < 2 {
             continue;
         }
@@ -309,18 +315,34 @@ pub fn rasterize(outline: &Outline, scale: f32) -> GlyphMask {
         }
     }
 
-    // 2) サブスキャンラインごとに nonzero winding で区間を求め、X 方向は解析的に積算。
+    // 2) y_top 順に並べ、各ピクセル行と重なるエッジだけをアクティブ集合に保って走査する。
+    edges.sort_by(|a, b| a.y_top.total_cmp(&b.y_top));
     let w = width as usize;
     let h = height as usize;
     let mut acc = vec![0f32; w * h];
     let weight = 1.0 / SUBSAMPLES_Y as f32;
-    let mut crossings: Vec<(f32, f32)> = Vec::new();
+    let mut active: Vec<&Edge> = Vec::with_capacity(32);
+    let mut next_edge = 0usize;
+    let mut crossings: Vec<(f32, f32)> = Vec::with_capacity(16);
     for row_i in 0..h {
+        let row_y0 = row_i as f32;
+        let row_y1 = (row_i + 1) as f32;
+        active.retain(|e| e.y_bot > row_y0);
+        while next_edge < edges.len() && edges[next_edge].y_top < row_y1 {
+            let e = &edges[next_edge];
+            if e.y_bot > row_y0 {
+                active.push(e);
+            }
+            next_edge += 1;
+        }
+        if active.len() < 2 {
+            continue;
+        }
         let row = &mut acc[row_i * w..(row_i + 1) * w];
         for k in 0..SUBSAMPLES_Y {
-            let y = row_i as f32 + (k as f32 + 0.5) / SUBSAMPLES_Y as f32;
+            let y = row_y0 + (k as f32 + 0.5) / SUBSAMPLES_Y as f32;
             crossings.clear();
-            for e in &edges {
+            for e in &active {
                 if y >= e.y_top && y < e.y_bot {
                     let t = (y - e.y_top) / (e.y_bot - e.y_top);
                     let x = e.x_top + (e.x_bot - e.x_top) * t;
@@ -330,7 +352,20 @@ pub fn rasterize(outline: &Outline, scale: f32) -> GlyphMask {
             if crossings.len() < 2 {
                 continue;
             }
-            crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            if crossings.len() <= 16 {
+                for i in 1..crossings.len() {
+                    let cur = crossings[i];
+                    let mut j = i;
+                    while j > 0 && crossings[j - 1].0 > cur.0 {
+                        crossings[j] = crossings[j - 1];
+                        j -= 1;
+                    }
+                    crossings[j] = cur;
+                }
+            } else {
+                crossings
+                    .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            }
             let mut sum = 0f32;
             let mut prev_x = crossings[0].0;
             for &(x, wind) in &crossings {
@@ -366,8 +401,8 @@ pub fn size_q6(px_per_em: f32) -> u32 {
 /// で共有する場合は呼び出し側でフォントごとにインスタンスを分けること）。
 pub struct GlyphCache {
     capacity: usize,
-    map: HashMap<(u16, u32), GlyphMask>,
-    order: VecDeque<(u16, u32)>,
+    map: HashMap<(u16, u32), (GlyphMask, u64)>,
+    tick: u64,
 }
 
 impl GlyphCache {
@@ -375,7 +410,7 @@ impl GlyphCache {
         Self {
             capacity: capacity.max(1),
             map: HashMap::new(),
-            order: VecDeque::new(),
+            tick: 0,
         }
     }
 
@@ -388,7 +423,7 @@ impl GlyphCache {
     }
 
     pub fn get(&self, glyph: u16, size_q6: u32) -> Option<&GlyphMask> {
-        self.map.get(&(glyph, size_q6))
+        self.map.get(&(glyph, size_q6)).map(|(m, _)| m)
     }
 
     /// キャッシュ済みならそれを返し、無ければ `make` でラスタライズして格納する。
@@ -399,21 +434,19 @@ impl GlyphCache {
         make: impl FnOnce() -> GlyphMask,
     ) -> &GlyphMask {
         let key = (glyph, size_q6);
-        if self.map.contains_key(&key) {
-            // 最近使用としてキューの末尾へ移動（単純な LRU 近似。容量は数百件想定
-            // なので O(n) の retain でも実用上問題ない）。
-            self.order.retain(|&k| k != key);
-            self.order.push_back(key);
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        if let Some((_, t)) = self.map.get_mut(&key) {
+            *t = tick;
         } else {
             if self.map.len() >= self.capacity {
-                if let Some(evict) = self.order.pop_front() {
+                if let Some((&evict, _)) = self.map.iter().min_by_key(|(_, (_, t))| *t) {
                     self.map.remove(&evict);
                 }
             }
-            self.map.insert(key, make());
-            self.order.push_back(key);
+            self.map.insert(key, (make(), tick));
         }
-        self.map.get(&key).expect("直前に挿入済み")
+        &self.map.get(&key).expect("直前に挿入済み").0
     }
 }
 

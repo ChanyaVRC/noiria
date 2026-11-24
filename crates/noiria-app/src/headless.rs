@@ -29,8 +29,6 @@ const TICK: Duration = Duration::from_millis(16);
 /// させず、警告ログを出して進行する（`docs/implementation-notes.md`
 /// 「2026-07-13 headless ロックステップ完全決定論化」参照）。
 const ACK_TIMEOUT: Duration = Duration::from_secs(3);
-/// ack 待ちのポーリング間隔（実時間、CPU 消費とレイテンシのバランス）。
-const ACK_POLL: Duration = Duration::from_micros(200);
 
 pub struct HeadlessParams {
     pub scene: SharedScene,
@@ -77,16 +75,11 @@ pub struct HeadlessParams {
 /// スクリプト側の入力ポンプとは別の非同期フローなので、通常この待ちは
 /// 数ミリ秒以内に解消する。
 fn wait_for_ack(sync: &InputSync, gen_before: u64) {
-    let deadline = Instant::now() + ACK_TIMEOUT;
-    while sync.generation() <= gen_before {
-        if Instant::now() >= deadline {
-            log::warn!(
-                "入力イベントの ACK がタイムアウトしました（スクリプト側が入力待ちへ\
-                 戻っていません）。仮想クロックを進めて続行します"
-            );
-            return;
-        }
-        std::thread::sleep(ACK_POLL);
+    if !sync.wait_after(gen_before, ACK_TIMEOUT) {
+        log::warn!(
+            "入力イベントの ACK がタイムアウトしました（スクリプト側が入力待ちへ\
+             戻っていません）。仮想クロックを進めて続行します"
+        );
     }
 }
 
@@ -96,19 +89,14 @@ fn wait_for_ack(sync: &InputSync, gen_before: u64) {
 /// アイドルへ戻る（＝ `target_gen` 以上を `mark_complete` する）まで実時間で
 /// ブロックする。
 ///
-/// デッドロック安全性: `wait_for_ack` と同じ `ACK_TIMEOUT`/`ACK_POLL` を使い、
+/// デッドロック安全性: `wait_for_ack` と同じ `ACK_TIMEOUT` を使い、
 /// 超過してもハングさせず警告ログを出して進行する。
 fn wait_for_tick_drain(sync: &TickSync, target_gen: u64) {
-    let deadline = Instant::now() + ACK_TIMEOUT;
-    while sync.completed_generation() < target_gen {
-        if Instant::now() >= deadline {
-            log::warn!(
-                "tick ドレインバリアがタイムアウトしました（スクリプト側が仮想 tick {target_gen} \
-                 までの処理を完了していません）。続行します"
-            );
-            return;
-        }
-        std::thread::sleep(ACK_POLL);
+    if !sync.wait_complete(target_gen, ACK_TIMEOUT) {
+        log::warn!(
+            "tick ドレインバリアがタイムアウトしました（スクリプト側が仮想 tick {target_gen} \
+             までの処理を完了していません）。続行します"
+        );
     }
 }
 
@@ -206,7 +194,8 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
                  clock: &Clock,
                  start: Instant,
                  tx: &UnboundedSender<InputEvent>,
-                 sync: &InputSync| {
+                 sync: &InputSync,
+                 tick_sync: &TickSync| {
         let gen_before = sync.generation();
         let _ = tx.send(InputEvent {
             kind: "click",
@@ -217,13 +206,15 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             delta: None,
             t: now_ms(clock, start),
         });
+        tick_sync.notify_script();
         wait_for_ack(sync, gen_before);
     };
     let key = |k: &str,
                clock: &Clock,
                start: Instant,
                tx: &UnboundedSender<InputEvent>,
-               sync: &InputSync| {
+               sync: &InputSync,
+               tick_sync: &TickSync| {
         let gen_before = sync.generation();
         let _ = tx.send(InputEvent {
             kind: "key",
@@ -234,6 +225,7 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             delta: None,
             t: now_ms(clock, start),
         });
+        tick_sync.notify_script();
         wait_for_ack(sync, gen_before);
     };
 
@@ -277,6 +269,7 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             {
                 scene.swap_after_transition();
                 p.trans_notify.notify_waiters();
+                p.tick_sync.notify_script();
             }
             scene.settle_finished_tweens(now);
             compose_frame(&scene, now, &mut bufs, &mut frame);
@@ -312,22 +305,22 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             let elapsed = now.duration_since(p.start).as_secs();
             if !sent_auto && elapsed >= 6 {
                 sent_auto = true;
-                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else if sent_auto && !sent_auto_off && elapsed >= 8 {
                 sent_auto_off = true;
-                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else if !sent_save && elapsed >= 9 {
                 sent_save = true;
-                key("F5", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("F5", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else if !sent_load && elapsed >= 14 {
                 sent_load = true;
-                key("F9", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("F9", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else if !sent_menu_open && elapsed >= 18 {
                 sent_menu_open = true;
-                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else if sent_menu_open && !sent_menu_close && elapsed >= 21 {
                 sent_menu_close = true;
-                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync);
+                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
             } else {
                 // move → (次tick) click の交互。ホバーハイライトも検証する
                 let (x, y) = choreography_click(click_step / 2);
@@ -342,10 +335,11 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
                         delta: None,
                         t: now_ms(&p.clock, p.start),
                     });
+                    p.tick_sync.notify_script();
                     wait_for_ack(&p.input_sync, gen_before);
                     hover_shot_at = Some(now + Duration::from_millis(300));
                 } else {
-                    click(x, y, &p.clock, p.start, &p.input_tx, &p.input_sync);
+                    click(x, y, &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
                 }
                 click_step += 1;
             }
@@ -384,6 +378,7 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
     let send = |ev: InputEvent| {
         let gen_before = p.input_sync.generation();
         let _ = p.input_tx.send(ev);
+        p.tick_sync.notify_script();
         wait_for_ack(&p.input_sync, gen_before);
     };
     let now_ms = || p.clock.now().duration_since(p.start).as_secs_f64() * 1000.0;
@@ -427,6 +422,7 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
             if scene.transition.as_ref().is_some_and(|t| t.is_finished(now)) {
                 scene.swap_after_transition();
                 p.trans_notify.notify_waiters();
+                p.tick_sync.notify_script();
             }
             scene.settle_finished_tweens(now);
         }

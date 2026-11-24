@@ -122,6 +122,9 @@ impl PcmSource for BufferSource {
     }
 }
 
+/// `Resampler` が下流 `PcmSource` からまとめて先読みするフレーム数。
+const RESAMPLE_IN_CHUNK_FRAMES: usize = 256;
+
 /// 線形補間による任意レート → `out_rate` のリサンプラ。`PcmSource` を包んで
 /// 同じ口 (`PcmSource`) で出力できる（チェーン可能）。
 ///
@@ -131,6 +134,9 @@ pub struct Resampler<S> {
     channels: usize,
     out_rate: u32,
     ratio: f64, // in_rate / out_rate
+    in_buf: Vec<f32>,
+    in_pos: usize,
+    in_len: usize,
     frame0: Vec<f32>,
     frame1: Vec<f32>,
     have_frames: bool,
@@ -150,6 +156,9 @@ impl<S: PcmSource> Resampler<S> {
             channels,
             out_rate: out_rate.max(1),
             ratio: in_rate as f64 / out_rate.max(1) as f64,
+            in_buf: vec![0.0; RESAMPLE_IN_CHUNK_FRAMES * channels],
+            in_pos: 0,
+            in_len: 0,
             frame0: vec![0.0; channels],
             frame1: vec![0.0; channels],
             have_frames: false,
@@ -160,22 +169,52 @@ impl<S: PcmSource> Resampler<S> {
         }
     }
 
+    #[inline]
+    fn read_input_frame(&mut self, dst: &mut [f32]) -> bool {
+        let ch = self.channels;
+        if self.in_len - self.in_pos < ch {
+            let rem = self.in_len - self.in_pos;
+            if rem > 0 {
+                self.in_buf.copy_within(self.in_pos..self.in_len, 0);
+            }
+            self.in_pos = 0;
+            self.in_len = rem;
+            while self.in_len < ch {
+                let got = self.inner.read(&mut self.in_buf[self.in_len..]);
+                if got == 0 {
+                    return false;
+                }
+                self.in_len += got;
+            }
+        }
+        dst.copy_from_slice(&self.in_buf[self.in_pos..self.in_pos + ch]);
+        self.in_pos += ch;
+        true
+    }
+
     fn ensure_frames(&mut self) -> bool {
         if self.have_frames {
             return true;
         }
-        if self.inner.read(&mut self.frame0) < self.channels {
+        let mut f0 = std::mem::take(&mut self.frame0);
+        let ok0 = self.read_input_frame(&mut f0);
+        self.frame0 = f0;
+        if !ok0 {
             return false;
         }
-        if self.inner.read(&mut self.frame1) < self.channels {
+        let mut f1 = std::mem::take(&mut self.frame1);
+        let ok1 = self.read_input_frame(&mut f1);
+        self.frame1 = f1;
+        if !ok1 {
             self.frame1.copy_from_slice(&self.frame0);
         }
         self.have_frames = true;
         true
     }
 
-    /// 次の出力 1 フレームを `out_frame` に作る。作れたら `true`。
-    fn produce_next_output_frame(&mut self) -> bool {
+    /// 次の出力 1 フレームを `dst` (長さ `channels`) に書く。作れたら `true`。
+    #[inline]
+    fn produce_next_frame_into(&mut self, dst: &mut [f32]) -> bool {
         if self.ended {
             return false;
         }
@@ -184,27 +223,40 @@ impl<S: PcmSource> Resampler<S> {
             return false;
         }
         let t = self.t as f32;
-        for ((o, a), b) in self
-            .out_frame
-            .iter_mut()
-            .zip(&self.frame0)
-            .zip(&self.frame1)
-        {
+        for ((o, &a), &b) in dst.iter_mut().zip(&self.frame0).zip(&self.frame1) {
             *o = a + (b - a) * t;
         }
 
         self.t += self.ratio;
+        let ch = self.channels;
         while self.t >= 1.0 {
             self.t -= 1.0;
             std::mem::swap(&mut self.frame0, &mut self.frame1);
-            if self.inner.read(&mut self.frame1) < self.channels {
-                // 入力が尽きた: これ以上の新規フレームはない。今回出力した
-                // フレームまでは有効なので返すが、以降は打ち切る。
-                self.ended = true;
-                break;
+            if self.in_len - self.in_pos >= ch {
+                self.frame1
+                    .copy_from_slice(&self.in_buf[self.in_pos..self.in_pos + ch]);
+                self.in_pos += ch;
+            } else {
+                let mut f1 = std::mem::take(&mut self.frame1);
+                let ok = self.read_input_frame(&mut f1);
+                self.frame1 = f1;
+                if !ok {
+                    // 入力が尽きた: これ以上の新規フレームはない。今回出力した
+                    // フレームまでは有効なので返すが、以降は打ち切る。
+                    self.ended = true;
+                    break;
+                }
             }
         }
         true
+    }
+
+    /// 次の出力 1 フレームを `out_frame` に作る。作れたら `true`。
+    fn produce_next_output_frame(&mut self) -> bool {
+        let mut out_frame = std::mem::take(&mut self.out_frame);
+        let ok = self.produce_next_frame_into(&mut out_frame);
+        self.out_frame = out_frame;
+        ok
     }
 
     /// 出力を作らずに入力を `adv` フレーム進めた状態（`frame0`/`frame1` が
@@ -215,12 +267,59 @@ impl<S: PcmSource> Resampler<S> {
             0 => true,
             1 => {
                 std::mem::swap(&mut self.frame0, &mut self.frame1);
-                self.inner.read(&mut self.frame1) == ch
+                let mut f1 = std::mem::take(&mut self.frame1);
+                let ok = self.read_input_frame(&mut f1);
+                self.frame1 = f1;
+                ok
             }
             _ => {
-                self.inner.skip_samples((adv - 2).saturating_mul(ch as u64))
-                    && self.inner.read(&mut self.frame0) == ch
-                    && self.inner.read(&mut self.frame1) == ch
+                let avail_frames = ((self.in_len - self.in_pos) / ch) as u64;
+                if avail_frames >= adv {
+                    self.in_pos += ((adv - 2) as usize) * ch;
+                    let mut f0 = std::mem::take(&mut self.frame0);
+                    let ok0 = self.read_input_frame(&mut f0);
+                    self.frame0 = f0;
+                    let mut f1 = std::mem::take(&mut self.frame1);
+                    let ok1 = ok0 && self.read_input_frame(&mut f1);
+                    self.frame1 = f1;
+                    ok1
+                } else if adv == avail_frames + 1 {
+                    self.in_pos += ((avail_frames - 1) as usize) * ch;
+                    let mut f0 = std::mem::take(&mut self.frame0);
+                    let ok0 = self.read_input_frame(&mut f0);
+                    self.frame0 = f0;
+                    let mut f1 = std::mem::take(&mut self.frame1);
+                    let ok1 = ok0 && self.read_input_frame(&mut f1);
+                    self.frame1 = f1;
+                    ok1
+                } else {
+                    let rem_samples = (self.in_len - self.in_pos) % ch;
+                    if rem_samples != 0 {
+                        for _ in 0..adv {
+                            std::mem::swap(&mut self.frame0, &mut self.frame1);
+                            let mut f1 = std::mem::take(&mut self.frame1);
+                            let ok = self.read_input_frame(&mut f1);
+                            self.frame1 = f1;
+                            if !ok {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                    self.in_pos = 0;
+                    self.in_len = 0;
+                    let skip_frames = adv - 2 - avail_frames;
+                    if !self.inner.skip_samples(skip_frames.saturating_mul(ch as u64)) {
+                        return false;
+                    }
+                    let mut f0 = std::mem::take(&mut self.frame0);
+                    let ok0 = self.read_input_frame(&mut f0);
+                    self.frame0 = f0;
+                    let mut f1 = std::mem::take(&mut self.frame1);
+                    let ok1 = ok0 && self.read_input_frame(&mut f1);
+                    self.frame1 = f1;
+                    ok1
+                }
             }
         }
     }
@@ -245,17 +344,105 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
         Some(s)
     }
     fn read(&mut self, out: &mut [f32]) -> usize {
+        let ch = self.channels;
         let mut n = 0;
-        while n < out.len() {
-            if self.out_pos >= self.channels {
-                if !self.produce_next_output_frame() {
-                    break;
-                }
-                self.out_pos = 0;
-            }
-            let take = (self.channels - self.out_pos).min(out.len() - n);
+        if self.out_pos < ch && n < out.len() {
+            let take = (ch - self.out_pos).min(out.len() - n);
             out[n..n + take].copy_from_slice(&self.out_frame[self.out_pos..self.out_pos + take]);
             self.out_pos += take;
+            n += take;
+        }
+        if ch == 2 && !self.ended && out.len() - n >= 2 && self.ensure_frames() {
+            let (mut f0l, mut f0r) = (self.frame0[0], self.frame0[1]);
+            let (mut f1l, mut f1r) = (self.frame1[0], self.frame1[1]);
+            let mut t = self.t;
+            let ratio = self.ratio;
+            while out.len() - n >= 2 {
+                let tf = t as f32;
+                out[n] = f0l + (f1l - f0l) * tf;
+                out[n + 1] = f0r + (f1r - f0r) * tf;
+                n += 2;
+                t += ratio;
+                while t >= 1.0 {
+                    t -= 1.0;
+                    f0l = f1l;
+                    f0r = f1r;
+                    if self.in_len - self.in_pos >= 2 {
+                        f1l = self.in_buf[self.in_pos];
+                        f1r = self.in_buf[self.in_pos + 1];
+                        self.in_pos += 2;
+                    } else {
+                        let mut tmp = [0.0f32; 2];
+                        if !self.read_input_frame(&mut tmp) {
+                            self.ended = true;
+                            break;
+                        }
+                        f1l = tmp[0];
+                        f1r = tmp[1];
+                    }
+                }
+                if self.ended {
+                    break;
+                }
+            }
+            self.frame0[0] = f0l;
+            self.frame0[1] = f0r;
+            self.frame1[0] = f1l;
+            self.frame1[1] = f1r;
+            self.t = t;
+            if self.ended {
+                return n;
+            }
+        } else if ch == 1 && !self.ended && out.len() - n >= 1 && self.ensure_frames() {
+            let mut f0 = self.frame0[0];
+            let mut f1 = self.frame1[0];
+            let mut t = self.t;
+            let ratio = self.ratio;
+            while n < out.len() {
+                let tf = t as f32;
+                out[n] = f0 + (f1 - f0) * tf;
+                n += 1;
+                t += ratio;
+                while t >= 1.0 {
+                    t -= 1.0;
+                    f0 = f1;
+                    if self.in_len > self.in_pos {
+                        f1 = self.in_buf[self.in_pos];
+                        self.in_pos += 1;
+                    } else {
+                        let mut tmp = [0.0f32; 1];
+                        if !self.read_input_frame(&mut tmp) {
+                            self.ended = true;
+                            break;
+                        }
+                        f1 = tmp[0];
+                    }
+                }
+                if self.ended {
+                    break;
+                }
+            }
+            self.frame0[0] = f0;
+            self.frame1[0] = f1;
+            self.t = t;
+            if self.ended {
+                return n;
+            }
+        } else {
+            while out.len() - n >= ch {
+                if !self.produce_next_frame_into(&mut out[n..n + ch]) {
+                    return n;
+                }
+                n += ch;
+            }
+        }
+        if n < out.len() {
+            if !self.produce_next_output_frame() {
+                return n;
+            }
+            let take = out.len() - n;
+            out[n..].copy_from_slice(&self.out_frame[..take]);
+            self.out_pos = take;
             n += take;
         }
         n
@@ -311,6 +498,8 @@ impl<S: PcmSource> PcmSource for Resampler<S> {
     }
     fn rewind(&mut self) -> bool {
         if self.inner.rewind() {
+            self.in_pos = 0;
+            self.in_len = 0;
             self.have_frames = false;
             self.t = 0.0;
             self.ended = false;
@@ -734,14 +923,20 @@ impl Mixer {
             "out はフレーム境界で揃っている必要がある"
         );
         let whole = out.len() / ch_count * ch_count;
+        let mut any_active = false;
         for chunk in out[..whole].chunks_mut(MIX_CHUNK_FRAMES * ch_count) {
             for slot in &mut self.slots {
-                Self::mix_slot(slot, chunk, &mut self.scratch, ch_count);
+                if slot.source.is_some() && !slot.paused {
+                    any_active = true;
+                    Self::mix_slot(slot, chunk, &mut self.scratch, ch_count);
+                }
             }
         }
 
-        for s in out.iter_mut() {
-            *s = s.clamp(-1.0, 1.0);
+        if any_active {
+            for s in out.iter_mut() {
+                *s = s.clamp(-1.0, 1.0);
+            }
         }
     }
 
@@ -764,14 +959,24 @@ impl Mixer {
                 return;
             }
             just_rewound = false;
-            for f in 0..got {
+            if slot.step == 0.0 {
                 let vol = slot.volume;
-                let dst = &mut chunk[(done + f) * ch_count..(done + f + 1) * ch_count];
-                for (d, s) in dst.iter_mut().zip(&scratch[f * ch_count..]) {
-                    *d += *s * vol;
+                let samples = got * ch_count;
+                let dst = &mut chunk[done * ch_count..done * ch_count + samples];
+                for (d, &s) in dst.iter_mut().zip(&scratch[..samples]) {
+                    *d += s * vol;
                 }
-                slot.position_frames = slot.position_frames.saturating_add(1);
-                Self::advance_fade(slot);
+                slot.position_frames = slot.position_frames.saturating_add(got as u64);
+            } else {
+                for f in 0..got {
+                    let vol = slot.volume;
+                    let dst = &mut chunk[(done + f) * ch_count..(done + f + 1) * ch_count];
+                    for (d, &s) in dst.iter_mut().zip(&scratch[f * ch_count..]) {
+                        *d += s * vol;
+                    }
+                    slot.position_frames = slot.position_frames.saturating_add(1);
+                    Self::advance_fade(slot);
+                }
             }
             done += got;
             if got == want {

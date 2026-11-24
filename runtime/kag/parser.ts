@@ -95,81 +95,111 @@ export function parseScenario(source: string, file: string): Scenario {
   return { file, commands, labels };
 }
 
+function isWsCode(c: number): boolean {
+  return (
+    c === 32 ||
+    c === 9 ||
+    c === 10 ||
+    c === 13 ||
+    c === 12 ||
+    c === 11 ||
+    c === 0x3000 ||
+    c === 0xa0 ||
+    c === 0xfeff
+  );
+}
+
 function parseInline(line: string, lineNo: number, out: Command[]): void {
+  const len = line.length;
   let text = "";
+  let textStart = 0;
   let i = 0;
-  const flush = () => {
+  const flush = (end: number) => {
+    if (end > textStart) {
+      text += line.slice(textStart, end);
+    }
     if (text.length > 0) {
       out.push({ type: "text", text, line: lineNo });
       text = "";
     }
   };
-  while (i < line.length) {
-    const c = line[i];
-    if (c === "[") {
-      if (line[i + 1] === "[") {
-        text += "[";
+  while (i < len) {
+    if (line.charCodeAt(i) === 91 /* '[' */) {
+      if (i + 1 < len && line.charCodeAt(i + 1) === 91 /* '[' */) {
+        text += line.slice(textStart, i + 1);
         i += 2;
+        textStart = i;
         continue;
       }
       // 閉じ ] を探す（クォート内は無視）
       let j = i + 1;
-      let quote: string | null = null;
-      while (j < line.length) {
-        const cj = line[j];
-        if (quote) {
-          if (cj === quote) quote = null;
-        } else if (cj === '"' || cj === "'") {
+      let quote = 0;
+      while (j < len) {
+        const cj = line.charCodeAt(j);
+        if (quote !== 0) {
+          if (cj === quote) quote = 0;
+        } else if (cj === 34 /* '"' */ || cj === 39 /* '\'' */) {
           quote = cj;
-        } else if (cj === "]") {
+        } else if (cj === 93 /* ']' */) {
           break;
         }
         j++;
       }
-      if (j >= line.length) {
+      if (j >= len) {
         // 閉じられていない [ は本文扱い
-        text += line.slice(i);
-        break;
+        flush(len);
+        return;
       }
-      flush();
+      flush(i);
       const { name, attrs } = parseTagBody(line.slice(i + 1, j));
       out.push({ type: "tag", name, attrs, line: lineNo });
       i = j + 1;
+      textStart = i;
       continue;
     }
-    text += c;
     i++;
   }
-  flush();
+  flush(len);
 }
 
 function parseTagBody(body: string): { name: string; attrs: Attrs } {
   const attrs: Attrs = {};
+  const len = body.length;
   let i = 0;
   const skipWs = () => {
-    while (i < body.length && /\s/.test(body[i])) i++;
+    while (i < len && isWsCode(body.charCodeAt(i))) i++;
   };
   skipWs();
-  let name = "";
-  while (i < body.length && !/\s/.test(body[i])) {
-    name += body[i++];
-  }
+  const nameStart = i;
+  while (i < len && !isWsCode(body.charCodeAt(i))) i++;
+  const name = body.slice(nameStart, i);
   skipWs();
-  while (i < body.length) {
-    let key = "";
-    while (i < body.length && !/[\s=]/.test(body[i])) key += body[i++];
+  while (i < len) {
+    const keyStart = i;
+    while (i < len) {
+      const c = body.charCodeAt(i);
+      if (c === 61 /* '=' */ || isWsCode(c)) break;
+      i++;
+    }
+    const key = body.slice(keyStart, i);
     skipWs();
-    if (body[i] === "=") {
+    if (i < len && body.charCodeAt(i) === 61 /* '=' */) {
       i++;
       skipWs();
       let value = "";
-      const q = body[i];
-      if (q === '"' || q === "'") {
-        i++;
-        while (i < body.length && body[i] !== q) value += body[i++];
-        i++; // 閉じクォート
-      } else {
-        while (i < body.length && !/\s/.test(body[i])) value += body[i++];
+      if (i < len) {
+        const q = body.charCodeAt(i);
+        if (q === 34 /* '"' */ || q === 39 /* '\'' */) {
+          i++;
+          const valStart = i;
+          while (i < len && body.charCodeAt(i) !== q) i++;
+          value = body.slice(valStart, i);
+          if (i < len) i++; // 閉じクォート
+        } else {
+          const valStart = i;
+          while (i < len && !isWsCode(body.charCodeAt(i))) i++;
+          value = body.slice(valStart, i);
+        }
       }
       if (key) attrs[key] = value;
     } else if (key) {
