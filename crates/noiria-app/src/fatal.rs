@@ -17,18 +17,28 @@ use crate::bridge::LockExt;
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SCRIPT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
-/// ダイアログを出してよいか。配布ビルド（`dist`）の Windows だけが対象で、それ以外では
-/// stderr + ログのみ（コンソールのある開発ビルドでは端末に出れば足りる）。
-pub fn should_show_dialog(headless: bool, dist_windows: bool, no_dialog_env: bool) -> bool {
-    dist_windows && !headless && !no_dialog_env
+#[derive(Clone, Copy, Debug)]
+pub struct DialogPolicy {
+    pub headless: bool,
+    pub dist_windows: bool,
+    pub no_dialog_env: bool,
+}
+
+impl DialogPolicy {
+    /// ダイアログを出してよいか。配布ビルド（`dist`）の Windows だけが対象で、それ以外では
+    /// stderr + ログのみ（コンソールのある開発ビルドでは端末に出れば足りる）。
+    pub fn should_show_dialog(self) -> bool {
+        self.dist_windows && !self.headless && !self.no_dialog_env
+    }
 }
 
 fn dialog_allowed() -> bool {
-    should_show_dialog(
-        HEADLESS.load(Ordering::SeqCst) || cfg!(test),
-        cfg!(all(windows, feature = "dist")),
-        std::env::var_os("NOIRIA_NO_DIALOG").is_some_and(|v| !v.is_empty()),
-    )
+    DialogPolicy {
+        headless: HEADLESS.load(Ordering::SeqCst) || cfg!(test),
+        dist_windows: cfg!(all(windows, feature = "dist")),
+        no_dialog_env: std::env::var_os("NOIRIA_NO_DIALOG").is_some_and(|v| !v.is_empty()),
+    }
+    .should_show_dialog()
 }
 
 pub fn set_headless(headless: bool) {
@@ -113,10 +123,19 @@ mod tests {
 
     #[test]
     fn dialog_only_for_dist_windows_when_interactive() {
-        assert!(should_show_dialog(false, true, false));
-        assert!(!should_show_dialog(true, true, false), "ヘッドレスでは出さない");
-        assert!(!should_show_dialog(false, true, true), "NOIRIA_NO_DIALOG で抑止");
-        assert!(!should_show_dialog(false, false, false), "dist 以外（開発/Linux）では出さない");
+        assert!(DialogPolicy { headless: false, dist_windows: true, no_dialog_env: false }.should_show_dialog());
+        assert!(
+            !DialogPolicy { headless: true, dist_windows: true, no_dialog_env: false }.should_show_dialog(),
+            "ヘッドレスでは出さない"
+        );
+        assert!(
+            !DialogPolicy { headless: false, dist_windows: true, no_dialog_env: true }.should_show_dialog(),
+            "NOIRIA_NO_DIALOG で抑止"
+        );
+        assert!(
+            !DialogPolicy { headless: false, dist_windows: false, no_dialog_env: false }.should_show_dialog(),
+            "dist 以外（開発/Linux）では出さない"
+        );
     }
 
     #[test]

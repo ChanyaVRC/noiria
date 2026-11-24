@@ -190,26 +190,33 @@ pub(super) unsafe fn premultiply_rgba_sse2(rgba: &[u8], out: &mut [u8]) {
     premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct BlitRect {
+    pub(super) d_base: usize,
+    pub(super) dst_stride: usize,
+    pub(super) s_base: usize,
+    pub(super) src_stride: usize,
+    pub(super) row_bytes: usize,
+    pub(super) rows: usize,
+    pub(super) opacity: u32,
+}
+
 #[target_feature(enable = "avx2")]
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn blit_rect_avx2(
-    dst: &mut [u8],
-    d_base: usize,
-    dst_stride: usize,
-    src: &[u8],
-    s_base: usize,
-    src_stride: usize,
-    row_bytes: usize,
-    rows: usize,
-    o: u32,
-) {
-    for r in 0..rows {
-        let d0 = d_base + r * dst_stride;
-        let s0 = s_base + r * src_stride;
-        if o == 255 {
-            blit_row_opaque_avx2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes]);
+pub(super) unsafe fn blit_rect_avx2(dst: &mut [u8], src: &[u8], rect: BlitRect) {
+    for r in 0..rect.rows {
+        let d0 = rect.d_base + r * rect.dst_stride;
+        let s0 = rect.s_base + r * rect.src_stride;
+        if rect.opacity == 255 {
+            blit_row_opaque_avx2(
+                &mut dst[d0..d0 + rect.row_bytes],
+                &src[s0..s0 + rect.row_bytes],
+            );
         } else {
-            blit_row_opacity_avx2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes], o);
+            blit_row_opacity_avx2(
+                &mut dst[d0..d0 + rect.row_bytes],
+                &src[s0..s0 + rect.row_bytes],
+                rect.opacity,
+            );
         }
     }
 }
@@ -313,25 +320,21 @@ pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o
 }
 
 #[target_feature(enable = "sse2")]
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn blit_rect_sse2(
-    dst: &mut [u8],
-    d_base: usize,
-    dst_stride: usize,
-    src: &[u8],
-    s_base: usize,
-    src_stride: usize,
-    row_bytes: usize,
-    rows: usize,
-    o: u32,
-) {
-    for r in 0..rows {
-        let d0 = d_base + r * dst_stride;
-        let s0 = s_base + r * src_stride;
-        if o == 255 {
-            blit_row_opaque_sse2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes]);
+pub(super) unsafe fn blit_rect_sse2(dst: &mut [u8], src: &[u8], rect: BlitRect) {
+    for r in 0..rect.rows {
+        let d0 = rect.d_base + r * rect.dst_stride;
+        let s0 = rect.s_base + r * rect.src_stride;
+        if rect.opacity == 255 {
+            blit_row_opaque_sse2(
+                &mut dst[d0..d0 + rect.row_bytes],
+                &src[s0..s0 + rect.row_bytes],
+            );
         } else {
-            blit_row_opacity_sse2(&mut dst[d0..d0 + row_bytes], &src[s0..s0 + row_bytes], o);
+            blit_row_opacity_sse2(
+                &mut dst[d0..d0 + rect.row_bytes],
+                &src[s0..s0 + rect.row_bytes],
+                rect.opacity,
+            );
         }
     }
 }

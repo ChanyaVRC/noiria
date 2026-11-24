@@ -71,14 +71,7 @@ pub async fn op_wait(state: Rc<RefCell<OpState>>, ms: f64) {
         let mut rx = clock.watch_rx();
         let deadline = clock.now() + dur;
         if clock.now() < deadline {
-            pending_waits.inc();
-            struct DecOnDrop(crate::bridge::PendingWaits);
-            impl Drop for DecOnDrop {
-                fn drop(&mut self) {
-                    self.0.dec();
-                }
-            }
-            let _guard = DecOnDrop(pending_waits);
+            let _guard = pending_waits.enter();
             while clock.now() < deadline {
                 let _ = rx.changed().await;
                 let gen = tick_sync.requested_generation();

@@ -1153,14 +1153,8 @@ impl EngineState {
         save_png(&out, &path).map_err(|e| e.to_string())
     }
 
-    /// 現在のシーンを合成し、セーブ一覧用の規定寸法 (`THUMB_W`x`THUMB_H`) へ縮小して保持する。
-    /// ファイルへは書かない（`thumb_save` で書く）。
-    pub fn thumb_capture(&self) {
-        let _ = self.thumb_capture_sized(0, 0);
-    }
-
-    /// `thumb_capture` の寸法指定版。0 のどちらかを含むなら規定寸法（モダン UI は大きいカードに合わせて
-    /// 規定より大きく撮る。一覧は読み込み時に表示寸法へ縮める）。
+    /// 現在のシーンを合成し、縮小して保持する（メニューを開く直前の画面をサムネイルにするため）。
+    /// w/h のどちらか 0 なら規定寸法 (`THUMB_W`x`THUMB_H`)、それ以外はその寸法（モダン UI の大きいカード用）。
     pub fn thumb_capture_sized(&self, w: u32, h: u32) -> Result<(), EngineError> {
         let (w, h) = if w == 0 || h == 0 {
             (savedata::THUMB_W, savedata::THUMB_H)
@@ -1183,10 +1177,12 @@ impl EngineState {
     pub fn thumb_save(&self, slot: &str) -> Result<(), EngineError> {
         self.log_op(format!("thumb_save {slot}"));
         if self.pending_thumb.lock_unpoisoned().is_none() {
-            self.thumb_capture();
+            self.thumb_capture_sized(0, 0)?;
         }
         let guard = self.pending_thumb.lock_unpoisoned();
-        let thumb = guard.as_ref().expect("直前に取得済み");
+        let Some(thumb) = guard.as_ref() else {
+            return Err("サムネイルの取得に失敗しました".to_string());
+        };
         let r = savedata::write_thumb(&self.config.id, slot, thumb).map_err(|e| e.to_string());
         self.ui_cache.lock_unpoisoned().forget_slot(slot);
         r

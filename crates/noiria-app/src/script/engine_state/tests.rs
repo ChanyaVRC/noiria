@@ -1608,10 +1608,10 @@ fn video_play_prepared_errors_when_layer_mismatch() {
 /// 重い（半透明の全面レイヤが何枚もある）シーンを作り、合成 1 回の所要時間を返す。
 fn make_heavy_scene(es: &EngineState) -> Duration {
     let mut scene = Scene::new(2048, 1152);
-    for k in 0..6u8 {
+    for k in 0..10u8 {
         let id = scene.alloc_layer(LayerKind::Image);
         let mut p = Pixmap::new(2048, 1152);
-        p.fill([40 * k, 90, 200, 255]);
+        p.fill([25 * k, 90, 200, 255]);
         let layer = scene.layer_mut(Page::Fore, id).unwrap();
         layer.pixmap = Some(Arc::new(p));
         layer.visible = true;

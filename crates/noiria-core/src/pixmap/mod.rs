@@ -202,35 +202,24 @@ impl Pixmap {
 
         #[cfg(target_arch = "x86_64")]
         {
+            let rect = simd::BlitRect {
+                d_base,
+                dst_stride,
+                s_base,
+                src_stride,
+                row_bytes,
+                rows,
+                opacity: o,
+            };
             if is_x86_feature_detected!("avx2") {
                 // SAFETY: AVX2 availability was checked above.
                 unsafe {
-                    simd::blit_rect_avx2(
-                        &mut self.data,
-                        d_base,
-                        dst_stride,
-                        &src.data,
-                        s_base,
-                        src_stride,
-                        row_bytes,
-                        rows,
-                        o,
-                    );
+                    simd::blit_rect_avx2(&mut self.data, &src.data, rect);
                 }
             } else {
                 // SAFETY: SSE2 is guaranteed on x86_64.
                 unsafe {
-                    simd::blit_rect_sse2(
-                        &mut self.data,
-                        d_base,
-                        dst_stride,
-                        &src.data,
-                        s_base,
-                        src_stride,
-                        row_bytes,
-                        rows,
-                        o,
-                    );
+                    simd::blit_rect_sse2(&mut self.data, &src.data, rect);
                 }
             }
         }

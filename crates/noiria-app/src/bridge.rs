@@ -433,24 +433,26 @@ impl TickSync {
 #[derive(Clone, Default)]
 pub struct PendingWaits(Arc<AtomicI64>);
 
+/// [`PendingWaits::enter`] が返す RAII ガード。スコープ終了（キャンセル・unwind を含む）で必ず `dec` する。
+#[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
+pub struct PendingWaitGuard(PendingWaits);
+
+impl Drop for PendingWaitGuard {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl PendingWaits {
     pub fn new() -> Self {
         Self(Arc::new(AtomicI64::new(0)))
     }
 
-    /// `op_wait`（V8 版）の仮想分岐: 待機開始時に呼ぶ。`ops_sys.rs`（engine-v8）から
-    /// しか呼ばれないため、engine-v8 未使用ビルドでは未使用になる（dead_code を
-    /// 明示的に許可する）。
+    /// `op_wait`（V8 版）の仮想分岐: 待機開始時にカウントを増やし、drop で確実に減らすガードを返す。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn inc(&self) {
+    pub fn enter(&self) -> PendingWaitGuard {
         self.0.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// `op_wait`（V8 版）の仮想分岐: 待機終了時（正常/キャンセルいずれも）に呼ぶ。
-    /// `inc` と同じ理由で dead_code を明示的に許可する。
-    #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
-    pub fn dec(&self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        PendingWaitGuard(self.clone())
     }
 
     /// headless 側: 現在の in-flight 数を読む。
