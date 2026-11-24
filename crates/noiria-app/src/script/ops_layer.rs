@@ -219,7 +219,13 @@ pub(crate) fn op_layer_crop_move(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow::<EngineState>()
-        .layer_crop_move(to_u32(id), page, to_u32(to), to_time_ms(time_ms), accel as f32)
+        .layer_crop_move(
+            to_u32(id),
+            page,
+            to_u32(to),
+            to_time_ms(time_ms),
+            accel as f32,
+        )
         .map_err(err)
 }
 
@@ -327,7 +333,9 @@ pub(crate) fn op_layer_blit_image(
 /// 画面揺れ。
 #[op2(fast)]
 pub(crate) fn op_quake(state: &mut OpState, ax: f64, ay: f64, ms: f64) {
-    state.borrow::<EngineState>().quake(to_i32(ax), to_i32(ay), to_u32(ms));
+    state
+        .borrow::<EngineState>()
+        .quake(to_i32(ax), to_i32(ay), to_u32(ms));
 }
 
 /// [stopquake]（W5）: 画面揺れを即座に停止する。

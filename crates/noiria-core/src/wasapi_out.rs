@@ -307,7 +307,11 @@ impl WasapiOutput {
                 self.device_format,
             )
         };
-        let flags = if written.is_ok() { 0 } else { BUFFERFLAGS_SILENT };
+        let flags = if written.is_ok() {
+            0
+        } else {
+            BUFFERFLAGS_SILENT
+        };
         // SAFETY: 直前の GetBuffer(frames) と同じフレーム数での対の返却。
         let released = unsafe { self.render_client.ReleaseBuffer(frames, flags) }
             .context("ReleaseBuffer に失敗");
@@ -497,7 +501,10 @@ mod tests {
             .count();
 
         assert_eq!(leaked, 0, "対照: 閉じていないハンドルは有効なまま");
-        assert!(closed >= N * 9 / 10, "EventHandle が閉じていない: {closed}/{N}");
+        assert!(
+            closed >= N * 9 / 10,
+            "EventHandle が閉じていない: {closed}/{N}"
+        );
     }
 
     fn wave_format(tag: u16, bits: u16, channels: u16, block_align: u16) -> WAVEFORMATEX {
@@ -577,7 +584,13 @@ mod tests {
             let mut f32_dst = vec![0u8; 4 * src.len() + 8];
             // SAFETY: `f32_dst[offset..]` は `4 * src.len()` バイト以上の書き込み可能な独自バッファ。
             unsafe {
-                write_device_buffer(f32_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::F32)
+                write_device_buffer(
+                    f32_dst[offset..].as_mut_ptr(),
+                    3,
+                    2,
+                    &src,
+                    DeviceFormat::F32,
+                )
             }
             .unwrap();
             let got: Vec<f32> = f32_dst[offset..offset + 4 * src.len()]
@@ -589,7 +602,13 @@ mod tests {
             let mut i16_dst = vec![0u8; 2 * src.len() + 8];
             // SAFETY: `i16_dst[offset..]` は `2 * src.len()` バイト以上の書き込み可能な独自バッファ。
             unsafe {
-                write_device_buffer(i16_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::I16)
+                write_device_buffer(
+                    i16_dst[offset..].as_mut_ptr(),
+                    3,
+                    2,
+                    &src,
+                    DeviceFormat::I16,
+                )
             }
             .unwrap();
             let got: Vec<i16> = i16_dst[offset..offset + 2 * src.len()]

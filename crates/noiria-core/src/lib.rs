@@ -34,9 +34,9 @@ pub mod pixmap;
 pub mod savedata;
 pub mod scale;
 pub mod scene;
-pub mod text;
 #[cfg(test)]
 mod test_support;
+pub mod text;
 pub mod transition;
 pub mod uiraster;
 #[cfg(windows)]

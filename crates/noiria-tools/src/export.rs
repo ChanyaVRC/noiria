@@ -417,16 +417,23 @@ pub fn run_export_with_writer(
             let target = prepared.target;
             let stage = opts.out_dir.join(format!("{}.tmp", target.name()));
             remove_path(&stage).with_context(|| {
-                format!("前回の作業ディレクトリを削除できません: {}", stage.display())
+                format!(
+                    "前回の作業ディレクトリを削除できません: {}",
+                    stage.display()
+                )
             })?;
-            fs::create_dir_all(&stage)
-                .with_context(|| format!("出力ディレクトリを作成できません: {}", stage.display()))?;
+            fs::create_dir_all(&stage).with_context(|| {
+                format!("出力ディレクトリを作成できません: {}", stage.display())
+            })?;
             stages.push(stage.clone());
 
             let bin_name = target.out_bin_name(&exe_name);
             let bin_path = stage.join(&bin_name);
             write(&bin_path, &prepared.bin_bytes).with_context(|| {
-                format!("実行ファイルの書き出しに失敗しました: {}", bin_path.display())
+                format!(
+                    "実行ファイルの書き出しに失敗しました: {}",
+                    bin_path.display()
+                )
             })?;
             #[cfg(unix)]
             {
@@ -442,8 +449,9 @@ pub fn run_export_with_writer(
                 ("THIRD-PARTY.txt", THIRD_PARTY_TXT.as_bytes()),
                 ("README.txt", readme.as_bytes()),
             ] {
-                write(&stage.join(name), bytes)
-                    .with_context(|| format!("{name} の書き出しに失敗しました: {}", stage.display()))?;
+                write(&stage.join(name), bytes).with_context(|| {
+                    format!("{name} の書き出しに失敗しました: {}", stage.display())
+                })?;
             }
             staged.push((target, prepared.bin_bytes.len() as u64, bin_name));
         }
@@ -461,7 +469,11 @@ pub fn run_export_with_writer(
     let mut targets = Vec::new();
     for ((target, bin_size, bin_name), stage) in staged.into_iter().zip(stages) {
         let final_dir = opts.out_dir.join(target.name());
-        swap_dir(&stage, &final_dir, &opts.out_dir.join(format!("{}.old", target.name())))?;
+        swap_dir(
+            &stage,
+            &final_dir,
+            &opts.out_dir.join(format!("{}.old", target.name())),
+        )?;
         targets.push(TargetReport {
             target,
             bin_path: final_dir.join(bin_name),
@@ -500,8 +512,12 @@ fn remove_path(path: &Path) -> io::Result<()> {
 /// `stage` を `final_dir` へ入れ替える。既存の `final_dir` は一旦 `backup` へ退避し、
 /// 入れ替えに失敗したら戻す。退避の削除に失敗しても export 自体は成功（次回に掃除する）。
 fn swap_dir(stage: &Path, final_dir: &Path, backup: &Path) -> Result<()> {
-    remove_path(backup)
-        .with_context(|| format!("前回の退避ディレクトリを削除できません: {}", backup.display()))?;
+    remove_path(backup).with_context(|| {
+        format!(
+            "前回の退避ディレクトリを削除できません: {}",
+            backup.display()
+        )
+    })?;
     let had_old = fs::symlink_metadata(final_dir).is_ok();
     if had_old {
         fs::rename(final_dir, backup).with_context(|| {
@@ -516,8 +532,10 @@ fn swap_dir(stage: &Path, final_dir: &Path, backup: &Path) -> Result<()> {
             let _ = fs::rename(backup, final_dir);
         }
         let _ = remove_path(stage);
-        return Err(anyhow::Error::new(e)
-            .context(format!("出力の入れ替えに失敗しました: {}", final_dir.display())));
+        return Err(anyhow::Error::new(e).context(format!(
+            "出力の入れ替えに失敗しました: {}",
+            final_dir.display()
+        )));
     }
     if had_old {
         let _ = remove_path(backup);

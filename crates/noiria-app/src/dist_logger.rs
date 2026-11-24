@@ -30,7 +30,11 @@ pub(crate) struct FileLogger {
 }
 
 fn open_append(path: &std::path::Path) -> Option<File> {
-    let f = OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
     *LOG_PATH.lock_unpoisoned() = Some(path.to_path_buf());
     Some(f)
 }
@@ -114,6 +118,10 @@ pub(crate) fn init() -> &'static FileLogger {
         .unwrap_or(LevelFilter::Warn);
     let logger: &'static FileLogger = Box::leak(Box::new(FileLogger::new(level)));
     log::set_logger(logger).expect("ロガーは一度しか初期化できません");
-    log::set_max_level(if crate::prof::enabled() { level.max(LevelFilter::Info) } else { level });
+    log::set_max_level(if crate::prof::enabled() {
+        level.max(LevelFilter::Info)
+    } else {
+        level
+    });
     logger
 }

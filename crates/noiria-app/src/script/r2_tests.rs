@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver};
 use noiria_core::assets::{save_png, GameDir};
-use noiria_core::pixmap::Pixmap;
 use noiria_core::audio::{channel_index, AudioShared};
+use noiria_core::pixmap::Pixmap;
 use noiria_core::scene::Scene;
 use tokio::sync::Notify;
 
-use crate::bridge::{InputEvent, InputSync, PendingWaits, SharedScene, TickSync, UserEvent, WakeSink};
+use crate::bridge::{
+    InputEvent, InputSync, PendingWaits, SharedScene, TickSync, UserEvent, WakeSink,
+};
 use crate::clock::Clock;
 use crate::script::engine_state::SharedOpLog;
 use crate::script::EngineCtx;
@@ -152,7 +154,10 @@ impl Run {
                 std::thread::sleep(Duration::from_millis(16));
                 let finished = {
                     let mut s = scene.lock().unwrap();
-                    if s.transition.as_ref().is_some_and(|t| t.is_finished(Instant::now())) {
+                    if s.transition
+                        .as_ref()
+                        .is_some_and(|t| t.is_finished(Instant::now()))
+                    {
                         s.swap_after_transition();
                         true
                     } else {
@@ -302,9 +307,18 @@ ops.op_quit();
         let run = start(engine, script, |_| {});
         let took = run.wait_quit(Duration::from_secs(20));
         let log = run.log();
-        assert!(took.is_some(), "{engine:?}: 終わらない（スレッドが落ちた）: {log:#?}");
-        assert!(log.iter().any(|l| l == "log info ALIVE"), "{engine:?}: {log:#?}");
-        assert!(log.iter().any(|l| l == "log info AFTER"), "{engine:?}: {log:#?}");
+        assert!(
+            took.is_some(),
+            "{engine:?}: 終わらない（スレッドが落ちた）: {log:#?}"
+        );
+        assert!(
+            log.iter().any(|l| l == "log info ALIVE"),
+            "{engine:?}: {log:#?}"
+        );
+        assert!(
+            log.iter().any(|l| l == "log info AFTER"),
+            "{engine:?}: {log:#?}"
+        );
     }
 }
 
@@ -360,7 +374,10 @@ fn wait_end_waits_while_a_play_request_is_decoding_and_ends_when_it_is_dropped()
 fn wait_end_on_an_idle_channel_returns_without_a_grace_period() {
     for engine in ENGINES {
         let run = start(engine, WAIT_BGM_SCRIPT, |_| {});
-        assert!(run.wait_quit(Duration::from_secs(20)).is_some(), "{engine:?}");
+        assert!(
+            run.wait_quit(Duration::from_secs(20)).is_some(),
+            "{engine:?}"
+        );
         let waited = run.logged_number("WAITED ");
         assert!(waited < 30.0, "{engine:?}: 猶予を待っている: {waited}ms");
     }
@@ -436,8 +453,15 @@ ops.op_quit();
                 t: 0.0,
             })
             .unwrap();
-        assert!(run.wait_quit(Duration::from_secs(5)).is_some(), "{engine:?}");
-        assert!(sent.elapsed() < Duration::from_millis(100), "{engine:?}: {:?}", sent.elapsed());
+        assert!(
+            run.wait_quit(Duration::from_secs(5)).is_some(),
+            "{engine:?}"
+        );
+        assert!(
+            sent.elapsed() < Duration::from_millis(100),
+            "{engine:?}: {:?}",
+            sent.elapsed()
+        );
         assert!(run.log().iter().any(|l| l == "log info GOT click"));
     }
 }

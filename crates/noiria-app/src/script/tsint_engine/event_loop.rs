@@ -45,7 +45,6 @@ pub(super) struct PendingOps {
     pub(super) input_acked: bool,
 }
 
-
 /// ヘッドレス（仮想クロック）で `drive` がアイドルポーリングする上限間隔。
 /// headless.rs のフレーム刻み（16ms、`crate::headless::TICK`）より十分小さくして、
 /// `--autotest` の move/click の取りこぼし〜処理遅延の上限を抑える（実時間クロックは眠る: `Intake::Forwarded`）。
@@ -111,7 +110,10 @@ pub(super) struct ForwardedIntake {
 }
 
 impl Intake {
-    pub(super) fn forwarded(mut input_rx: UnboundedReceiver<InputEvent>, trans_notify: Arc<tokio::sync::Notify>) -> Self {
+    pub(super) fn forwarded(
+        mut input_rx: UnboundedReceiver<InputEvent>,
+        trans_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
         let shared = Arc::new(std::sync::Mutex::new(ForwardedInput::default()));
         let bell = Arc::new(Doorbell::new());
         let stop = Arc::new(tokio::sync::Notify::new());
@@ -386,4 +388,3 @@ pub(super) fn drive(
         }
     }
 }
-

@@ -248,4 +248,3 @@ pub(super) fn rasterize_glyph(
 
     out
 }
-

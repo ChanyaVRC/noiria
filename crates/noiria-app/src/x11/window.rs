@@ -398,9 +398,16 @@ pub(crate) fn run_windowed(p: WindowedParams) -> Result<()> {
                     for act in v.repeat.feed(KeyEv::Press { keycode, time }) {
                         match act {
                             KeyAct::Up(kc) => handle_key_up(&mut v, &km, &p.input_tx, kc),
-                            KeyAct::Down(kc) => {
-                                handle_key_down(&mut v, &km, &p.input_tx, &mut c, &ids, &setup, kc, state)
-                            }
+                            KeyAct::Down(kc) => handle_key_down(
+                                &mut v,
+                                &km,
+                                &p.input_tx,
+                                &mut c,
+                                &ids,
+                                &setup,
+                                kc,
+                                state,
+                            ),
                         }
                     }
                 }

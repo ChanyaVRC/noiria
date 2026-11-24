@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetWindowLongPtrW, PostMessageW, SetWindowPos, GWL_STYLE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN,
+    GetClientRect, GetWindowLongPtrW, PostMessageW, SetWindowPos, GWL_STYLE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_RBUTTONDOWN,
 };
 
 use crate::autotest_script::{Button, Step};
@@ -59,11 +59,22 @@ fn vk(name: &str) -> Option<usize> {
 }
 
 fn set_client_size(hwnd: HWND, w: i32, h: i32) {
-    let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: w,
+        bottom: h,
+    };
     // SAFETY: `rc` はスタック上の RECT。`hwnd` は描画ループが公開した窓で、破棄済みなら各呼び出しは Err/無害な値を返すだけ。
     unsafe {
         let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
-        let _ = AdjustWindowRectExForDpi(&mut rc, style, false, WINDOW_EX_STYLE(0), GetDpiForWindow(hwnd));
+        let _ = AdjustWindowRectExForDpi(
+            &mut rc,
+            style,
+            false,
+            WINDOW_EX_STYLE(0),
+            GetDpiForWindow(hwnd),
+        );
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -118,7 +129,11 @@ pub(crate) fn spawn(
                 Step::Click(x, y, b) => {
                     post(WM_MOUSEMOVE, 0, lparam(x * scale, y * scale));
                     crate::prof::mark(start, &format!("click {x:.0},{y:.0}"));
-                    let msg = if b == Button::Left { WM_LBUTTONDOWN } else { WM_RBUTTONDOWN };
+                    let msg = if b == Button::Left {
+                        WM_LBUTTONDOWN
+                    } else {
+                        WM_RBUTTONDOWN
+                    };
                     post(msg, 0, lparam(x * scale, y * scale));
                 }
                 Step::Key(k) => {

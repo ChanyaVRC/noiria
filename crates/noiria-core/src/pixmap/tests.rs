@@ -5,7 +5,13 @@ fn checked_dims_rejects_oversized_and_wrapping_dimensions() {
     assert_eq!(checked_dims(1280, 720), Ok(1280 * 720 * 4));
     assert_eq!(checked_dims(0, 5), Ok(0));
     assert_eq!(checked_dims(MAX_DIM, 4096), Ok(MAX_DIM as usize * 4096 * 4));
-    for (w, h) in [(100_000, 100_000), (1 << 31, 1 << 31), (u32::MAX, 1), (MAX_DIM + 1, 1), (MAX_DIM, MAX_DIM)] {
+    for (w, h) in [
+        (100_000, 100_000),
+        (1 << 31, 1 << 31),
+        (u32::MAX, 1),
+        (MAX_DIM + 1, 1),
+        (MAX_DIM, MAX_DIM),
+    ] {
         assert!(checked_dims(w, h).is_err(), "{w}x{h}");
         assert!(Pixmap::try_new(w, h).is_err(), "{w}x{h}");
     }
@@ -20,12 +26,22 @@ fn resize_area_averages_and_preserves_flat_color() {
     flat.fill([10, 20, 30, 255]);
     let small = flat.resize_area(240, 135);
     assert_eq!((small.width, small.height), (240, 135));
-    assert!(small.data.as_chunks::<4>().0.iter().all(|p| *p == [10, 20, 30, 255]));
+    assert!(small
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|p| *p == [10, 20, 30, 255]));
 
     // 左半分が黒・右半分が白の 4x1 を 2x1 へ: 各画素は元の 2 画素の平均。
     let mut p = Pixmap::new(4, 1);
-    p.data = vec![0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255];
-    assert_eq!(p.resize_area(2, 1).data, vec![0, 0, 0, 255, 255, 255, 255, 255]);
+    p.data = vec![
+        0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    ];
+    assert_eq!(
+        p.resize_area(2, 1).data,
+        vec![0, 0, 0, 255, 255, 255, 255, 255]
+    );
     // 4x1 を 3x1 へ（非整数比）: 中央の画素は黒と白を半分ずつ。
     let mid = &p.resize_area(3, 1).data[4..8];
     assert!((126..=129).contains(&mid[0]) && mid[3] == 255, "{mid:?}");
@@ -265,7 +281,9 @@ fn blit_clipping() {
 fn lcg_bytes(seed: &mut u64, len: usize) -> Vec<u8> {
     (0..len)
         .map(|_| {
-            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (*seed >> 33) as u8
         })
         .collect()
@@ -355,8 +373,16 @@ fn lerp_from_simd_matches_scalar_across_t_edges_and_lengths() {
     for len in [0usize, 1, 3, 4, 15, 16, 17, 31, 32, 33, 63, 64, 67] {
         let a_bytes = lcg_bytes(&mut seed, len * 4);
         let b_bytes = lcg_bytes(&mut seed, len * 4);
-        let pa = Pixmap { width: len as u32, height: 1, data: a_bytes.clone() };
-        let pb = Pixmap { width: len as u32, height: 1, data: b_bytes.clone() };
+        let pa = Pixmap {
+            width: len as u32,
+            height: 1,
+            data: a_bytes.clone(),
+        };
+        let pb = Pixmap {
+            width: len as u32,
+            height: 1,
+            data: b_bytes.clone(),
+        };
         for &t in &t_values {
             let t256 = (t.clamp(0.0, 1.0) * 256.0) as u32;
             let mut want = vec![0u8; len * 4];
@@ -475,9 +501,16 @@ fn blit_over_clipped_scalar_ref(
         let srow = (sy * src.width as usize + (x0 - x) as usize) * 4;
         let row_bytes = ((x1 - x0) as usize) * 4;
         if opacity == 255 {
-            blit_row_opaque_scalar(&mut dst.data[drow..drow + row_bytes], &src.data[srow..srow + row_bytes]);
+            blit_row_opaque_scalar(
+                &mut dst.data[drow..drow + row_bytes],
+                &src.data[srow..srow + row_bytes],
+            );
         } else {
-            blit_row_opacity_scalar(&mut dst.data[drow..drow + row_bytes], &src.data[srow..srow + row_bytes], o);
+            blit_row_opacity_scalar(
+                &mut dst.data[drow..drow + row_bytes],
+                &src.data[srow..srow + row_bytes],
+                o,
+            );
         }
     }
 }
@@ -506,7 +539,12 @@ fn blit_over_clipped_simd_matches_scalar_exhaustively() {
                 px[3] = 0;
             }
             // Pixels 24..32: extreme channel values
-            for (k, px) in src_row[96..128].as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            for (k, px) in src_row[96..128]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 let v = [0u8, 1, 127, 128, 254, 255, 255, 1][k];
                 *px = [v, 255 - v, v, [0, 1, 127, 128, 254, 255, 1, 254][k]];
             }
@@ -578,7 +616,10 @@ fn blit_over_clipped_simd_matches_scalar_exhaustively() {
             let mut want = dst_base.clone();
             got.blit_over_clipped(&src, x, y, op, max_w);
             blit_over_clipped_scalar_ref(&mut want, &src, x, y, op, max_w);
-            assert_eq!(got.data, want.data, "clipped x={x} y={y} op={op} max_w={max_w:?}");
+            assert_eq!(
+                got.data, want.data,
+                "clipped x={x} y={y} op={op} max_w={max_w:?}"
+            );
         }
     }
 }
@@ -587,10 +628,24 @@ fn blit_over_clipped_simd_matches_scalar_exhaustively() {
 fn universal_from_simd_matches_original_scalar() {
     let mut seed = 777u64;
     for pixels in [0usize, 1, 7, 8, 9, 17, 33, 257] {
-        let a = Pixmap { width: pixels as u32, height: 1, data: lcg_bytes(&mut seed, pixels * 4) };
-        let b = Pixmap { width: pixels as u32, height: 1, data: lcg_bytes(&mut seed, pixels * 4) };
+        let a = Pixmap {
+            width: pixels as u32,
+            height: 1,
+            data: lcg_bytes(&mut seed, pixels * 4),
+        };
+        let b = Pixmap {
+            width: pixels as u32,
+            height: 1,
+            data: lcg_bytes(&mut seed, pixels * 4),
+        };
         let rule: Vec<u8> = (0..pixels).map(|i| (i % 256) as u8).collect();
-        for &(t, vague) in &[(0.0f32, 1.0f32), (0.25, 16.0), (0.5, 64.0), (0.75, 255.0), (1.0, 0.5)] {
+        for &(t, vague) in &[
+            (0.0f32, 1.0f32),
+            (0.25, 16.0),
+            (0.5, 64.0),
+            (0.75, 255.0),
+            (1.0, 0.5),
+        ] {
             let mut want = vec![0u8; pixels * 4];
             let v = vague.max(1.0);
             let phase_q8 = (t.clamp(0.0, 1.0) * (255.0 + v) * 256.0) as i64;
@@ -600,12 +655,17 @@ fn universal_from_simd_matches_original_scalar() {
                 let t256 = ((diff_q8 * recip_q16) >> 16).clamp(0, 256) as u32;
                 let inv = 256 - t256;
                 for c in 0..4 {
-                    want[i * 4 + c] = ((a.data[i * 4 + c] as u32 * inv + b.data[i * 4 + c] as u32 * t256) >> 8) as u8;
+                    want[i * 4 + c] = ((a.data[i * 4 + c] as u32 * inv
+                        + b.data[i * 4 + c] as u32 * t256)
+                        >> 8) as u8;
                 }
             }
             let mut got = Pixmap::new(pixels as u32, 1);
             got.universal_from(&a, &b, &rule, t, vague);
-            assert_eq!(got.data, want, "universal pixels={pixels} t={t} vague={vague}");
+            assert_eq!(
+                got.data, want,
+                "universal pixels={pixels} t={t} vague={vague}"
+            );
         }
     }
 }

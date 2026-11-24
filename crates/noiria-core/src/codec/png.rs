@@ -45,7 +45,8 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     let mut idat_buf: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
-        let len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let ctype = &data[pos + 4..pos + 8];
         let body_start = pos + 8;
         ensure!(
@@ -72,7 +73,12 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
             }
             b"PLTE" => {
                 ensure!(len.is_multiple_of(3), "PLTE 長が不正");
-                palette = body.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect();
+                palette = body
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| [c[0], c[1], c[2]])
+                    .collect();
             }
             b"tRNS" => trns = body.to_vec(),
             b"IDAT" => {
@@ -124,12 +130,9 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     );
     let stride = w * channels;
     let expected = h * (stride + 1);
-    let raw = zlib_decompress_limited_with_capacity(
-        idat,
-        expected.saturating_add(IDAT_SLACK),
-        expected,
-    )
-    .context("IDAT の展開に失敗")?;
+    let raw =
+        zlib_decompress_limited_with_capacity(idat, expected.saturating_add(IDAT_SLACK), expected)
+            .context("IDAT の展開に失敗")?;
     ensure!(
         raw.len() >= expected,
         "画像データが不足しています (期待 {} 実際 {})",
@@ -224,7 +227,13 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-fn unfilter_row(filter: u8, row: &[u8], prev: &[u8], channels: usize, dst: &mut [u8]) -> Result<()> {
+fn unfilter_row(
+    filter: u8,
+    row: &[u8],
+    prev: &[u8],
+    channels: usize,
+    dst: &mut [u8],
+) -> Result<()> {
     let stride = row.len();
     match filter {
         0 => dst.copy_from_slice(row),
@@ -262,7 +271,13 @@ fn unfilter_row(filter: u8, row: &[u8], prev: &[u8], channels: usize, dst: &mut 
 }
 
 /// 1 行に 5 種類のフィルタ (None/Sub/Up/Average/Paeth) を適用しつつ MSAD コストも同時に計算する。
-fn apply_filter_and_msad(filter: u8, row: &[u8], prev: &[u8], channels: usize, out: &mut [u8]) -> u64 {
+fn apply_filter_and_msad(
+    filter: u8,
+    row: &[u8],
+    prev: &[u8],
+    channels: usize,
+    out: &mut [u8],
+) -> u64 {
     #[inline(always)]
     fn cost_byte(b: u8) -> u64 {
         (b as i8).unsigned_abs() as u64
@@ -848,7 +863,11 @@ mod tests {
         ihdr.extend_from_slice(&(h as u32).to_be_bytes());
         ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
         write_chunk(&mut out, b"IHDR", &ihdr);
-        write_chunk(&mut out, b"PLTE", &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+        write_chunk(
+            &mut out,
+            b"PLTE",
+            &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+        );
         write_chunk(&mut out, b"tRNS", &[255, 128]);
         write_chunk(&mut out, b"IDAT", &zlib_compress(&raw));
         write_chunk(&mut out, b"IEND", &[]);

@@ -82,7 +82,10 @@ pub struct Imdct {
 
 impl Imdct {
     pub fn new(n: usize) -> Self {
-        assert!(n >= 8 && n.is_power_of_two(), "IMDCT size must be power of 2 >= 8, got {n}");
+        assert!(
+            n >= 8 && n.is_power_of_two(),
+            "IMDCT size must be power of 2 >= 8, got {n}"
+        );
         let n4 = n / 4;
         let mut tw_re = Vec::with_capacity(n4);
         let mut tw_im = Vec::with_capacity(n4);

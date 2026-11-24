@@ -195,8 +195,12 @@ fn key_in_binary(bytes: &[u8]) -> [u8; 32] {
 /// `dir` の exe が持つ鍵で同じフォルダの `game.pak` が開けること（配布物として整合していること）。
 fn assert_dir_is_consistent(dir: &Path, exe: &str) {
     let key = key_in_binary(&fs::read(dir.join(exe)).unwrap());
-    noiria_core::pak::Pak::open_file(dir.join("game.pak"), &key)
-        .unwrap_or_else(|e| panic!("{} の exe と game.pak の鍵が食い違っています: {e:#}", dir.display()));
+    noiria_core::pak::Pak::open_file(dir.join("game.pak"), &key).unwrap_or_else(|e| {
+        panic!(
+            "{} の exe と game.pak の鍵が食い違っています: {e:#}",
+            dir.display()
+        )
+    });
 }
 
 #[test]
@@ -274,7 +278,10 @@ fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .map(|e| {
             let e = e.unwrap();
-            (e.file_name().to_string_lossy().into_owned(), fs::read(e.path()).unwrap())
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
         })
         .collect();
     v.sort();
@@ -295,22 +302,26 @@ fn write_failure_midway_leaves_previous_output_intact_and_no_work_dirs() {
     let before_windows = snapshot(&out.join("windows"));
     let before_linux = snapshot(&out.join("linux"));
 
-    let err = noiria_tools::export::run_export_with_writer(&opts, ExportPolicy::Strict, &mut |p, b| {
-        if p.file_name().is_some_and(|n| n == "game.pak") {
-            Err(std::io::Error::other("disk full (injected)"))
-        } else {
-            fs::write(p, b)
-        }
-    })
-    .err()
-    .expect("injected failure must surface");
+    let err =
+        noiria_tools::export::run_export_with_writer(&opts, ExportPolicy::Strict, &mut |p, b| {
+            if p.file_name().is_some_and(|n| n == "game.pak") {
+                Err(std::io::Error::other("disk full (injected)"))
+            } else {
+                fs::write(p, b)
+            }
+        })
+        .err()
+        .expect("injected failure must surface");
 
     assert!(format!("{err:#}").contains("game.pak"));
     assert_eq!(snapshot(&out.join("windows")), before_windows);
     assert_eq!(snapshot(&out.join("linux")), before_linux);
     assert_eq!(
         output_file_names(&out),
-        ["linux", "windows"].into_iter().map(str::to_string).collect(),
+        ["linux", "windows"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         "作業ディレクトリ（*.tmp / *.old）が残っている"
     );
     assert_dir_is_consistent(&out.join("windows"), "demo.exe");
@@ -332,7 +343,10 @@ fn stale_work_dirs_from_a_crashed_run_are_cleaned_up() {
     run_export(&options(&game, &out, &windows_bin, &linux_bin)).unwrap();
     assert_eq!(
         output_file_names(&out),
-        ["linux", "windows"].into_iter().map(str::to_string).collect()
+        ["linux", "windows"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     );
 }
 
@@ -359,25 +373,48 @@ fn game_json_pack_exclude_flows_through_export_and_cli_reports_the_breakdown() {
             .arg(&game)
             .arg("--out")
             .arg(&out)
-            .args(["--targets", "windows", "--exe-name", "demo", "--no-webp", "--no-flac"])
+            .args([
+                "--targets",
+                "windows",
+                "--exe-name",
+                "demo",
+                "--no-webp",
+                "--no-flac",
+            ])
             .arg("--bin-windows")
             .arg(&windows_bin)
             .args(["--exclude", "scratch.txt", "--list", "--list-excluded"])
             .args(extra)
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
 
     let stdout = run(&[]);
     assert!(stdout.contains("エントリ数 1,"), "{stdout}");
-    assert!(stdout.contains("除外 3 件（default 1 / project 1 / cli 1 / output 0）"), "{stdout}");
-    assert!(stdout.contains("autotest/a.txt  (project: autotest/**)"), "{stdout}");
-    assert!(stdout.contains("scratch.txt  (cli: scratch.txt)"), "{stdout}");
+    assert!(
+        stdout.contains("除外 3 件（default 1 / project 1 / cli 1 / output 0）"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("autotest/a.txt  (project: autotest/**)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("scratch.txt  (cli: scratch.txt)"),
+        "{stdout}"
+    );
     assert!(stdout.contains(".hidden  (default: .*)"), "{stdout}");
 
     let stdout = run(&["--no-project-excludes", "--no-default-excludes"]);
     assert!(stdout.contains("エントリ数 3,"), "{stdout}");
-    assert!(stdout.contains("除外 1 件（default 0 / project 0 / cli 1 / output 0）"), "{stdout}");
+    assert!(
+        stdout.contains("除外 1 件（default 0 / project 0 / cli 1 / output 0）"),
+        "{stdout}"
+    );
 }

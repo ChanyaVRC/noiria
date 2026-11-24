@@ -63,7 +63,10 @@ pub(crate) fn op_audio_volume(
 }
 
 #[op2(fast)]
-pub(crate) fn op_audio_is_playing(state: &mut OpState, #[string] ch: &str) -> Result<bool, JsErrorBox> {
+pub(crate) fn op_audio_is_playing(
+    state: &mut OpState,
+    #[string] ch: &str,
+) -> Result<bool, JsErrorBox> {
     state
         .borrow::<EngineState>()
         .audio_is_playing(ch)
@@ -71,7 +74,10 @@ pub(crate) fn op_audio_is_playing(state: &mut OpState, #[string] ch: &str) -> Re
 }
 
 #[op2(fast)]
-pub(crate) fn op_audio_position(state: &mut OpState, #[string] ch: &str) -> Result<f64, JsErrorBox> {
+pub(crate) fn op_audio_position(
+    state: &mut OpState,
+    #[string] ch: &str,
+) -> Result<f64, JsErrorBox> {
     state
         .borrow::<EngineState>()
         .audio_position(ch)
@@ -104,7 +110,10 @@ pub(crate) fn op_audio_fade_to(
 }
 
 #[op2(fast)]
-pub(crate) fn op_audio_is_fading(state: &mut OpState, #[string] ch: &str) -> Result<bool, JsErrorBox> {
+pub(crate) fn op_audio_is_fading(
+    state: &mut OpState,
+    #[string] ch: &str,
+) -> Result<bool, JsErrorBox> {
     state
         .borrow::<EngineState>()
         .audio_is_fading(ch)
@@ -112,7 +121,10 @@ pub(crate) fn op_audio_is_fading(state: &mut OpState, #[string] ch: &str) -> Res
 }
 
 #[op2(fast)]
-pub(crate) fn op_audio_is_finished(state: &mut OpState, #[string] ch: &str) -> Result<bool, JsErrorBox> {
+pub(crate) fn op_audio_is_finished(
+    state: &mut OpState,
+    #[string] ch: &str,
+) -> Result<bool, JsErrorBox> {
     state
         .borrow::<EngineState>()
         .audio_is_finished(ch)

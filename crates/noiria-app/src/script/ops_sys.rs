@@ -166,7 +166,12 @@ pub(crate) fn op_prefetch_save_thumbs(state: &mut OpState, w: f64, h: f64) {
 
 /// ゲーム資産の画像（改行区切りのパス）を w x h の縮小サムネイルにして別スレッドで先に作っておく。
 #[op2(fast)]
-pub(crate) fn op_prefetch_images_scaled(state: &mut OpState, #[string] paths: &str, w: f64, h: f64) {
+pub(crate) fn op_prefetch_images_scaled(
+    state: &mut OpState,
+    #[string] paths: &str,
+    w: f64,
+    h: f64,
+) {
     let list = paths
         .split('\u{a}')
         .filter(|p| !p.is_empty())

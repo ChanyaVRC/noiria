@@ -749,8 +749,8 @@ impl Mixer {
         out_channels: u16,
         out_rate: u32,
     ) -> PreparedSource {
-        let start_frame =
-            ((start_position_ms as u128 * out_rate.max(1) as u128) / 1000).min(u64::MAX as u128) as u64;
+        let start_frame = ((start_position_ms as u128 * out_rate.max(1) as u128) / 1000)
+            .min(u64::MAX as u128) as u64;
         let past_known_end = source
             .frame_count_upper_bound()
             .is_some_and(|upper_bound| start_frame > upper_bound);
@@ -1907,7 +1907,9 @@ mod tests {
             0.4,
             7,
         );
-        let blocks = [1usize, 7, 64, 255, 256, 257, 1000, 3, 513, 2000, 31, 4096, 9, 700];
+        let blocks = [
+            1usize, 7, 64, 255, 256, 257, 1000, 3, 513, 2000, 31, 4096, 9, 700,
+        ];
         let mut h = 0xcbf29ce484222325u64;
         for (i, &frames) in blocks.iter().cycle().take(40).enumerate() {
             match i {
@@ -1925,7 +1927,9 @@ mod tests {
             m.mix_into(&mut out);
             fnv_bits(&mut h, &out);
             for ch in 0..5 {
-                h ^= (m.position_ms(ch) << 3) ^ ((m.is_playing(ch) as u64) << 1) ^ m.is_finished(ch) as u64;
+                h ^= (m.position_ms(ch) << 3)
+                    ^ ((m.is_playing(ch) as u64) << 1)
+                    ^ m.is_finished(ch) as u64;
                 h = h.wrapping_mul(0x100000001b3);
             }
         }
@@ -2009,7 +2013,10 @@ mod tests {
         let mut m = Mixer::new(2, 48000);
         let t = std::time::Instant::now();
         m.play_from_ms(0, src, true, 1.0, 0, 60_000);
-        eprintln!("BENCH play_from_ms(60s) total: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+        eprintln!(
+            "BENCH play_from_ms(60s) total: {:.2} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
 
     #[test]
@@ -2026,7 +2033,11 @@ mod tests {
         m.set_volume(0, 1.0);
         let mut next = vec![0.0; 1];
         m.mix_into(&mut next);
-        assert_eq!(next, vec![0.005], "一時停止点の続き（先読みで捨てていない）");
+        assert_eq!(
+            next,
+            vec![0.005],
+            "一時停止点の続き（先読みで捨てていない）"
+        );
     }
 
     /// 1 フレームずつ（`next_sample`）読み捨てた場合との同値性:
@@ -2057,14 +2068,22 @@ mod tests {
                 let mut slow = mk();
                 let ok_fast = fast.skip_samples(start * 2);
                 let ok_slow = (0..start * 2).all(|_| slow.next_sample().is_some());
-                assert_eq!(ok_fast, ok_slow, "可否 in={in_rate} out={out_rate} start={start}");
+                assert_eq!(
+                    ok_fast, ok_slow,
+                    "可否 in={in_rate} out={out_rate} start={start}"
+                );
                 if !ok_slow {
                     continue;
                 }
                 let a: Vec<Option<f32>> = (0..60).map(|_| fast.next_sample()).collect();
                 let b: Vec<Option<f32>> = (0..60).map(|_| slow.next_sample()).collect();
-                let bits = |v: &[Option<f32>]| v.iter().map(|x| x.map(f32::to_bits)).collect::<Vec<_>>();
-                assert_eq!(bits(&a), bits(&b), "後続出力 in={in_rate} out={out_rate} start={start}");
+                let bits =
+                    |v: &[Option<f32>]| v.iter().map(|x| x.map(f32::to_bits)).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(&a),
+                    bits(&b),
+                    "後続出力 in={in_rate} out={out_rate} start={start}"
+                );
             }
         }
     }

@@ -315,7 +315,10 @@ impl AlsaOutput {
             "snd_pcm_hw_params_malloc に失敗: {}",
             strerror(&syms, ret)
         );
-        ensure!(!params.is_null(), "snd_pcm_hw_params_malloc が null を返しました");
+        ensure!(
+            !params.is_null(),
+            "snd_pcm_hw_params_malloc が null を返しました"
+        );
         let _params_guard = HwParamsGuard {
             free_fn: syms.hw_params_free,
             params,
@@ -610,7 +613,10 @@ fn pump(
             }
             let prepared = io.prepare();
             if prepared as c_long == ENODEV {
-                bail!("ALSA デバイスが失われました（prepare: {}）", io.strerror(prepared));
+                bail!(
+                    "ALSA デバイスが失われました（prepare: {}）",
+                    io.strerror(prepared)
+                );
             }
         }
     }

@@ -239,9 +239,20 @@ fn b2_menu_save_uses_pre_menu_thumbnail_and_confirms_overwrite() {
             CLICK,
         ],
         |log, e| {
-            assert_eq!(count(log, "thumb_capture"), 1, "{e}: メニューを開く時の 1 回だけ撮る: {log:#?}");
-            assert!(pos(log, "thumb_capture") < pos(log, "save_list"), "{e}: 一覧より前に撮る");
-            assert_eq!(count(log, "save_write save1"), 2, "{e}: 1 回目 + 「はい」の上書き: {log:#?}");
+            assert_eq!(
+                count(log, "thumb_capture"),
+                1,
+                "{e}: メニューを開く時の 1 回だけ撮る: {log:#?}"
+            );
+            assert!(
+                pos(log, "thumb_capture") < pos(log, "save_list"),
+                "{e}: 一覧より前に撮る"
+            );
+            assert_eq!(
+                count(log, "save_write save1"),
+                2,
+                "{e}: 1 回目 + 「はい」の上書き: {log:#?}"
+            );
             assert_eq!(count(log, "thumb_save save1"), 2, "{e}");
             assert_log_contains(log, &printed("No.01 を上書きしますか？"));
             assert_log_contains(log, &printed("セーブしました"));
@@ -262,7 +273,7 @@ fn b2_menu_load_lists_thumbnail_and_loads_after_confirm() {
             Step::Key("Escape"),
             CLICK, // A → B
             Step::Key("Escape"),
-            Step::Click(300.0, 45.0), // ロードタブ
+            Step::Click(300.0, 45.0),  // ロードタブ
             Step::Click(248.0, 102.0), // ページ 1
             CARD0,
             YES,
@@ -274,8 +285,15 @@ fn b2_menu_load_lists_thumbnail_and_loads_after_confirm() {
             assert_log_contains(log, "save_read save1");
             // 保存時のサムネイルが実際に読めている（読めなければ「NO IMAGE」の枠になる）。
             assert_log_not_contains(log, &printed("NO IMAGE"));
-            assert_log_contains(log, &printed("No.01 をロードしますか？\n現在の進行状況は失われます"));
-            assert_eq!(msg_prints(log, "A"), 2, "{e}: ロードで先頭から再生し直す: {log:#?}");
+            assert_log_contains(
+                log,
+                &printed("No.01 をロードしますか？\n現在の進行状況は失われます"),
+            );
+            assert_eq!(
+                msg_prints(log, "A"),
+                2,
+                "{e}: ロードで先頭から再生し直す: {log:#?}"
+            );
             assert_log_not_contains(log, "log error");
         },
     );
@@ -299,7 +317,11 @@ fn b2_menu_delete_slot_confirms_then_deletes() {
             CLICK,
         ],
         |log, e| {
-            assert_eq!(count(log, "save_delete save1"), 1, "{e}: 「いいえ」では消さない: {log:#?}");
+            assert_eq!(
+                count(log, "save_delete save1"),
+                1,
+                "{e}: 「いいえ」では消さない: {log:#?}"
+            );
             assert_log_contains(log, &printed("No.01 を削除しますか？"));
         },
     );
@@ -310,7 +332,10 @@ fn b2_menu_delete_slot_confirms_then_deletes() {
 fn b2_load_restores_backlog_from_save_time() {
     let frag = "[name text=ひなた]こんにちは[p][cm]\n*second\n[save place=3]\n[if exp=\"!sf.loaded\"][eval exp=\"sf.loaded = true\"][eval exp=\"sys.player.backlog = []\"][load place=3][endif]\n[emb exp=\"'BL='+JSON.stringify(sys.player.backlog)\"][l]";
     on_both(frag, Setup::default(), &[CLICK, CLICK], |log, _| {
-        assert_log_contains(log, r#"BL=[{\"text\":\"こんにちは\",\"name\":\"ひなた\",\"voice\":null}]"#);
+        assert_log_contains(
+            log,
+            r#"BL=[{\"text\":\"こんにちは\",\"name\":\"ひなた\",\"voice\":null}]"#,
+        );
     });
 }
 
@@ -363,19 +388,22 @@ fn b2_settings_keyboard_adjusts_values_and_reset_restores_defaults() {
             SYNC,
             Step::Key("Escape"),
             Step::Key("Tab"),
-            Step::Key("Tab"), // 設定タブ
+            Step::Key("Tab"),        // 設定タブ
             Step::Key("ArrowRight"), // BGM 90
             Step::Key("ArrowDown"),
             Step::Key("ArrowDown"),
             Step::Key("ArrowDown"),
             Step::Key("ArrowDown"),
             Step::Key("ArrowDown"), // 行 5: 未読もスキップ
-            Step::Key("Enter"), // する
+            Step::Key("Enter"),     // する
             Step::Key("ArrowDown"), // 行 6: 窓の濃さ
             Step::Key("ArrowLeft"), // 90
             SYNC,
             Step::Check(|log| {
-                assert!(count(log, "layer_msgbox 3 fore") >= 2, "窓が描き直される: {log:#?}");
+                assert!(
+                    count(log, "layer_msgbox 3 fore") >= 2,
+                    "窓が描き直される: {log:#?}"
+                );
             }),
             Step::Key("Escape"),
             CLICK,
@@ -431,17 +459,27 @@ fn b2_menu_back_to_title_jumps_after_confirm() {
             Step::Key("Escape"),
             Step::Click(150.0, 670.0), // タイトルへ戻る
             SYNC,
-            Step::Check(|log| assert_log_contains(log, &printed("タイトルへ戻りますか？\n保存していない進行状況は失われます"))),
+            Step::Check(|log| {
+                assert_log_contains(
+                    log,
+                    &printed("タイトルへ戻りますか？\n保存していない進行状況は失われます"),
+                )
+            }),
             YES,
             CLICK, // AT_TITLE の待ち
             CLICK, // その先の BODY
         ],
         |log, _| assert_log_contains(log, &printed("AT_TITLE")),
     );
-    on_both("A[l]", Setup::default(), &[SYNC, Step::Key("Escape"), Step::Key("Escape"), CLICK], |log, _| {
-        assert_log_not_contains(log, "タイトルへ戻る");
-        assert_log_contains(log, "ゲームを終了");
-    });
+    on_both(
+        "A[l]",
+        Setup::default(),
+        &[SYNC, Step::Key("Escape"), Step::Key("Escape"), CLICK],
+        |log, _| {
+            assert_log_not_contains(log, "タイトルへ戻る");
+            assert_log_contains(log, "ゲームを終了");
+        },
+    );
 }
 
 /// 「ゲームを終了」は確認の後で終了する。
@@ -450,7 +488,14 @@ fn b2_menu_quit_asks_for_confirmation() {
     on_both(
         "A[l]",
         Setup::default(),
-        &[SYNC, Step::Key("Escape"), Step::Click(150.0, 670.0), NO, Step::Click(150.0, 670.0), YES],
+        &[
+            SYNC,
+            Step::Key("Escape"),
+            Step::Click(150.0, 670.0),
+            NO,
+            Step::Click(150.0, 670.0),
+            YES,
+        ],
         |log, _| {
             assert_eq!(count(log, "ゲームを終了しますか？"), 2, "{log:#?}");
             assert_log_contains(log, "quit");
@@ -466,19 +511,34 @@ fn b2_menu_quit_asks_for_confirmation() {
 #[test]
 fn b2_choice_screen_autosaves_unless_disabled() {
     let choice = "本文[p][cm]\n[link target=*a]はい[endlink][r][link target=*b]いいえ[endlink]\n[s]\n*a\nA[l][close]\n*b\nB[l][close]";
-    on_both(choice, Setup::default(), &[CLICK, SYNC, Step::Click(90.0, 525.0), CLICK], |log, e| {
-        assert_log_contains(log, "save_write auto");
-        assert_log_contains(log, "thumb_save auto");
-        assert_eq!(count(log, "save_write auto"), 1, "{e}");
-    });
+    on_both(
+        choice,
+        Setup::default(),
+        &[CLICK, SYNC, Step::Click(90.0, 525.0), CLICK],
+        |log, e| {
+            assert_log_contains(log, "save_write auto");
+            assert_log_contains(log, "thumb_save auto");
+            assert_eq!(count(log, "save_write auto"), 1, "{e}");
+        },
+    );
     let off = format!("[autosave enabled=false]{choice}");
-    on_both(&off, Setup::default(), &[CLICK, SYNC, Step::Click(90.0, 525.0), CLICK], |log, _| {
-        assert_log_not_contains(log, "save_write auto");
-    });
+    on_both(
+        &off,
+        Setup::default(),
+        &[CLICK, SYNC, Step::Click(90.0, 525.0), CLICK],
+        |log, _| {
+            assert_log_not_contains(log, "save_write auto");
+        },
+    );
     // リンクの無い [s]（ボタン待ち等）では保存しない。
-    on_both("A[s]", Setup::default(), &[SYNC, Step::Key("WindowClose")], |log, _| {
-        assert_log_not_contains(log, "save_write auto");
-    });
+    on_both(
+        "A[s]",
+        Setup::default(),
+        &[SYNC, Step::Key("WindowClose")],
+        |log, _| {
+            assert_log_not_contains(log, "save_write auto");
+        },
+    );
 }
 
 // =====================================================================
@@ -502,7 +562,9 @@ fn b2_system_buttons_are_off_by_default_and_listed_when_enabled() {
         assert_log_count(log, "layer_new text", 1);
     });
     on_both("A[l]", BAR_OPT, &[CLICK], |log, _| {
-        for label in ["Q.SAVE", "Q.LOAD", "SAVE", "LOAD", "AUTO", "SKIP", "LOG", "MENU"] {
+        for label in [
+            "Q.SAVE", "Q.LOAD", "SAVE", "LOAD", "AUTO", "SKIP", "LOG", "MENU",
+        ] {
             assert_log_contains(log, &printed(label));
         }
     });
@@ -530,15 +592,25 @@ fn b2_bar_click_does_not_advance_text_and_bar_sits_above_window() {
             // バー（z=106）の 8 個のレイヤは、すべて窓の上辺（高さ 203 の窓で top=493）より上に収まる。
             let tops: Vec<i32> = log
                 .iter()
-                .filter(|l| l.starts_with("layer_set_props") && l.contains(" fore ") && l.contains("z: Some(106)"))
+                .filter(|l| {
+                    l.starts_with("layer_set_props")
+                        && l.contains(" fore ")
+                        && l.contains("z: Some(106)")
+                })
                 .map(|l| {
                     let at = l.find("y: Some(").expect("y が無い") + "y: Some(".len();
                     l[at..].split(')').next().unwrap().parse::<i32>().unwrap()
                 })
                 .collect();
             assert_eq!(tops.len(), 8, "{e}: {log:#?}");
-            assert!(tops.iter().all(|y| y + 28 < 493), "{e}: バーが窓内に入っている: {tops:?}");
-            assert!(tops.iter().all(|y| *y == 493 - 4 - 28), "{e}: 窓の 4px 上に下端: {tops:?}");
+            assert!(
+                tops.iter().all(|y| y + 28 < 493),
+                "{e}: バーが窓内に入っている: {tops:?}"
+            );
+            assert!(
+                tops.iter().all(|y| *y == 493 - 4 - 28),
+                "{e}: 窓の 4px 上に下端: {tops:?}"
+            );
         },
     );
 }
@@ -567,11 +639,16 @@ fn b2_bar_hides_with_message_window_and_sysbar_tag() {
         "[layopt layer=message0 visible=false]A[l]B[l]",
         "[sysbar visible=false]A[l]B[l]",
     ] {
-        on_both(frag, BAR_OPT, &[SYNC, Step::Click(800.0, 462.0), CLICK], |log, _| {
-            // 1 回目のクリック（バーの位置）で既に B まで進んでいる = バーに奪われていない。
-            assert_log_contains(log, &printed("B"));
-            assert_log_not_contains(log, "クイックセーブがありません");
-        });
+        on_both(
+            frag,
+            BAR_OPT,
+            &[SYNC, Step::Click(800.0, 462.0), CLICK],
+            |log, _| {
+                // 1 回目のクリック（バーの位置）で既に B まで進んでいる = バーに奪われていない。
+                assert_log_contains(log, &printed("B"));
+                assert_log_not_contains(log, "クイックセーブがありません");
+            },
+        );
     }
     // 右クリックで窓を隠している間は、バーの位置のクリックは「窓を戻す」だけ（AUTO は入らない）。
     on_both(
@@ -599,7 +676,13 @@ fn b2_bar_hides_with_message_window_and_sysbar_tag() {
 fn b2_position_color_margins_and_frame_attributes() {
     let frag = "[position color=0xff8000 marginl=50 marginr=60 margint=10 marginb=20][emb exp=\"JSON.stringify(sys.player.msgLayers[0].cfg)\"][l]";
     on_both(frag, Setup::default(), &[CLICK], |log, _| {
-        for n in [r#"\"marginX\":50"#, r#"\"marginR\":60"#, r#"\"marginY\":10"#, r#"\"marginB\":20"#, r#"\"color\":[255,128,0,195]"#] {
+        for n in [
+            r#"\"marginX\":50"#,
+            r#"\"marginR\":60"#,
+            r#"\"marginY\":10"#,
+            r#"\"marginB\":20"#,
+            r#"\"color\":[255,128,0,195]"#,
+        ] {
             assert_log_contains(log, n);
         }
     });
@@ -670,9 +753,14 @@ fn b2_name_plate_text_color_option() {
     on_both("[name text=アリス]A[l]", setup, &[CLICK], |log, _| {
         assert_log_contains(log, "color: Some([1, 2, 3, 255])");
     });
-    on_both("[name text=アリス]A[l]", Setup::default(), &[CLICK], |log, _| {
-        assert_log_not_contains(log, "color: Some([1, 2, 3, 255])");
-    });
+    on_both(
+        "[name text=アリス]A[l]",
+        Setup::default(),
+        &[CLICK],
+        |log, _| {
+            assert_log_not_contains(log, "color: Some([1, 2, 3, 255])");
+        },
+    );
 }
 
 // =====================================================================
@@ -684,7 +772,10 @@ fn b2_name_plate_text_color_option() {
 fn b2_backlog_records_speaker_name_and_voice() {
     let frag = "[name text=ひなた][playvoice storage=\"v1.ogg\"]こんにちは[p][cm][name]地の文[p][cm][emb exp=\"JSON.stringify(sys.player.backlog)\"][l]";
     on_both(frag, Setup::default(), &[CLICK, CLICK, CLICK], |log, _| {
-        assert_log_contains(log, r#"\"text\":\"こんにちは\",\"name\":\"ひなた\",\"voice\":\"assets/voice/v1.ogg\""#);
+        assert_log_contains(
+            log,
+            r#"\"text\":\"こんにちは\",\"name\":\"ひなた\",\"voice\":\"assets/voice/v1.ogg\""#,
+        );
         assert_log_contains(log, r#"\"text\":\"地の文\",\"name\":null,\"voice\":null"#);
     });
 }
@@ -692,7 +783,8 @@ fn b2_backlog_records_speaker_name_and_voice() {
 /// 履歴のボイスつきの行はクリックで再生される（閉じない）。それ以外のクリックで閉じる。
 #[test]
 fn b2_backlog_click_replays_voice_and_blank_click_closes() {
-    let frag = "[name text=ひなた][playvoice storage=\"v1.ogg\"]こんにちは[p][cm][showhistory]AFTER[l]";
+    let frag =
+        "[name text=ひなた][playvoice storage=\"v1.ogg\"]こんにちは[p][cm][showhistory]AFTER[l]";
     on_both(
         frag,
         Setup::default(),
@@ -702,7 +794,11 @@ fn b2_backlog_click_replays_voice_and_blank_click_closes() {
             Step::Click(95.0, 112.0), // 履歴の本文の 1 文字目 → ボイス再生
             SYNC,
             Step::Check(|log| {
-                assert_eq!(count(log, "audio_play voice assets/voice/v1.ogg"), 2, "{log:#?}");
+                assert_eq!(
+                    count(log, "audio_play voice assets/voice/v1.ogg"),
+                    2,
+                    "{log:#?}"
+                );
                 assert_log_not_contains(log, &printed("AFTER"));
             }),
             Step::Click(1000.0, 500.0), // 余白 → 閉じる
@@ -737,7 +833,9 @@ fn b2_backlog_keys_scroll_and_header_shows_position() {
         Step::Key("Escape"),
         CLICK,
     ]);
-    on_both(&frag, Setup::default(), &steps, |log, _| assert_log_contains(log, &printed("DONE")));
+    on_both(&frag, Setup::default(), &steps, |log, _| {
+        assert_log_contains(log, &printed("DONE"))
+    });
 }
 
 // =====================================================================
@@ -754,17 +852,45 @@ const LINKS: &str = "[link target=*a]あ[endlink][r][link target=*b]い[endlink]
 /// ↑↓ でリンクを選び Enter で決定できる（端はループ）。
 #[test]
 fn b2_links_are_selectable_by_keyboard() {
-    on_both(LINKS, Setup::default(), &[SYNC, Step::Key("ArrowDown"), Step::Key("ArrowDown"), Step::Key("Enter"), CLICK], |log, _| {
-        assert_log_contains(log, &printed("GOT_B"));
-        assert_log_not_contains(log, &printed("GOT_A"));
-    });
-    on_both(LINKS, Setup::default(), &[SYNC, Step::Key("ArrowDown"), Step::Key("ArrowDown"), Step::Key("ArrowUp"), Step::Key("Enter"), CLICK], |log, _| {
-        assert_log_contains(log, &printed("GOT_A"));
-    });
+    on_both(
+        LINKS,
+        Setup::default(),
+        &[
+            SYNC,
+            Step::Key("ArrowDown"),
+            Step::Key("ArrowDown"),
+            Step::Key("Enter"),
+            CLICK,
+        ],
+        |log, _| {
+            assert_log_contains(log, &printed("GOT_B"));
+            assert_log_not_contains(log, &printed("GOT_A"));
+        },
+    );
+    on_both(
+        LINKS,
+        Setup::default(),
+        &[
+            SYNC,
+            Step::Key("ArrowDown"),
+            Step::Key("ArrowDown"),
+            Step::Key("ArrowUp"),
+            Step::Key("Enter"),
+            CLICK,
+        ],
+        |log, _| {
+            assert_log_contains(log, &printed("GOT_A"));
+        },
+    );
     // 未選択で ↑ は末尾から。
-    on_both(LINKS, Setup::default(), &[SYNC, Step::Key("ArrowUp"), Step::Key("Enter"), CLICK], |log, _| {
-        assert_log_contains(log, &printed("GOT_B"));
-    });
+    on_both(
+        LINKS,
+        Setup::default(),
+        &[SYNC, Step::Key("ArrowUp"), Step::Key("Enter"), CLICK],
+        |log, _| {
+            assert_log_contains(log, &printed("GOT_B"));
+        },
+    );
 }
 
 /// sound.hover は選択の移動で、sound.click は決定で鳴る。未指定なら hover は鳴らず click は従来の click.wav。
@@ -774,13 +900,27 @@ fn b2_link_sounds_follow_sound_option() {
         player_opts: r#"sound: { hover: "h.wav", click: "c.wav" }"#,
         ..Setup::default()
     };
-    on_both(LINKS, setup, &[SYNC, Step::Key("ArrowDown"), Step::Key("Enter"), CLICK], |log, _| {
-        assert_eq!(count(log, "audio_play se assets/se/h.wav"), 1, "{log:#?}");
-        assert_eq!(count(log, "audio_play se assets/se/c.wav"), 1, "{log:#?}");
-        assert_log_not_contains(log, "assets/se/click.wav");
-    });
-    on_both(LINKS, Setup::default(), &[SYNC, Step::Key("ArrowDown"), Step::Key("Enter"), CLICK], |log, _| {
-        assert_eq!(count(log, "audio_play se"), 1, "hover は鳴らさない: {log:#?}");
-        assert_log_contains(log, "audio_play se assets/se/click.wav");
-    });
+    on_both(
+        LINKS,
+        setup,
+        &[SYNC, Step::Key("ArrowDown"), Step::Key("Enter"), CLICK],
+        |log, _| {
+            assert_eq!(count(log, "audio_play se assets/se/h.wav"), 1, "{log:#?}");
+            assert_eq!(count(log, "audio_play se assets/se/c.wav"), 1, "{log:#?}");
+            assert_log_not_contains(log, "assets/se/click.wav");
+        },
+    );
+    on_both(
+        LINKS,
+        Setup::default(),
+        &[SYNC, Step::Key("ArrowDown"), Step::Key("Enter"), CLICK],
+        |log, _| {
+            assert_eq!(
+                count(log, "audio_play se"),
+                1,
+                "hover は鳴らさない: {log:#?}"
+            );
+            assert_log_contains(log, "audio_play se assets/se/click.wav");
+        },
+    );
 }

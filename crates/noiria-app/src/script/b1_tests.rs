@@ -311,7 +311,10 @@ fn b1_rclick_call_restores_message_and_rewaits_after_return() {
             let menu = pos(&printed("MENU"), 0);
             let hello2 = pos(&printed("HELLO"), 1);
             let world = pos(&printed("WORLD"), 0);
-            assert!(hello1 < menu && menu < hello2 && hello2 < world, "{e}: {log:#?}");
+            assert!(
+                hello1 < menu && menu < hello2 && hello2 < world,
+                "{e}: {log:#?}"
+            );
         },
     );
 }
@@ -525,9 +528,17 @@ fn b1_font_face_applies_per_segment_and_resets() {
             "{e}: {}",
             line("A")
         );
-        assert!(line("B").contains("font_family: None"), "{e}: {}", line("B"));
+        assert!(
+            line("B").contains("font_family: None"),
+            "{e}: {}",
+            line("B")
+        );
         // face="user" は既定へ戻す。
-        assert!(line("C").contains("font_family: None"), "{e}: {}", line("C"));
+        assert!(
+            line("C").contains("font_family: None"),
+            "{e}: {}",
+            line("C")
+        );
         // [deffont face=] で更新した既定へ [resetfont] で戻る。
         assert!(
             line("D").contains(r#"font_family: Some("Zz Def")"#),
@@ -579,7 +590,11 @@ fn b1_click_to_advance_stops_playing_voice() {
             CLICK,
             SYNC,
             Step::Check(|log| {
-                assert_eq!(count(log, "audio_stop voice"), 2, "送りのクリックで止まる: {log:#?}");
+                assert_eq!(
+                    count(log, "audio_stop voice"),
+                    2,
+                    "送りのクリックで止まる: {log:#?}"
+                );
             }),
             CLICK,
         ],

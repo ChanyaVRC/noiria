@@ -83,9 +83,7 @@ pub fn read_slot(game_id: &str, slot: &str) -> Result<Option<String>> {
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(e).with_context(|| format!("セーブを読めません: {}", path.display()))
-        }
+        Err(e) => return Err(e).with_context(|| format!("セーブを読めません: {}", path.display())),
     };
     let valid = String::from_utf8(bytes)
         .ok()
@@ -188,7 +186,8 @@ pub fn read_thumb(
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).with_context(|| format!("サムネイルを読めません: {}", path.display()))?;
+    let bytes =
+        fs::read(&path).with_context(|| format!("サムネイルを読めません: {}", path.display()))?;
     let png = crate::codec::png::decode(&bytes)
         .with_context(|| format!("サムネイルの PNG が不正です: {}", path.display()))?;
     let mut pixmap = crate::pixmap::Pixmap::from_rgba_straight(png.width, png.height, &png.rgba);
@@ -312,7 +311,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["sys.json".to_string()], "一時ファイルが残っている");
+        assert_eq!(
+            names,
+            vec!["sys.json".to_string()],
+            "一時ファイルが残っている"
+        );
         cleanup_atomic();
     }
 
@@ -358,7 +361,10 @@ mod tests {
         // 退避後の書き込み・読み出しは通常どおり。
         write_slot(ID, "sys", "{}").unwrap();
         assert_eq!(read_slot(ID, "sys").unwrap().unwrap(), "{}");
-        assert!(dir.join("sys.json.bak").exists(), "新しい保存で .bak は消えない");
+        assert!(
+            dir.join("sys.json.bak").exists(),
+            "新しい保存で .bak は消えない"
+        );
         cleanup_corrupt();
     }
 
@@ -374,7 +380,11 @@ mod tests {
         let dir = save_dir(ID).unwrap();
         fs::write(dir.join("bad.json"), [0xff, 0xfe, 0x00]).unwrap();
         write_slot(ID, "good", "{}").unwrap();
-        let names: Vec<String> = list_slots(ID).unwrap().into_iter().map(|s| s.slot).collect();
+        let names: Vec<String> = list_slots(ID)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.slot)
+            .collect();
         assert_eq!(names, vec!["good".to_string()]);
         assert_eq!(read_slot(ID, "bad").unwrap(), None);
         assert!(dir.join("bad.json.bak").exists());
@@ -430,8 +440,14 @@ mod tests {
     fn thumb_slot_names_cannot_escape_the_save_dir() {
         let px = crate::pixmap::Pixmap::new(2, 2);
         for bad in ["../evil", "a/b", r"a\b", "..", "", "C:evil"] {
-            assert!(write_thumb("noiria-test-savedata-thumb-bad", bad, &px).is_err(), "{bad}");
-            assert!(read_thumb("noiria-test-savedata-thumb-bad", bad, 8, 8).is_err(), "{bad}");
+            assert!(
+                write_thumb("noiria-test-savedata-thumb-bad", bad, &px).is_err(),
+                "{bad}"
+            );
+            assert!(
+                read_thumb("noiria-test-savedata-thumb-bad", bad, 8, 8).is_err(),
+                "{bad}"
+            );
         }
         thumb_test_dir("noiria-test-savedata-thumb-bad");
     }
@@ -452,7 +468,10 @@ mod tests {
             "/etc/passwd",
             r"C:\Windows\x",
         ] {
-            assert!(thumb_path("noiria-test-savedata-thumb-path", bad).is_err(), "{bad}");
+            assert!(
+                thumb_path("noiria-test-savedata-thumb-path", bad).is_err(),
+                "{bad}"
+            );
         }
         let ok = thumb_path("noiria-test-savedata-thumb-path", "save_1-a").unwrap();
         assert_eq!(ok.file_name().unwrap(), "save_1-a.png");
@@ -470,7 +489,10 @@ mod tests {
         fs::create_dir(dir.join("sys.json")).unwrap();
         fs::write(dir.join("sys.json.bak"), "previous backup").unwrap();
         assert!(read_slot(ID, "sys").is_err(), "IO エラーは Err で返す");
-        assert!(dir.join("sys.json").is_dir(), "読めなかっただけのものを退避してはいけない");
+        assert!(
+            dir.join("sys.json").is_dir(),
+            "読めなかっただけのものを退避してはいけない"
+        );
         assert_eq!(
             fs::read_to_string(dir.join("sys.json.bak")).unwrap(),
             "previous backup",
@@ -518,7 +540,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["s1.png".to_string()], "一時ファイルが残っている");
+        assert_eq!(
+            names,
+            vec!["s1.png".to_string()],
+            "一時ファイルが残っている"
+        );
         thumb_test_dir(ID);
     }
 }

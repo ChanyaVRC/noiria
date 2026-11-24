@@ -17,7 +17,11 @@ pub fn draw() -> RgbaImage {
         let t = y / 256.0;
         let base = mix(col(0x16, 0x1d, 0x62), col(0x72, 0x45, 0xbc), t.powf(0.9));
         let d = (((x - 150.0) / 150.0).powi(2) + ((y - 150.0) / 130.0).powi(2)).sqrt();
-        mix(base, col(0xa0, 0x6a, 0xd8), (1.0 - d).max(0.0).powi(2) * 0.6)
+        mix(
+            base,
+            col(0xa0, 0x6a, 0xd8),
+            (1.0 - d).max(0.0).powi(2) * 0.6,
+        )
     });
     // 小さな星
     for _ in 0..46 {
@@ -32,11 +36,16 @@ pub fn draw() -> RgbaImage {
     // 三日月
     let (mx, my, mr) = (88.0f32, 96.0f32, 36.0f32);
     cv.glow(mx, my, 70.0, [1.0, 0.86, 0.55], 0.22, 2.0);
-    let moon = Mask::from_path(&Path::ellipse(mx, my, mr, mr, 0.0), (256, 256)).sub(&Mask::from_path(&Path::ellipse(mx + 17.0, my - 7.0, mr * 0.86, mr * 0.86, 0.0), (256, 256)));
+    let moon =
+        Mask::from_path(&Path::ellipse(mx, my, mr, mr, 0.0), (256, 256)).sub(&Mask::from_path(
+            &Path::ellipse(mx + 17.0, my - 7.0, mr * 0.86, mr * 0.86, 0.0),
+            (256, 256),
+        ));
     let rim = moon.dilate(2.0).sub(&moon);
     cv.fill_solid(&rim, cola(0xb0, 0x8a, 0x40, 0.8));
     cv.fill_mask(&moon, &|x, y| {
-        let t = ((x - (mx - mr)) / (2.0 * mr) * 0.5 + (y - (my - mr)) / (2.0 * mr) * 0.5).clamp(0.0, 1.0);
+        let t = ((x - (mx - mr)) / (2.0 * mr) * 0.5 + (y - (my - mr)) / (2.0 * mr) * 0.5)
+            .clamp(0.0, 1.0);
         mix(col(0xff, 0xf2, 0xc4), col(0xf2, 0xc2, 0x6a), t)
     });
     // 流れ星
@@ -53,10 +62,18 @@ pub fn draw() -> RgbaImage {
     let (sx, sy, sr) = (158.0f32, 156.0f32, 64.0f32);
     cv.glow(sx, sy, 112.0, [1.0, 0.8, 0.35], 0.42, 2.0);
     let pts = star_pts(sx, sy, sr, sr * 0.46, 0.1, 5);
-    let sm = Mask::from_path(&Path::polygon(&pts), (256, 256)).blur(1.6).scaled(1.0);
-    let sm = sm.mul(&Mask::from_path(&Path::ellipse(sx, sy, sr * 1.4, sr * 1.4, 0.0), (256, 256)));
+    let sm = Mask::from_path(&Path::polygon(&pts), (256, 256))
+        .blur(1.6)
+        .scaled(1.0);
+    let sm = sm.mul(&Mask::from_path(
+        &Path::ellipse(sx, sy, sr * 1.4, sr * 1.4, 0.0),
+        (256, 256),
+    ));
     // 角を少し丸めるため、膨張→収縮の代わりにぼかして閾値をかけたものを使う
-    let sm = Mask { a: sm.a.iter().map(|&v| smooth((v - 0.25) / 0.5)).collect(), ..sm };
+    let sm = Mask {
+        a: sm.a.iter().map(|&v| smooth((v - 0.25) / 0.5)).collect(),
+        ..sm
+    };
     let ring = sm.dilate(3.0).sub(&sm);
     cv.fill_solid(&ring, col(0x9a, 0x5c, 0x14));
     cv.fill_mask(&sm, &|x, y| {
@@ -66,9 +83,24 @@ pub fn draw() -> RgbaImage {
         mix(c, col(0xff, 0xfb, 0xe0), (1.0 - d * 1.5).max(0.0))
     });
     // 星のファセット（右下を少し暗く）
-    let shade = Mask::from_path(&Path::polygon(&[(sx, sy), (sx + 80.0, sy - 4.0), (sx + 80.0, sy + 90.0), (sx - 20.0, sy + 90.0)]), (256, 256)).blur(3.0).mul(&sm);
+    let shade = Mask::from_path(
+        &Path::polygon(&[
+            (sx, sy),
+            (sx + 80.0, sy - 4.0),
+            (sx + 80.0, sy + 90.0),
+            (sx - 20.0, sy + 90.0),
+        ]),
+        (256, 256),
+    )
+    .blur(3.0)
+    .mul(&sm);
     cv.fill_solid(&shade, cola(0xd0, 0x7a, 0x10, 0.28));
-    let hl = Mask::from_path(&Path::ellipse(sx - 14.0, sy - 22.0, 12.0, 6.0, -0.9), (256, 256)).blur(2.0).mul(&sm);
+    let hl = Mask::from_path(
+        &Path::ellipse(sx - 14.0, sy - 22.0, 12.0, 6.0, -0.9),
+        (256, 256),
+    )
+    .blur(2.0)
+    .mul(&sm);
     cv.fill_solid(&hl, cola(255, 255, 255, 0.55));
     // バッジのアルファ
     let (cx, cy, hw, hh) = (128.0f32, 128.0f32, 112.0f32, 112.0f32);
@@ -79,7 +111,9 @@ pub fn draw() -> RgbaImage {
             // 縁のわずかな内側ビネットと上辺ハイライト
             let edge = (-d / 18.0).clamp(0.0, 1.0);
             let k = 0.78 + 0.22 * smooth(edge);
-            let top = (1.0 - ((y as f32 - 16.0) / 40.0).clamp(0.0, 1.0)) * (1.0 - (-d / 6.0).clamp(0.0, 1.0)) * 0.12;
+            let top = (1.0 - ((y as f32 - 16.0) / 40.0).clamp(0.0, 1.0))
+                * (1.0 - (-d / 6.0).clamp(0.0, 1.0))
+                * 0.12;
             let p = &mut cv.px[y * 256 + x];
             for v in p.iter_mut().take(3) {
                 *v = (*v * k + top) * cov;

@@ -31,8 +31,8 @@ unsafe fn div255_epi16_sse2(v: __m128i, v128: __m128i, v0101: __m128i) -> __m128
 pub(super) unsafe fn to_bgrx_u32_avx2(src: &[u8], out: &mut [u32]) {
     let n = out.len().min(src.len() / 4);
     let mask = _mm256_setr_epi8(
-        2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
-        2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+        2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128, 2, 1, 0, -128, 6, 5, 4,
+        -128, 10, 9, 8, -128, 14, 13, 12, -128,
     );
     let mut i = 0;
     let src_ptr = src.as_ptr();
@@ -51,7 +51,9 @@ pub(super) unsafe fn to_bgrx_u32_avx2(src: &[u8], out: &mut [u32]) {
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn to_bgrx_u32_ssse3(src: &[u8], out: &mut [u32]) {
     let n = out.len().min(src.len() / 4);
-    let mask = _mm_setr_epi8(2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128);
+    let mask = _mm_setr_epi8(
+        2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+    );
     let mut i = 0;
     let src_ptr = src.as_ptr();
     let dst_ptr = out.as_mut_ptr();
@@ -140,12 +142,12 @@ pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
     let v0101 = _mm256_set1_epi16(0x0101);
     let alpha_mask = _mm256_set1_epi32(0xFF00_0000u32 as i32);
     let shuf_lo = _mm256_setr_epi8(
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128, 3, -128, 3, -128,
+        3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
     );
     let shuf_hi = _mm256_setr_epi8(
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128, 11, -128,
+        11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
     );
     let mut i = 0;
     let src_ptr = rgba.as_ptr();
@@ -251,12 +253,12 @@ pub(super) unsafe fn blit_row_opaque_avx2(dst_row: &mut [u8], src_row: &[u8]) {
     let v128 = _mm256_set1_epi16(128);
     let v0101 = _mm256_set1_epi16(0x0101);
     let shuf_lo = _mm256_setr_epi8(
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128, 3, -128, 3, -128,
+        3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
     );
     let shuf_hi = _mm256_setr_epi8(
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128, 11, -128,
+        11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
     );
     let mut i = 0;
     let dst_ptr = dst_row.as_mut_ptr();
@@ -299,12 +301,12 @@ pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o
     let v128 = _mm256_set1_epi16(128);
     let v0101 = _mm256_set1_epi16(0x0101);
     let shuf_lo = _mm256_setr_epi8(
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
-        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
+        3, -128, 3, -128, 3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128, 3, -128, 3, -128,
+        3, -128, 3, -128, 7, -128, 7, -128, 7, -128, 7, -128,
     );
     let shuf_hi = _mm256_setr_epi8(
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
-        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
+        11, -128, 11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128, 11, -128,
+        11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
     );
     let mut i = 0;
     let dst_ptr = dst_row.as_mut_ptr();
@@ -335,7 +337,10 @@ pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o
         let s_lo = div255_epi16_avx2(_mm256_mullo_epi16(d_lo, inv_lo), v128, v0101);
         let s_hi = div255_epi16_avx2(_mm256_mullo_epi16(d_hi, inv_hi), v128, v0101);
         let scaled = _mm256_packus_epi16(s_lo, s_hi);
-        _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, _mm256_adds_epu8(vsc, scaled));
+        _mm256_storeu_si256(
+            dst_ptr.add(i) as *mut __m256i,
+            _mm256_adds_epu8(vsc, scaled),
+        );
         i += 32;
     }
     blit_row_opacity_scalar(&mut dst_row[i..len], &src_row[i..len], o);
@@ -391,8 +396,14 @@ pub(super) unsafe fn blit_row_opaque_sse2(dst_row: &mut [u8], src_row: &[u8]) {
         let vd = _mm_loadu_si128(dst_ptr.add(i) as *const __m128i);
         let s_lo = _mm_unpacklo_epi8(vs, zero);
         let s_hi = _mm_unpackhi_epi8(vs, zero);
-        let inv_lo = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_lo)));
-        let inv_hi = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_hi)));
+        let inv_lo = _mm_sub_epi16(
+            v255,
+            _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_lo)),
+        );
+        let inv_hi = _mm_sub_epi16(
+            v255,
+            _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(s_hi)),
+        );
         let d_lo = _mm_unpacklo_epi8(vd, zero);
         let d_hi = _mm_unpackhi_epi8(vd, zero);
         let sc_lo = div255_epi16_sse2(_mm_mullo_epi16(d_lo, inv_lo), v128, v0101);
@@ -424,11 +435,25 @@ pub(super) unsafe fn blit_row_opacity_sse2(dst_row: &mut [u8], src_row: &[u8], o
             i += 16;
             continue;
         }
-        let sc_lo = div255_epi16_sse2(_mm_mullo_epi16(_mm_unpacklo_epi8(vs, zero), v_o), v128, v0101);
-        let sc_hi = div255_epi16_sse2(_mm_mullo_epi16(_mm_unpackhi_epi8(vs, zero), v_o), v128, v0101);
+        let sc_lo = div255_epi16_sse2(
+            _mm_mullo_epi16(_mm_unpacklo_epi8(vs, zero), v_o),
+            v128,
+            v0101,
+        );
+        let sc_hi = div255_epi16_sse2(
+            _mm_mullo_epi16(_mm_unpackhi_epi8(vs, zero), v_o),
+            v128,
+            v0101,
+        );
         let vsc = _mm_packus_epi16(sc_lo, sc_hi);
-        let inv_lo = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_lo)));
-        let inv_hi = _mm_sub_epi16(v255, _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_hi)));
+        let inv_lo = _mm_sub_epi16(
+            v255,
+            _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_lo)),
+        );
+        let inv_hi = _mm_sub_epi16(
+            v255,
+            _mm_shufflehi_epi16::<0xFF>(_mm_shufflelo_epi16::<0xFF>(sc_hi)),
+        );
         let vd = _mm_loadu_si128(dst_ptr.add(i) as *const __m128i);
         let d_lo = _mm_unpacklo_epi8(vd, zero);
         let d_hi = _mm_unpackhi_epi8(vd, zero);
@@ -475,7 +500,8 @@ pub(super) unsafe fn universal_avx2(
         let off = p * 4;
         let vr = _mm_loadl_epi64(rule_ptr.add(p) as *const __m128i);
         if let Some(vb_thr) = v_max_b {
-            if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(vr, vb_thr), vb_thr)) & 0xFF) == 0xFF {
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(vr, vb_thr), vb_thr)) & 0xFF) == 0xFF
+            {
                 let vb = _mm256_loadu_si256(b_ptr.add(off) as *const __m256i);
                 _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, vb);
                 p += 8;
@@ -483,7 +509,8 @@ pub(super) unsafe fn universal_avx2(
             }
         }
         if let Some(va_thr) = v_min_a {
-            if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(vr, va_thr), va_thr)) & 0xFF) == 0xFF {
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_min_epu8(vr, va_thr), va_thr)) & 0xFF) == 0xFF
+            {
                 let va = _mm256_loadu_si256(a_ptr.add(off) as *const __m256i);
                 _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, va);
                 p += 8;
@@ -492,7 +519,9 @@ pub(super) unsafe fn universal_avx2(
         }
         let va = _mm256_loadu_si256(a_ptr.add(off) as *const __m256i);
         let vb = _mm256_loadu_si256(b_ptr.add(off) as *const __m256i);
-        let rep = |k: usize| (lut[*rule.get_unchecked(p + k) as usize] as i64).wrapping_mul(0x0001_0001_0001_0001);
+        let rep = |k: usize| {
+            (lut[*rule.get_unchecked(p + k) as usize] as i64).wrapping_mul(0x0001_0001_0001_0001)
+        };
         let t_lo = _mm256_setr_epi64x(rep(0), rep(1), rep(4), rep(5));
         let t_hi = _mm256_setr_epi64x(rep(2), rep(3), rep(6), rep(7));
         let inv_lo = _mm256_sub_epi16(v256, t_lo);
@@ -509,7 +538,10 @@ pub(super) unsafe fn universal_avx2(
             _mm256_mullo_epi16(a_hi, inv_hi),
             _mm256_mullo_epi16(b_hi, t_hi),
         ));
-        _mm256_storeu_si256(out_ptr.add(off) as *mut __m256i, _mm256_packus_epi16(lo, hi));
+        _mm256_storeu_si256(
+            out_ptr.add(off) as *mut __m256i,
+            _mm256_packus_epi16(lo, hi),
+        );
         p += 8;
     }
     universal_lut_scalar(&mut out[p * 4..], &a[p * 4..], &b[p * 4..], &rule[p..], lut);

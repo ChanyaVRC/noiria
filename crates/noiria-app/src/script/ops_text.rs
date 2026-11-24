@@ -20,7 +20,9 @@ pub(crate) fn op_text_style(
     if !style.line_height.is_finite() {
         return Err(JsErrorBox::type_error("lineHeight must be a finite f32"));
     }
-    state.borrow_mut::<EngineState>().text_style(to_u32(id), style);
+    state
+        .borrow_mut::<EngineState>()
+        .text_style(to_u32(id), style);
     Ok(())
 }
 
@@ -37,7 +39,10 @@ pub(crate) fn op_text_print(
         .borrow_mut::<EngineState>()
         .text_print(
             to_u32(id),
-            segments.into_iter().map(TextSegmentArgs::into_segment).collect(),
+            segments
+                .into_iter()
+                .map(TextSegmentArgs::into_segment)
+                .collect(),
             append,
             cps,
         )

@@ -908,7 +908,10 @@ fn run_render_thread(
     let format = device
         .as_ref()
         .map_or(FALLBACK_FORMAT, |d| (d.channels(), d.sample_rate()));
-    if init_tx.send((format.0, format.1, device.is_some())).is_err() {
+    if init_tx
+        .send((format.0, format.1, device.is_some()))
+        .is_err()
+    {
         return;
     }
     let Ok(mixer) = mixer_rx.recv() else { return };
@@ -959,9 +962,9 @@ fn drain_commands(rx: Receiver<AudioCmd>, shared: &AudioShared) {
         match cmd {
             AudioCmd::Quit => break,
             // 読み捨てても確認応答は返す（再生終了待ちが `is_play_pending` で永久に待たないように）。
-            AudioCmd::Play {
-                ch, request_id, ..
-            } => shared.acknowledge_play_requested(ch, request_id, 0),
+            AudioCmd::Play { ch, request_id, .. } => {
+                shared.acknowledge_play_requested(ch, request_id, 0)
+            }
             AudioCmd::Stop { ch, request_id, .. } => {
                 shared.acknowledge_stop_requested(ch, request_id, false);
             }
@@ -1496,18 +1499,16 @@ mod tests {
             Arc::new(build_source),
         );
 
-        processor.handle(
-            AudioCmd::Play {
-                ch: CH_BGM,
-                rel: "clip.wav".to_string(),
-                looping: true,
-                volume: 1.0,
-                fade_in_ms: 0,
-                start_position_ms: 2,
-                start_paused: true,
-                request_id,
-            },
-        );
+        processor.handle(AudioCmd::Play {
+            ch: CH_BGM,
+            rel: "clip.wav".to_string(),
+            looping: true,
+            volume: 1.0,
+            fade_in_ms: 0,
+            start_position_ms: 2,
+            start_paused: true,
+            request_id,
+        });
         processor.settle();
 
         let mut mixer = mixer.lock().unwrap();
@@ -1544,11 +1545,7 @@ mod tests {
         fn sample_rate(&self) -> u32 {
             self.fmt.1
         }
-        fn run(
-            self: Box<Self>,
-            stop: &AtomicBool,
-            fill: &mut dyn FnMut(&mut [f32]),
-        ) -> Result<()> {
+        fn run(self: Box<Self>, stop: &AtomicBool, fill: &mut dyn FnMut(&mut [f32])) -> Result<()> {
             let mut buf = vec![0.0f32; 64 * self.fmt.0 as usize];
             let mut fills = 0usize;
             while !stop.load(Ordering::Relaxed) {
@@ -1654,16 +1651,13 @@ mod tests {
         assert_eq!(h.format, FALLBACK_FORMAT);
         let start = Instant::now();
         // 0.3 秒ぶん（フォールバックの 48kHz）。
-        h.mixer
-            .lock()
-            .unwrap()
-            .play(
-                CH_VOICE,
-                Box::new(BufferSource::new(2, 48_000, vec![0.5; 2 * 14_400])),
-                false,
-                1.0,
-                0,
-            );
+        h.mixer.lock().unwrap().play(
+            CH_VOICE,
+            Box::new(BufferSource::new(2, 48_000, vec![0.5; 2 * 14_400])),
+            false,
+            1.0,
+            0,
+        );
         h.wait_until("デバイスなしでも finished が立つ", |m| {
             m.is_finished(CH_VOICE)
         });
@@ -1748,9 +1742,7 @@ mod tests {
         }
     }
 
-    fn processor_with(
-        decode: DecodeFn,
-    ) -> (CommandProcessor, Arc<Mutex<Mixer>>, Arc<AudioShared>) {
+    fn processor_with(decode: DecodeFn) -> (CommandProcessor, Arc<Mutex<Mixer>>, Arc<AudioShared>) {
         let mixer = Arc::new(Mutex::new(Mixer::new(1, 1000)));
         let shared = Arc::new(AudioShared::default());
         let p = CommandProcessor::new(
@@ -1806,7 +1798,8 @@ mod tests {
     /// 再生終了待ちの判定（`is_playing || is_play_pending`）が、デコード中も差し込み後も途切れない。
     #[test]
     fn wait_end_condition_holds_from_the_play_request_through_decode_to_playback() {
-        let busy = |shared: &AudioShared| shared.is_playing(CH_BGM) || shared.is_play_pending(CH_BGM);
+        let busy =
+            |shared: &AudioShared| shared.is_playing(CH_BGM) || shared.is_play_pending(CH_BGM);
         let (release_tx, release_rx) = crossbeam_channel::unbounded();
         let (mut p, _mixer, shared) = processor_with(gated_decoder(release_rx));
         assert!(!busy(&shared), "何も要求していなければ終わっている");
@@ -1817,14 +1810,18 @@ mod tests {
 
         release_tx.send(()).unwrap();
         recv_done(&mut p);
-        assert!(shared.is_playing(CH_BGM), "差し込み直後から is_playing（次の定期同期を待たない）");
+        assert!(
+            shared.is_playing(CH_BGM),
+            "差し込み直後から is_playing（次の定期同期を待たない）"
+        );
         assert!(!shared.is_play_pending(CH_BGM));
         assert!(busy(&shared));
     }
 
     #[test]
     fn decode_failure_clears_the_pending_play_request() {
-        let decode: DecodeFn = Arc::new(|_gd, _rel, _looping, _ch, _rate| anyhow::bail!("壊れた音声"));
+        let decode: DecodeFn =
+            Arc::new(|_gd, _rel, _looping, _ch, _rate| anyhow::bail!("壊れた音声"));
         let (mut p, _mixer, shared) = processor_with(decode);
         p.handle(play_cmd(CH_BGM, "broken.wav", &shared));
         assert!(shared.is_play_pending(CH_BGM));
@@ -1839,7 +1836,10 @@ mod tests {
         p.handle(play_cmd(CH_BGM, "slow_a.wav", &shared));
         assert!(shared.is_play_pending(CH_BGM));
         let stop_id = shared.mark_stop_requested(CH_BGM);
-        assert!(!shared.is_play_pending(CH_BGM), "Stop を要求した時点で Play の保留は外れる");
+        assert!(
+            !shared.is_play_pending(CH_BGM),
+            "Stop を要求した時点で Play の保留は外れる"
+        );
         p.handle(AudioCmd::Stop {
             ch: CH_BGM,
             fade_out_ms: 0,
@@ -2109,10 +2109,26 @@ mod tests {
 
         let cases: [(&str, Vec<u8>, usize); 5] = [
             ("pcm8", build_wav_custom(1, 1, 22050, 8, &body8, false), 13),
-            ("pcm16", build_wav_custom(1, 2, 44100, 16, &body16, false), 7),
-            ("pcm24_short_read", build_wav_custom(1, 2, 48000, 24, &body24, false), 5),
-            ("float32", build_wav_custom(3, 2, 48000, 32, &bodyf32, false), 11),
-            ("fmt_after_data", build_wav_custom(1, 1, 44100, 16, &body16[..500], true), 19),
+            (
+                "pcm16",
+                build_wav_custom(1, 2, 44100, 16, &body16, false),
+                7,
+            ),
+            (
+                "pcm24_short_read",
+                build_wav_custom(1, 2, 48000, 24, &body24, false),
+                5,
+            ),
+            (
+                "float32",
+                build_wav_custom(3, 2, 48000, 32, &bodyf32, false),
+                11,
+            ),
+            (
+                "fmt_after_data",
+                build_wav_custom(1, 1, 44100, 16, &body16[..500], true),
+                19,
+            ),
         ];
 
         for (label, wav_bytes, max_chunk) in cases {
@@ -2127,7 +2143,11 @@ mod tests {
             let got = drain_source(&mut src, &[1, 7, 63, 257, 1024]);
             assert_eq!(
                 got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-                expected.samples.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected
+                    .samples
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
                 "{label}: ストリーミング WAV 出力が wav::decode とビット一致しない"
             );
         }
@@ -2149,7 +2169,11 @@ mod tests {
             Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
         };
         let mk_buf = || {
-            let s = BufferSource::new(decoded.channels, decoded.sample_rate, decoded.samples.clone());
+            let s = BufferSource::new(
+                decoded.channels,
+                decoded.sample_rate,
+                decoded.samples.clone(),
+            );
             Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
         };
 
@@ -2190,7 +2214,10 @@ mod tests {
             assert!(src.rewind());
             let _ = src.read(&mut scratch);
         });
-        assert_eq!(peak, 0, "StreamingWavSource は再生・シーク・巻き戻し中に確保しない");
+        assert_eq!(
+            peak, 0,
+            "StreamingWavSource は再生・シーク・巻き戻し中に確保しない"
+        );
     }
 
     #[test]
@@ -2213,7 +2240,11 @@ mod tests {
             let got = drain_source(&mut src, &[1, 19, 256, 1024, 333]);
             assert_eq!(
                 got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-                expected.samples.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected
+                    .samples
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
                 "{name}: StreamingVorbisSource が vorbis::decode とビット一致しない"
             );
         }
@@ -2242,7 +2273,10 @@ mod tests {
             total
         });
         let full_pcm_bytes = total_samples * std::mem::size_of::<f32>();
-        assert!(full_pcm_bytes > 8 * 1024 * 1024, "想定より短いベクタ: {full_pcm_bytes}");
+        assert!(
+            full_pcm_bytes > 8 * 1024 * 1024,
+            "想定より短いベクタ: {full_pcm_bytes}"
+        );
         assert!(
             peak < 2 * 1024 * 1024,
             "ストリーミング再生のピーク確保が大きすぎる: peak={peak} bytes (full_pcm={full_pcm_bytes} bytes)"
@@ -2263,7 +2297,11 @@ mod tests {
             Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
         };
         let mk_buf = || {
-            let s = BufferSource::new(decoded.channels, decoded.sample_rate, decoded.samples.clone());
+            let s = BufferSource::new(
+                decoded.channels,
+                decoded.sample_rate,
+                decoded.samples.clone(),
+            );
             Box::new(ChannelConverter::new(Resampler::new(s, 48000), 2)) as Box<dyn PcmSource>
         };
 

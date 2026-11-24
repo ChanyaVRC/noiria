@@ -133,7 +133,11 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
                     }
                     "click" | "rclick" => {
                         let (x, y) = (c.num(&cmd, "x")?, c.num(&cmd, "y")?);
-                        let b = if cmd == "click" { Button::Left } else { Button::Right };
+                        let b = if cmd == "click" {
+                            Button::Left
+                        } else {
+                            Button::Right
+                        };
                         out.push(Step::Click(x, y, b));
                     }
                     "move" => {
@@ -187,8 +191,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Step>> {
             continue;
         }
         let mut c = Cursor { toks, pos: 0 };
-        parse_cmds(&mut c, false, &mut steps)
-            .map_err(|e| anyhow::anyhow!("{}行目: {e}", i + 1))?;
+        parse_cmds(&mut c, false, &mut steps).map_err(|e| anyhow::anyhow!("{}行目: {e}", i + 1))?;
         if steps.len() > MAX_STEPS {
             bail!("{}行目: ステップ数が上限 {MAX_STEPS} を超えます", i + 1);
         }
@@ -328,7 +331,11 @@ mod tests {
         assert!(!r.finished(99));
         assert_eq!(r.poll(100), Some(Step::Key("b".into())));
         assert_eq!(r.poll(100), Some(Step::Key("c".into())));
-        assert_eq!(r.poll(100), Some(Step::Key("d".into())), "wait 0 は待たない");
+        assert_eq!(
+            r.poll(100),
+            Some(Step::Key("d".into())),
+            "wait 0 は待たない"
+        );
         assert_eq!(r.poll(100), None);
         assert!(r.finished(100));
     }

@@ -57,13 +57,34 @@ fn rule_circle() -> RgbaImage {
 fn write_previews(dir: &Path, style: Style) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let classroom = bg::classroom_evening();
-    save_png(&preview::style_candidates(&classroom), &dir.join("style_candidates.png"))?;
-    save_png(&preview::sheet(Who::Hinata, style), &dir.join("sheet_hinata.png"))?;
-    save_png(&preview::sheet(Who::Shiori, style), &dir.join("sheet_shiori.png"))?;
-    let two = [(Who::Hinata, Expr::Smile, 140), (Who::Shiori, Expr::Normal, 640)];
-    save_png(&preview::scene(&classroom, style, &two), &dir.join("classroom_two.png"))?;
-    save_png(&preview::scene(&classroom, style, &[(Who::Hinata, Expr::Normal, 390)]), &dir.join("classroom_hinata_center.png"))?;
-    save_png(&preview::scene(&classroom, style, &[(Who::Shiori, Expr::Blush, 390)]), &dir.join("classroom_shiori_center.png"))?;
+    save_png(
+        &preview::style_candidates(&classroom),
+        &dir.join("style_candidates.png"),
+    )?;
+    save_png(
+        &preview::sheet(Who::Hinata, style),
+        &dir.join("sheet_hinata.png"),
+    )?;
+    save_png(
+        &preview::sheet(Who::Shiori, style),
+        &dir.join("sheet_shiori.png"),
+    )?;
+    let two = [
+        (Who::Hinata, Expr::Smile, 140),
+        (Who::Shiori, Expr::Normal, 640),
+    ];
+    save_png(
+        &preview::scene(&classroom, style, &two),
+        &dir.join("classroom_two.png"),
+    )?;
+    save_png(
+        &preview::scene(&classroom, style, &[(Who::Hinata, Expr::Normal, 390)]),
+        &dir.join("classroom_hinata_center.png"),
+    )?;
+    save_png(
+        &preview::scene(&classroom, style, &[(Who::Shiori, Expr::Blush, 390)]),
+        &dir.join("classroom_shiori_center.png"),
+    )?;
     for (name, img) in [
         ("street_morning", bg::street_morning()),
         ("clubroom", bg::clubroom()),
@@ -71,7 +92,10 @@ fn write_previews(dir: &Path, style: Style) -> Result<()> {
         ("hill_night", bg::hill_night()),
         ("title", bg::title_bg()),
     ] {
-        save_png(&preview::scene(&img, style, &two), &dir.join(format!("bg_{name}.png")))?;
+        save_png(
+            &preview::scene(&img, style, &two),
+            &dir.join(format!("bg_{name}.png")),
+        )?;
     }
     save_png(&cg::cg_hinata(), &dir.join("cg_hinata.png"))?;
     save_png(&cg::cg_shiori(), &dir.join("cg_shiori.png"))?;
@@ -90,7 +114,8 @@ fn main() -> Result<()> {
             "--style" | "--preview" => {
                 let v = args.get(i + 1).cloned().unwrap_or_default();
                 if args[i] == "--style" {
-                    style = Style::parse(&v).ok_or_else(|| anyhow::anyhow!("--style は a|b|c: {v}"))?;
+                    style =
+                        Style::parse(&v).ok_or_else(|| anyhow::anyhow!("--style は a|b|c: {v}"))?;
                 } else {
                     preview_dir = Some(v.into());
                 }
@@ -102,7 +127,11 @@ fn main() -> Result<()> {
     if let Some(d) = preview_dir {
         return write_previews(&d, style);
     }
-    let out: PathBuf = args.first().cloned().unwrap_or_else(|| "games/demo/assets".into()).into();
+    let out: PathBuf = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "games/demo/assets".into())
+        .into();
     for sub in ["bg", "cg", "fg", "rule", "bgm", "se"] {
         std::fs::create_dir_all(out.join(sub))?;
     }
@@ -146,12 +175,18 @@ fn main() -> Result<()> {
     wavout::write_mono(&out.join("se/click.wav"), &synth::render_click())?;
     wavout::write_mono(&out.join("se/chime.wav"), &synth::demo::render_chime())?;
     wavout::write_mono(&out.join("se/sparkle.wav"), &synth::demo::render_sparkle())?;
-    wavout::write_mono(&out.join("se/heartbeat.wav"), &synth::demo::render_heartbeat())?;
+    wavout::write_mono(
+        &out.join("se/heartbeat.wav"),
+        &synth::demo::render_heartbeat(),
+    )?;
 
     // アイコンは sample と同じく自作 PNG エンコーダで書く（games/demo/icon.png）
     let icon = bg::icon();
     let png = noiria_core::codec::png::encode(icon.width(), icon.height(), icon.as_raw());
-    let icon_path = out.parent().map(|p| p.join("icon.png")).unwrap_or_else(|| PathBuf::from("icon.png"));
+    let icon_path = out
+        .parent()
+        .map(|p| p.join("icon.png"))
+        .unwrap_or_else(|| PathBuf::from("icon.png"));
     std::fs::write(&icon_path, png)?;
 
     println!("デモアセットを生成しました: {}", out.display());

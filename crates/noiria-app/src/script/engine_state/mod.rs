@@ -25,9 +25,7 @@ use noiria_core::text::{GlyphRect, TextSegment, TextStyle};
 use noiria_core::transition::{TransMethod, Transition};
 use tokio::sync::Notify;
 
-use crate::bridge::{
-    InputSync, LockExt, PendingWaits, SharedScene, TickSync, UserEvent, WakeSink,
-};
+use crate::bridge::{InputSync, LockExt, PendingWaits, SharedScene, TickSync, UserEvent, WakeSink};
 use crate::clock::Clock;
 use crate::script::ui_cache::{
     load_image_cached, load_image_checked, load_rule_cached, load_scaled_cached, load_thumb_cached,
@@ -155,7 +153,10 @@ impl EngineState {
     /// システムフォントのみで動く（Windows の既存挙動は不変）。
     pub(crate) fn from_ctx(
         ctx: super::EngineCtx,
-    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<crate::bridge::InputEvent>) {
+    ) -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<crate::bridge::InputEvent>,
+    ) {
         let mut texts = Texts::new();
         texts
             .engine
@@ -366,7 +367,12 @@ impl EngineState {
     /// 縦/横グラデーション・角丸・枠線・ソフトシャドウ付きのパネルをレイヤの絵にする（モダン UI 用）。
     /// `spec` は `noiria_core::uiraster::PanelSpec::from_slice` の数値列。出力は (w+2*pad)x(h+2*pad)
     /// で、パネル本体は (pad, pad) が左上（呼び出し側がレイヤ位置を pad だけ引く）。
-    pub(crate) fn layer_panel(&self, id: u32, page: &str, spec_raw: &[f64]) -> Result<(), EngineError> {
+    pub(crate) fn layer_panel(
+        &self,
+        id: u32,
+        page: &str,
+        spec_raw: &[f64],
+    ) -> Result<(), EngineError> {
         let spec = noiria_core::uiraster::PanelSpec::from_slice(spec_raw)
             .ok_or_else(|| "layer_panel: 数値列が短すぎます".to_string())?;
         self.log_op(format!(
@@ -379,7 +385,10 @@ impl EngineState {
             Some(p) => p,
             None => {
                 let p = Arc::new(noiria_core::uiraster::render_panel(&spec));
-                self.ui_cache.lock_unpoisoned().panels.insert(key, p.clone());
+                self.ui_cache
+                    .lock_unpoisoned()
+                    .panels
+                    .insert(key, p.clone());
                 p
             }
         };
@@ -398,7 +407,9 @@ impl EngineState {
         w: u32,
         h: u32,
     ) -> Result<(u32, u32), EngineError> {
-        self.log_op(format!("layer_load_image_scaled {id} {page} {path} {w}x{h}"));
+        self.log_op(format!(
+            "layer_load_image_scaled {id} {page} {path} {w}x{h}"
+        ));
         if w == 0 || h == 0 {
             return Err("layer_load_image_scaled: 寸法が 0 です".to_string());
         }
@@ -440,7 +451,12 @@ impl EngineState {
     /// KAG の [move]: 現在の実効値 (進行中の tween があればその時点の値) を
     /// from として、指定された to へ向けた tween を開始する。省略フィールドは
     /// 現在値を維持する（動かさない）。
-    pub(crate) fn layer_move(&self, id: u32, page: &str, args: MoveArgs) -> Result<(), EngineError> {
+    pub(crate) fn layer_move(
+        &self,
+        id: u32,
+        page: &str,
+        args: MoveArgs,
+    ) -> Result<(), EngineError> {
         self.log_op(format!("layer_move {id} {page} {args:?}"));
         let now = self.clock.now();
         self.with_layer(page, id, |layer| {
@@ -483,7 +499,9 @@ impl EngineState {
         time_ms: u64,
         accel: f32,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("layer_crop_move {id} {page} to={to} time_ms={time_ms} accel={accel}"));
+        self.log_op(format!(
+            "layer_crop_move {id} {page} to={to} time_ms={time_ms} accel={accel}"
+        ));
         let now = self.clock.now();
         self.with_layer(page, id, |layer| {
             let full = layer.pixmap.as_ref().map(|p| p.width).unwrap_or(0);
@@ -885,13 +903,8 @@ impl EngineState {
                     let scene = self.scene.lock_unpoisoned();
                     (scene.width, scene.height)
                 };
-                let rule = load_rule_cached(
-                    &self.ui_cache,
-                    &self.game_dir,
-                    rule_path,
-                    scene_w,
-                    scene_h,
-                )?;
+                let rule =
+                    load_rule_cached(&self.ui_cache, &self.game_dir, rule_path, scene_w, scene_h)?;
                 TransMethod::Universal {
                     rule,
                     vague: args.vague.unwrap_or(64.0),
@@ -1240,7 +1253,6 @@ impl EngineState {
             .map(|t| t.format())
             .unwrap_or_default()
     }
-
 }
 
 /// ログ出力。`OpState`/`EngineState` に依存しない自由関数（旧 `ops_sys::op_log`）。
@@ -1252,4 +1264,3 @@ pub(crate) fn log(level: &str, msg: &str) {
         _ => log::info!("[script] {msg}"),
     }
 }
-

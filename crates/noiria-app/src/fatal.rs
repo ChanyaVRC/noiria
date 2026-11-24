@@ -76,7 +76,10 @@ pub(crate) fn report(title: &str, message: &str) {
         let mut text = message.to_string();
         #[cfg(feature = "dist")]
         if let Some(path) = crate::dist_logger::log_path() {
-            text.push_str(&format!("\n\n詳細はログを参照してください:\n{}", path.display()));
+            text.push_str(&format!(
+                "\n\n詳細はログを参照してください:\n{}",
+                path.display()
+            ));
         }
         message_box(title, &text);
     }
@@ -123,17 +126,37 @@ mod tests {
 
     #[test]
     fn dialog_only_for_dist_windows_when_interactive() {
-        assert!(DialogPolicy { headless: false, dist_windows: true, no_dialog_env: false }.should_show_dialog());
+        assert!(DialogPolicy {
+            headless: false,
+            dist_windows: true,
+            no_dialog_env: false
+        }
+        .should_show_dialog());
         assert!(
-            !DialogPolicy { headless: true, dist_windows: true, no_dialog_env: false }.should_show_dialog(),
+            !DialogPolicy {
+                headless: true,
+                dist_windows: true,
+                no_dialog_env: false
+            }
+            .should_show_dialog(),
             "ヘッドレスでは出さない"
         );
         assert!(
-            !DialogPolicy { headless: false, dist_windows: true, no_dialog_env: true }.should_show_dialog(),
+            !DialogPolicy {
+                headless: false,
+                dist_windows: true,
+                no_dialog_env: true
+            }
+            .should_show_dialog(),
             "NOIRIA_NO_DIALOG で抑止"
         );
         assert!(
-            !DialogPolicy { headless: false, dist_windows: false, no_dialog_env: false }.should_show_dialog(),
+            !DialogPolicy {
+                headless: false,
+                dist_windows: false,
+                no_dialog_env: false
+            }
+            .should_show_dialog(),
             "dist 以外（開発/Linux）では出さない"
         );
     }

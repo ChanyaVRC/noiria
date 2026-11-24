@@ -124,7 +124,9 @@ fn parse_args() -> Args {
             }
             "--bench-window" => {
                 if let Some(v) = argv.get(i + 1) {
-                    bench_size = v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+                    bench_size = v
+                        .split_once('x')
+                        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
                     i += 1;
                 }
             }
@@ -350,10 +352,7 @@ fn run() -> anyhow::Result<()> {
                 let text = std::fs::read_to_string(path).with_context(|| {
                     format!("autotest スクリプトを読めません: {}", path.display())
                 })?;
-                Some(
-                    autotest_script::parse(&text)
-                        .with_context(|| format!("{}", path.display()))?,
-                )
+                Some(autotest_script::parse(&text).with_context(|| format!("{}", path.display()))?)
             }
             None => None,
         };
@@ -378,21 +377,21 @@ fn run() -> anyhow::Result<()> {
         let pending_waits = bridge::PendingWaits::new();
         let (user_tx, user_rx) = crossbeam_channel::unbounded();
         let _script_thread = engine.spawn(script::EngineCtx {
-                scene: scene.clone(),
-                proxy: WakeSink::Channel(user_tx),
-                input_rx,
-                trans_notify: trans_notify.clone(),
-                audio_tx,
-                audio_shared,
-                game_dir,
-                config: config.clone(),
-                start,
-                clock: clock.clone(),
-                input_sync: input_sync.clone(),
-                tick_sync: tick_sync.clone(),
-                pending_waits: pending_waits.clone(),
-                op_log: None,
-            });
+            scene: scene.clone(),
+            proxy: WakeSink::Channel(user_tx),
+            input_rx,
+            trans_notify: trans_notify.clone(),
+            audio_tx,
+            audio_shared,
+            game_dir,
+            config: config.clone(),
+            start,
+            clock: clock.clone(),
+            input_sync: input_sync.clone(),
+            tick_sync: tick_sync.clone(),
+            pending_waits: pending_waits.clone(),
+            op_log: None,
+        });
         return headless::run_headless(headless::HeadlessParams {
             scene,
             input_tx,
@@ -423,7 +422,11 @@ fn run() -> anyhow::Result<()> {
         drop(audio_rx);
         None
     } else {
-        Some(audio::spawn(audio_rx, audio_shared.clone(), game_dir.clone()))
+        Some(audio::spawn(
+            audio_rx,
+            audio_shared.clone(),
+            game_dir.clone(),
+        ))
     };
 
     #[cfg(windows)]
@@ -460,9 +463,17 @@ fn run() -> anyhow::Result<()> {
         if let Some((size, file)) = &args.bench {
             let text = std::fs::read_to_string(file)
                 .with_context(|| format!("bench スクリプトを読めません: {}", file.display()))?;
-            let steps = autotest_script::parse(&text).with_context(|| format!("{}", file.display()))?;
+            let steps =
+                autotest_script::parse(&text).with_context(|| format!("{}", file.display()))?;
             visible = false;
-            winbench::spawn(hwnd_slot.clone(), user_tx_bench, start, *size, config.width, steps);
+            winbench::spawn(
+                hwnd_slot.clone(),
+                user_tx_bench,
+                start,
+                *size,
+                config.width,
+                steps,
+            );
         }
         win32::run_windowed(WindowedParams {
             title: config.title.clone(),

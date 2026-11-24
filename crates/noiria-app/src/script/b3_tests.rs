@@ -58,7 +58,8 @@ fn b3_new_layer_primitives_agree_on_both_engines() {
     let check: fn(&[String], &str) = |log, e| {
         assert_log_contains(log, "layer_panel");
         assert!(
-            log.iter().any(|l| l.contains("layer_panel") && l.contains("40x12") && l.contains("pad=8")),
+            log.iter()
+                .any(|l| l.contains("layer_panel") && l.contains("40x12") && l.contains("pad=8")),
             "{e}: panel の寸法/pad が ops に出ていない: {log:#?}"
         );
         assert_log_contains(log, "layer_load_image_scaled");
@@ -75,13 +76,20 @@ fn b3_new_layer_primitives_agree_on_both_engines() {
             "{e}: setCrop が届いていない: {log:#?}"
         );
         assert!(
-            log.iter()
-                .any(|l| l.contains("layer_crop_move") && l.contains("to=30") && l.contains("time_ms=400")),
+            log.iter().any(|l| l.contains("layer_crop_move")
+                && l.contains("to=30")
+                && l.contains("time_ms=400")),
             "{e}: cropTo が届いていない: {log:#?}"
         );
     };
-    check(&run_v8_steps("A[l]", setup, &[Step::Sleep(500), NEXT]), "v8");
-    check(&run_tsint_steps("A[l]", setup, &[Step::Sleep(500), NEXT]), "tsint");
+    check(
+        &run_v8_steps("A[l]", setup, &[Step::Sleep(500), NEXT]),
+        "v8",
+    );
+    check(
+        &run_tsint_steps("A[l]", setup, &[Step::Sleep(500), NEXT]),
+        "tsint",
+    );
 }
 
 // =====================================================================
@@ -118,8 +126,14 @@ fn b3_pure_helpers_agree_on_both_engines() {
             );
         }
     };
-    check(&run_v8_steps("A[l]", setup, &[Step::Sleep(500), NEXT]), "v8");
-    check(&run_tsint_steps("A[l]", setup, &[Step::Sleep(500), NEXT]), "tsint");
+    check(
+        &run_v8_steps("A[l]", setup, &[Step::Sleep(500), NEXT]),
+        "v8",
+    );
+    check(
+        &run_tsint_steps("A[l]", setup, &[Step::Sleep(500), NEXT]),
+        "tsint",
+    );
 }
 
 // =====================================================================
@@ -138,7 +152,8 @@ fn b3_modern_message_window_is_a_full_width_band_panel() {
         &[Step::Sleep(600), NEXT],
         |log, e| {
             assert!(
-                log.iter().any(|l| l.contains("layer_panel") && l.contains("1280x320")),
+                log.iter()
+                    .any(|l| l.contains("layer_panel") && l.contains("1280x320")),
                 "{e}: 全幅 x 320 の帯が描かれていない: {log:#?}"
             );
             assert_log_not_contains(log, "layer_msgbox");
@@ -164,7 +179,8 @@ fn b3_choice_buttons_hide_link_text_and_pick_by_click() {
             Step::Check(|log| {
                 // 本文の「ASK」は見えるが、リンクの文字は完全透明で印字される
                 assert!(
-                    log.iter().any(|l| l.contains("text_print") && l.contains(&printed("ASK"))),
+                    log.iter()
+                        .any(|l| l.contains("text_print") && l.contains(&printed("ASK"))),
                     "{log:#?}"
                 );
                 assert!(
@@ -175,7 +191,8 @@ fn b3_choice_buttons_hide_link_text_and_pick_by_click() {
                 );
                 // ボタンの文字は装飾（先頭の全角空白・▶）なしで別レイヤへ出る
                 assert!(
-                    log.iter().any(|l| l.contains("text_print") && l.contains(&printed("左のえらび"))),
+                    log.iter()
+                        .any(|l| l.contains("text_print") && l.contains(&printed("左のえらび"))),
                     "{log:#?}"
                 );
             }),
@@ -186,7 +203,11 @@ fn b3_choice_buttons_hide_link_text_and_pick_by_click() {
         |log, e| {
             assert_log_contains(log, &printed("GOT_B"));
             assert_log_not_contains(log, &printed("GOT_A"));
-            assert!(log.iter().any(|l| l.contains("layer_panel") && l.contains("720x64")), "{e}: {log:#?}");
+            assert!(
+                log.iter()
+                    .any(|l| l.contains("layer_panel") && l.contains("720x64")),
+                "{e}: {log:#?}"
+            );
         },
     );
 }
@@ -228,11 +249,19 @@ fn b3_classic_choices_stay_inline_by_default() {
     on_both(
         CHOICE_BODY,
         Setup::default(),
-        &[Step::Sleep(600), Step::ClickNow(160.0, 560.0), Step::Sleep(300), NEXT],
+        &[
+            Step::Sleep(600),
+            Step::ClickNow(160.0, 560.0),
+            Step::Sleep(300),
+            NEXT,
+        ],
         |log, e| {
             assert_log_not_contains(log, "color: Some([0, 0, 0, 0])");
             assert_log_not_contains(log, "720x64");
-            assert!(log.iter().any(|l| l.contains(&printed("GOT_A"))), "{e}: インラインのリンクは従来どおり選べる");
+            assert!(
+                log.iter().any(|l| l.contains(&printed("GOT_A"))),
+                "{e}: インラインのリンクは従来どおり選べる"
+            );
         },
     );
 }
@@ -268,7 +297,8 @@ fn b3_titlescreen_start_item_jumps_and_continue_is_disabled_without_saves() {
         |log, e| {
             assert_log_contains(log, &printed("STARTED"));
             assert!(
-                log.iter().any(|l| l.contains(&printed("T")) && l.contains("size: Some(80.0)")),
+                log.iter()
+                    .any(|l| l.contains(&printed("T")) && l.contains("size: Some(80.0)")),
                 "{e}: ロゴ文字が大きく出る: {log:#?}"
             );
         },
@@ -323,8 +353,9 @@ fn b3_gallery_loads_images_only_for_unlocked_flags() {
             Step::Check(|log| {
                 assert_log_count(log, "layer_load_image_scaled", 1);
                 assert!(
-                    log.iter()
-                        .any(|l| l.contains("layer_load_image_scaled") && l.contains("assets/solid.png") && l.contains("336x189")),
+                    log.iter().any(|l| l.contains("layer_load_image_scaled")
+                        && l.contains("assets/solid.png")
+                        && l.contains("336x189")),
                     "解放済みのサムネイルは 336x189 へ拡縮される: {log:#?}"
                 );
                 assert_log_contains(log, &printed("ENDA"));
@@ -373,7 +404,8 @@ fn b3_modern_save_menu_cards_and_large_thumbnail() {
         |log, e| {
             // 保存後にカードのサムネイルを拡縮して読み直している
             assert!(
-                log.iter().any(|l| l.contains("layer_load_save_thumb") && l.contains("save1 336x189")),
+                log.iter()
+                    .any(|l| l.contains("layer_load_save_thumb") && l.contains("save1 336x189")),
                 "{e}: {log:#?}"
             );
         },
@@ -406,7 +438,9 @@ fn b3_modern_settings_segmented_control_changes_value() {
         ],
         |log, e| {
             assert!(
-                log.iter().any(|l| l.contains("text_print") && l.contains(&printed("B")) && l.contains("cps=60")),
+                log.iter().any(|l| l.contains("text_print")
+                    && l.contains(&printed("B"))
+                    && l.contains("cps=60")),
                 "{e}: 設定を変えた速さで本文が出る: {log:#?}"
             );
         },
@@ -424,7 +458,11 @@ fn b3_modern_save_menu_builds_hidden_then_reveals_everything_at_once() {
         "A[l]",
         Setup {
             player_opts: MODERN,
-            slots: &[("save1", THUMB_SAVE), ("save2", THUMB_SAVE), ("save3", THUMB_SAVE)],
+            slots: &[
+                ("save1", THUMB_SAVE),
+                ("save2", THUMB_SAVE),
+                ("save3", THUMB_SAVE),
+            ],
             ..Setup::default()
         },
         &[
@@ -437,14 +475,18 @@ fn b3_modern_save_menu_builds_hidden_then_reveals_everything_at_once() {
         ],
         |log, e| {
             // 中身は即時に現れる（フェード無し）: 不透明度 255 を直接置く `layer_set_props` が「現す」操作
-            let is_reveal = |l: &String| l.contains("layer_set_props") && l.contains("opacity: Some(255)");
+            let is_reveal =
+                |l: &String| l.contains("layer_set_props") && l.contains("opacity: Some(255)");
             let loads: Vec<usize> = log
                 .iter()
                 .enumerate()
                 .filter(|(_, l)| l.contains("layer_load_save_thumb") && l.contains("336x189"))
                 .map(|(i, _)| i)
                 .collect();
-            assert!(loads.len() >= 3, "{e}: 使用中のスロットのサムネイルを読む: {log:#?}");
+            assert!(
+                loads.len() >= 3,
+                "{e}: 使用中のスロットのサムネイルを読む: {log:#?}"
+            );
             let (first, last) = (loads[0], *loads.last().unwrap());
             assert!(
                 !log[first..last].iter().any(is_reveal),
@@ -457,12 +499,17 @@ fn b3_modern_save_menu_builds_hidden_then_reveals_everything_at_once() {
                     .unwrap_or_else(|| panic!("{e}: 読み込み後に表示を始める: {log:#?}"));
             assert!(
                 !log[first_reveal..].iter().any(|l| {
-                    l.contains("layer_panel") || l.contains("layer_load_save_thumb") || (l.contains("text_print") && !l.contains("append=true"))
+                    l.contains("layer_panel")
+                        || l.contains("layer_load_save_thumb")
+                        || (l.contains("text_print") && !l.contains("append=true"))
                 }),
                 "{e}: 表示を始めた後に作り直しが残っていない: {log:#?}"
             );
             let reveals = log[first_reveal..].iter().filter(|l| is_reveal(l)).count();
-            assert!(reveals >= 12, "{e}: 6 枚ぶんのカード面とページ送りが一緒に現れる: {reveals}");
+            assert!(
+                reveals >= 12,
+                "{e}: 6 枚ぶんのカード面とページ送りが一緒に現れる: {reveals}"
+            );
         },
     );
 }
@@ -484,10 +531,19 @@ fn b3_modern_backlog_lays_out_only_the_latest_entries_until_you_scroll_up() {
     steps.extend([
         Step::Sleep(800),
         Step::Check(|log| {
-            let prints: Vec<&String> = log.iter().filter(|l| l.contains("text_print") && l.contains("locate: Some")).collect();
+            let prints: Vec<&String> = log
+                .iter()
+                .filter(|l| l.contains("text_print") && l.contains("locate: Some"))
+                .collect();
             assert_eq!(prints.len(), 1, "開いた直後は 1 回だけ組む: {prints:#?}");
-            assert!(prints[0].contains("LN099") && prints[0].contains("LN060"), "最新の 40 件を含む");
-            assert!(!prints[0].contains("LN059"), "それより古い履歴はまだ組まない");
+            assert!(
+                prints[0].contains("LN099") && prints[0].contains("LN060"),
+                "最新の 40 件を含む"
+            );
+            assert!(
+                !prints[0].contains("LN059"),
+                "それより古い履歴はまだ組まない"
+            );
         }),
         Step::KeyNow("Home"),
         Step::Sleep(500),
@@ -495,11 +551,30 @@ fn b3_modern_backlog_lays_out_only_the_latest_entries_until_you_scroll_up() {
         Step::Sleep(500),
         NEXT,
     ]);
-    on_both(&frag, Setup { player_opts: MODERN, ..Setup::default() }, &steps, |log, e| {
-        let prints: Vec<&String> = log.iter().filter(|l| l.contains("text_print") && l.contains("locate: Some")).collect();
-        assert_eq!(prints.len(), 2, "{e}: Home で古い履歴を足して組み直す: {}", prints.len());
-        assert!(prints[1].contains("LN000") && prints[1].contains("LN099"), "{e}: 組み直しは全履歴を含む");
-    });
+    on_both(
+        &frag,
+        Setup {
+            player_opts: MODERN,
+            ..Setup::default()
+        },
+        &steps,
+        |log, e| {
+            let prints: Vec<&String> = log
+                .iter()
+                .filter(|l| l.contains("text_print") && l.contains("locate: Some"))
+                .collect();
+            assert_eq!(
+                prints.len(),
+                2,
+                "{e}: Home で古い履歴を足して組み直す: {}",
+                prints.len()
+            );
+            assert!(
+                prints[1].contains("LN000") && prints[1].contains("LN099"),
+                "{e}: 組み直しは全履歴を含む"
+            );
+        },
+    );
 }
 
 // =====================================================================
@@ -562,17 +637,20 @@ fn b3_modern_ui_scales_cleanly_at_1920x1080() {
         ],
         |log, e| {
             assert!(
-                log.iter().any(|l| l.contains("layer_panel") && l.contains("1920x480")),
+                log.iter()
+                    .any(|l| l.contains("layer_panel") && l.contains("1920x480")),
                 "{e}: 1920x480 の帯が描かれていない: {log:#?}"
             );
             assert!(
-                log.iter().any(|l| l.contains("layer_panel") && l.contains("1080x96")),
+                log.iter()
+                    .any(|l| l.contains("layer_panel") && l.contains("1080x96")),
                 "{e}: 1080x96 の選択肢ボタンが描かれていない: {log:#?}"
             );
             assert_log_contains(log, "prefetch_save_thumbs 504x284");
             assert_log_contains(log, "thumb_capture 576x324");
             assert!(
-                log.iter().any(|l| l.contains("layer_load_save_thumb") && l.contains("save1 504x284")),
+                log.iter()
+                    .any(|l| l.contains("layer_load_save_thumb") && l.contains("save1 504x284")),
                 "{e}: FHD セーブカードのサムネイルが 504x284 になっていない: {log:#?}"
             );
             assert_log_contains(log, &printed("GOT_B"));

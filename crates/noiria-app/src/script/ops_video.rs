@@ -17,7 +17,7 @@ pub(crate) fn op_video_play(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_play(to_u32(id), path, looping)
+        .video_play(to_u32(id), path, looping)
         .map_err(err)
 }
 
@@ -64,7 +64,7 @@ pub(crate) fn op_video_open(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_open(to_u32(id), path, looping)
+        .video_open(to_u32(id), path, looping)
         .map_err(err)
 }
 
@@ -77,7 +77,7 @@ pub(crate) fn op_video_prepare(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_prepare(to_u32(id), path, looping)
+        .video_prepare(to_u32(id), path, looping)
         .map_err(err)
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn op_video_prepare(
 pub(crate) fn op_video_prepare_opened(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_prepare_opened(to_u32(id))
+        .video_prepare_opened(to_u32(id))
         .map_err(err)
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn op_video_prepare_opened(state: &mut OpState, id: f64) -> Result<()
 pub(crate) fn op_video_play_prepared(state: &mut OpState, id: f64) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
-         .video_play_prepared(to_u32(id))
+        .video_play_prepared(to_u32(id))
         .map_err(err)
 }
 
@@ -126,7 +126,10 @@ pub(crate) fn op_video_seek_frame(state: &mut OpState, target: f64) -> Result<()
 }
 
 #[op2(fast)]
-pub(crate) fn op_video_seek_position(state: &mut OpState, position_ms: f64) -> Result<(), JsErrorBox> {
+pub(crate) fn op_video_seek_position(
+    state: &mut OpState,
+    position_ms: f64,
+) -> Result<(), JsErrorBox> {
     state
         .borrow_mut::<EngineState>()
         .video_seek_position(position_ms)

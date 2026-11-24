@@ -469,7 +469,10 @@ mod tests {
                 let mut br = BitReader::new(&data);
                 Codebook::parse(&mut br).map(|_| ())
             });
-            assert!(r.is_err(), "entries={entries} dims={dims} type={lookup_type}");
+            assert!(
+                r.is_err(),
+                "entries={entries} dims={dims} type={lookup_type}"
+            );
         }
     }
 

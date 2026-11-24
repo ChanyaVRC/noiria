@@ -608,7 +608,11 @@ mod tests {
                 case_mismatch(&root, "bg/room.png", &wrong).as_deref(),
                 Some("BG/Room.PNG")
             );
-            assert_eq!(dir.read_bytes("bg/room.png").unwrap(), b"x", "読み込みは成功させる");
+            assert_eq!(
+                dir.read_bytes("bg/room.png").unwrap(),
+                b"x",
+                "読み込みは成功させる"
+            );
         }
         // 実在しないパスは警告対象にしない。
         assert_eq!(

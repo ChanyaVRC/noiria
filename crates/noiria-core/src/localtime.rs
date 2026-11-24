@@ -136,7 +136,10 @@ mod tests {
     fn now_local_is_plausible() {
         let t = now_local().expect("OS からローカル時刻を取れる");
         assert!((2024..2200).contains(&t.year), "{t:?}");
-        assert!((1..=12).contains(&t.month) && (1..=31).contains(&t.day), "{t:?}");
+        assert!(
+            (1..=12).contains(&t.month) && (1..=31).contains(&t.day),
+            "{t:?}"
+        );
         assert!(t.hour < 24 && t.minute < 60, "{t:?}");
     }
 }

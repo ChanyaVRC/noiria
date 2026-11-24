@@ -12,7 +12,10 @@ use crate::script::engine_state::{EngineState, TransArgs};
 use crate::script::util::err;
 
 #[op2]
-pub(crate) fn op_trans_begin(state: &mut OpState, #[serde] args: TransArgs) -> Result<(), JsErrorBox> {
+pub(crate) fn op_trans_begin(
+    state: &mut OpState,
+    #[serde] args: TransArgs,
+) -> Result<(), JsErrorBox> {
     state.borrow::<EngineState>().trans_begin(args).map_err(err)
 }
 

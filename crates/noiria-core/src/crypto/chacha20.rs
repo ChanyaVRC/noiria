@@ -82,12 +82,7 @@ fn block_rows(base: &[[u32; 4]; 4], counter: u32) -> [[u32; 4]; 4] {
         r2 = [r2[2], r2[3], r2[0], r2[1]];
         r3 = [r3[1], r3[2], r3[3], r3[0]];
     }
-    [
-        add4(r0, i0),
-        add4(r1, i1),
-        add4(r2, i2),
-        add4(r3, i3),
-    ]
+    [add4(r0, i0), add4(r1, i1), add4(r2, i2), add4(r3, i3)]
 }
 
 #[inline(always)]

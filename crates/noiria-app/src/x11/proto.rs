@@ -275,7 +275,14 @@ pub(crate) fn put_image_banded(
 }
 
 #[cfg(test)]
-pub(crate) fn req_get_image(drawable: u32, x: i16, y: i16, w: u16, h: u16, plane_mask: u32) -> Vec<u8> {
+pub(crate) fn req_get_image(
+    drawable: u32,
+    x: i16,
+    y: i16,
+    w: u16,
+    h: u16,
+    plane_mask: u32,
+) -> Vec<u8> {
     let mut req = Vec::with_capacity(20);
     req.push(OP_GET_IMAGE);
     req.push(2); // ZPixmap
@@ -709,11 +716,18 @@ mod decode_tests {
         d[28..30].copy_from_slice(&0x8u16.to_le_bytes());
         assert!(matches!(
             decode_event(EV_KEY_PRESS, &d),
-            XEvent::KeyPress { keycode: 37, state: 0x8, time: 123_456 }
+            XEvent::KeyPress {
+                keycode: 37,
+                state: 0x8,
+                time: 123_456
+            }
         ));
         assert!(matches!(
             decode_event(EV_KEY_RELEASE, &d),
-            XEvent::KeyRelease { keycode: 37, time: 123_456 }
+            XEvent::KeyRelease {
+                keycode: 37,
+                time: 123_456
+            }
         ));
     }
 
@@ -724,7 +738,10 @@ mod decode_tests {
         d[22..24].copy_from_slice(&1080u16.to_le_bytes());
         assert!(matches!(
             decode_event(EV_CONFIGURE_NOTIFY, &d),
-            XEvent::ConfigureNotify { width: 1920, height: 1080 }
+            XEvent::ConfigureNotify {
+                width: 1920,
+                height: 1080
+            }
         ));
         assert!(matches!(decode_event(EV_FOCUS_OUT, &d), XEvent::FocusOut));
     }

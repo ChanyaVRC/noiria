@@ -140,7 +140,10 @@ mod tests {
         assert!(!g.request(t0, true), "スクリプト生存中は即時破棄しない");
         assert!(!g.expired(t0 + Duration::from_millis(1999)));
         assert!(g.expired(t0 + CLOSE_GRACE));
-        assert_eq!(g.remaining(t0 + Duration::from_millis(500)), Some(Duration::from_millis(1500)));
+        assert_eq!(
+            g.remaining(t0 + Duration::from_millis(500)),
+            Some(Duration::from_millis(1500))
+        );
     }
 
     #[test]
@@ -182,16 +185,37 @@ mod tests {
     fn x11_autorepeat_pairs_are_dropped_but_first_press_and_last_release_pass() {
         let mut f = RepeatFilter::default();
         // 初回押下
-        assert_eq!(f.feed(KeyEv::Press { keycode: 37, time: 1000 }), vec![KeyAct::Down(37)]);
+        assert_eq!(
+            f.feed(KeyEv::Press {
+                keycode: 37,
+                time: 1000
+            }),
+            vec![KeyAct::Down(37)]
+        );
         // オートリピート 3 回（同時刻の Release+Press 対）
         for t in [1500u32, 1530, 1560] {
-            assert!(f.feed(KeyEv::Release { keycode: 37, time: t }).is_empty());
+            assert!(f
+                .feed(KeyEv::Release {
+                    keycode: 37,
+                    time: t
+                })
+                .is_empty());
             assert!(f.has_pending());
-            assert!(f.feed(KeyEv::Press { keycode: 37, time: t }).is_empty());
+            assert!(f
+                .feed(KeyEv::Press {
+                    keycode: 37,
+                    time: t
+                })
+                .is_empty());
             assert!(!f.has_pending());
         }
         // 本物のキーアップ（後続の対が来ないので flush で確定）
-        assert!(f.feed(KeyEv::Release { keycode: 37, time: 2000 }).is_empty());
+        assert!(f
+            .feed(KeyEv::Release {
+                keycode: 37,
+                time: 2000
+            })
+            .is_empty());
         assert_eq!(f.flush(), Some(KeyAct::Up(37)));
         assert_eq!(f.flush(), None);
     }
@@ -199,9 +223,17 @@ mod tests {
     #[test]
     fn x11_release_then_different_key_press_is_not_a_repeat() {
         let mut f = RepeatFilter::default();
-        assert!(f.feed(KeyEv::Release { keycode: 37, time: 100 }).is_empty());
+        assert!(f
+            .feed(KeyEv::Release {
+                keycode: 37,
+                time: 100
+            })
+            .is_empty());
         assert_eq!(
-            f.feed(KeyEv::Press { keycode: 50, time: 100 }),
+            f.feed(KeyEv::Press {
+                keycode: 50,
+                time: 100
+            }),
             vec![KeyAct::Up(37), KeyAct::Down(50)]
         );
     }
@@ -209,9 +241,17 @@ mod tests {
     #[test]
     fn x11_release_then_same_key_press_at_different_time_is_a_real_tap() {
         let mut f = RepeatFilter::default();
-        assert!(f.feed(KeyEv::Release { keycode: 37, time: 100 }).is_empty());
+        assert!(f
+            .feed(KeyEv::Release {
+                keycode: 37,
+                time: 100
+            })
+            .is_empty());
         assert_eq!(
-            f.feed(KeyEv::Press { keycode: 37, time: 180 }),
+            f.feed(KeyEv::Press {
+                keycode: 37,
+                time: 180
+            }),
             vec![KeyAct::Up(37), KeyAct::Down(37)]
         );
     }
@@ -219,8 +259,19 @@ mod tests {
     #[test]
     fn x11_consecutive_releases_flush_the_earlier_one() {
         let mut f = RepeatFilter::default();
-        assert!(f.feed(KeyEv::Release { keycode: 37, time: 100 }).is_empty());
-        assert_eq!(f.feed(KeyEv::Release { keycode: 50, time: 101 }), vec![KeyAct::Up(37)]);
+        assert!(f
+            .feed(KeyEv::Release {
+                keycode: 37,
+                time: 100
+            })
+            .is_empty());
+        assert_eq!(
+            f.feed(KeyEv::Release {
+                keycode: 50,
+                time: 101
+            }),
+            vec![KeyAct::Up(37)]
+        );
         assert_eq!(f.flush(), Some(KeyAct::Up(50)));
     }
 }

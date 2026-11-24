@@ -218,7 +218,8 @@ fn fixed_huffman() -> &'static (Huffman, Huffman) {
         ll[256..280].fill(7);
         ll[280..288].fill(8);
         let litlen = Huffman::from_lengths(&ll).expect("RFC 1951 固定 litlen ハフマン表は常に有効");
-        let dist = Huffman::from_lengths(&[5u8; 30]).expect("RFC 1951 固定 dist ハフマン表は常に有効");
+        let dist =
+            Huffman::from_lengths(&[5u8; 30]).expect("RFC 1951 固定 dist ハフマン表は常に有効");
         (litlen, dist)
     })
 }
@@ -253,7 +254,10 @@ fn inflate_block(
         let sym = litlen.decode(br)?;
         match sym {
             0..=255 => {
-                ensure!(out.len() < max_out, "展開後サイズが上限 {max_out} を超えます");
+                ensure!(
+                    out.len() < max_out,
+                    "展開後サイズが上限 {max_out} を超えます"
+                );
                 out.push(sym as u8)
             }
             256 => return Ok(()),

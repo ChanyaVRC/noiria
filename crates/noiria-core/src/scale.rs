@@ -15,7 +15,8 @@ type AxisTap = (u32, u32, u32);
 fn lerp_px(a: u32, b: u32, w: u32) -> u32 {
     let iw = 256 - w;
     let rb = (((a & 0x00FF_00FF) * iw + (b & 0x00FF_00FF) * w + 0x0080_0080) >> 8) & 0x00FF_00FF;
-    let ga = (((a >> 8) & 0x00FF_00FF) * iw + ((b >> 8) & 0x00FF_00FF) * w + 0x0080_0080) & 0xFF00_FF00;
+    let ga =
+        (((a >> 8) & 0x00FF_00FF) * iw + ((b >> 8) & 0x00FF_00FF) * w + 0x0080_0080) & 0xFF00_FF00;
     rb | ga
 }
 
@@ -27,7 +28,11 @@ fn fill_axis(dst: usize, src: usize, out: &mut Vec<AxisTap>) {
         let pos = ((d as f64 + 0.5) * src as f64 / dst as f64 - 0.5).clamp(0.0, (src - 1) as f64);
         let i0 = pos.floor() as usize;
         let i1 = (i0 + 1).min(src - 1);
-        out.push((i0 as u32, i1 as u32, ((pos - i0 as f64) * 256.0).round() as u32));
+        out.push((
+            i0 as u32,
+            i1 as u32,
+            ((pos - i0 as f64) * 256.0).round() as u32,
+        ));
     }
 }
 
@@ -158,7 +163,10 @@ unsafe fn horiz_row_avx2(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
         );
         let iw_lo = _mm256_sub_epi16(v256, w_lo);
         let res_lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
-            _mm256_add_epi16(_mm256_mullo_epi16(a_lo, iw_lo), _mm256_mullo_epi16(b_lo, w_lo)),
+            _mm256_add_epi16(
+                _mm256_mullo_epi16(a_lo, iw_lo),
+                _mm256_mullo_epi16(b_lo, w_lo),
+            ),
             v128,
         ));
 
@@ -182,7 +190,10 @@ unsafe fn horiz_row_avx2(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
         );
         let iw_hi = _mm256_sub_epi16(v256, w_hi);
         let res_hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
-            _mm256_add_epi16(_mm256_mullo_epi16(a_hi, iw_hi), _mm256_mullo_epi16(b_hi, w_hi)),
+            _mm256_add_epi16(
+                _mm256_mullo_epi16(a_hi, iw_hi),
+                _mm256_mullo_epi16(b_hi, w_hi),
+            ),
             v128,
         ));
 
@@ -221,11 +232,17 @@ unsafe fn vert_row_avx2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
         let b_lo = _mm256_unpacklo_epi8(vb, zero);
         let b_hi = _mm256_unpackhi_epi8(vb, zero);
         let lo = _mm256_srli_epi16::<8>(_mm256_add_epi16(
-            _mm256_add_epi16(_mm256_mullo_epi16(a_lo, v_iw), _mm256_mullo_epi16(b_lo, v_w)),
+            _mm256_add_epi16(
+                _mm256_mullo_epi16(a_lo, v_iw),
+                _mm256_mullo_epi16(b_lo, v_w),
+            ),
             v128,
         ));
         let hi = _mm256_srli_epi16::<8>(_mm256_add_epi16(
-            _mm256_add_epi16(_mm256_mullo_epi16(a_hi, v_iw), _mm256_mullo_epi16(b_hi, v_w)),
+            _mm256_add_epi16(
+                _mm256_mullo_epi16(a_hi, v_iw),
+                _mm256_mullo_epi16(b_hi, v_w),
+            ),
             v128,
         ));
         _mm256_storeu_si256(pd.add(i) as *mut __m256i, _mm256_packus_epi16(lo, hi));
@@ -275,7 +292,14 @@ thread_local! {
     static ROW_CACHE: RefCell<(Vec<u32>, Vec<u32>)> = const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
-fn scale_rows(src: &[u32], sw: usize, xs: &[AxisTap], ys: &[AxisTap], y_start: usize, dst: &mut [u32]) {
+fn scale_rows(
+    src: &[u32],
+    sw: usize,
+    xs: &[AxisTap],
+    ys: &[AxisTap],
+    y_start: usize,
+    dst: &mut [u32],
+) {
     let dw = xs.len();
     ROW_CACHE.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -379,7 +403,10 @@ fn worker_loop(id: usize, mut last_epoch: u64, shared: Arc<Shared>) {
         let job = {
             let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             while st.epoch == last_epoch {
-                st = shared.work_ready.wait(st).unwrap_or_else(|e| e.into_inner());
+                st = shared
+                    .work_ready
+                    .wait(st)
+                    .unwrap_or_else(|e| e.into_inner());
             }
             last_epoch = st.epoch;
             match st.job {
@@ -439,7 +466,12 @@ impl PoolCaller {
         if self.spawned >= needed {
             return;
         }
-        let current_epoch = self.shared.state.lock().unwrap_or_else(|e| e.into_inner()).epoch;
+        let current_epoch = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .epoch;
         while self.spawned < needed {
             let id = self.spawned;
             let shared = Arc::clone(&self.shared);
@@ -454,7 +486,14 @@ impl PoolCaller {
         }
     }
 
-    fn scale(&mut self, src: &[u32], (sw, sh): (usize, usize), dst: &mut [u32], (dw, dh): (usize, usize), threads: usize) {
+    fn scale(
+        &mut self,
+        src: &[u32],
+        (sw, sh): (usize, usize),
+        dst: &mut [u32],
+        (dw, dh): (usize, usize),
+        threads: usize,
+    ) {
         let wanted_threads = threads.clamp(1, MAX_THREADS).min(dh);
         if wanted_threads > 1 {
             self.ensure_workers(wanted_threads - 1);
@@ -500,7 +539,15 @@ fn pool() -> &'static Mutex<PoolCaller> {
 }
 
 /// `src`（`sw`x`sh`）を `dst`（`dw`x`dh`）へ双一次補間で拡縮する。`threads` > 1 なら行を分けて並列に回す。
-pub fn scale_bilinear(src: &[u32], sw: usize, sh: usize, dst: &mut [u32], dw: usize, dh: usize, threads: usize) {
+pub fn scale_bilinear(
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    dst: &mut [u32],
+    dw: usize,
+    dh: usize,
+    threads: usize,
+) {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw * sh || dst.len() < dw * dh {
         return;
     }
@@ -520,7 +567,15 @@ mod tests {
         (a << 24) | (r << 16) | (g << 8) | b
     }
 
-    fn naive(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize, x: usize, y: usize) -> [f64; 4] {
+    fn naive(
+        src: &[u32],
+        sw: usize,
+        sh: usize,
+        dw: usize,
+        dh: usize,
+        x: usize,
+        y: usize,
+    ) -> [f64; 4] {
         let fx = ((x as f64 + 0.5) * sw as f64 / dw as f64 - 0.5).clamp(0.0, (sw - 1) as f64);
         let fy = ((y as f64 + 0.5) * sh as f64 / dh as f64 - 0.5).clamp(0.0, (sh - 1) as f64);
         let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
@@ -552,7 +607,14 @@ mod tests {
     fn matches_a_float_bilinear_within_a_level_and_a_half_and_is_thread_count_independent() {
         let (sw, sh, dw, dh) = (16usize, 9usize, 24usize, 14usize);
         let src: Vec<u32> = (0..sw * sh)
-            .map(|i| pack((i * 37 % 256) as u32, (i * 91 % 256) as u32, (i * 13 % 256) as u32, 255))
+            .map(|i| {
+                pack(
+                    (i * 37 % 256) as u32,
+                    (i * 91 % 256) as u32,
+                    (i * 13 % 256) as u32,
+                    255,
+                )
+            })
             .collect();
         let mut one = vec![0; dw * dh];
         let mut four = vec![0; dw * dh];
@@ -611,7 +673,14 @@ mod tests {
         ];
         for &(sw, sh, dw, dh) in &cases {
             let src: Vec<u32> = (0..sw * sh)
-                .map(|i| pack((i * 53 % 256) as u32, (i * 97 % 256) as u32, (i * 29 % 256) as u32, 255))
+                .map(|i| {
+                    pack(
+                        (i * 53 % 256) as u32,
+                        (i * 97 % 256) as u32,
+                        (i * 29 % 256) as u32,
+                        255,
+                    )
+                })
                 .collect();
             let mut single = vec![0u32; dw * dh];
             scale_bilinear(&src, sw, sh, &mut single, dw, dh, 1);
@@ -636,7 +705,14 @@ mod tests {
             .map(|(sw, sh, dw, dh, threads)| {
                 std::thread::spawn(move || {
                     let src: Vec<u32> = (0..sw * sh)
-                        .map(|i| pack((i * 41 % 256) as u32, (i * 73 % 256) as u32, (i * 19 % 256) as u32, 255))
+                        .map(|i| {
+                            pack(
+                                (i * 41 % 256) as u32,
+                                (i * 73 % 256) as u32,
+                                (i * 19 % 256) as u32,
+                                255,
+                            )
+                        })
                         .collect();
                     let mut want = vec![0u32; dw * dh];
                     scale_bilinear(&src, sw, sh, &mut want, dw, dh, 1);
@@ -659,7 +735,9 @@ mod tests {
     #[ignore]
     fn scale_cost() {
         let (sw, sh) = (1280usize, 720usize);
-        let src: Vec<u32> = (0..sw * sh).map(|i| (i as u32).wrapping_mul(2654435761)).collect();
+        let src: Vec<u32> = (0..sw * sh)
+            .map(|i| (i as u32).wrapping_mul(2654435761))
+            .collect();
         for (dw, dh) in [(1920usize, 1080usize), (2560, 1440), (3840, 2160)] {
             let mut dst = vec![0u32; dw * dh];
             for threads in [1usize, 4] {
@@ -667,7 +745,10 @@ mod tests {
                 for _ in 0..10 {
                     scale_bilinear(&src, sw, sh, &mut dst, dw, dh, threads);
                 }
-                println!("{dw}x{dh} threads={threads}: {:.2} ms", t.elapsed().as_secs_f64() * 100.0);
+                println!(
+                    "{dw}x{dh} threads={threads}: {:.2} ms",
+                    t.elapsed().as_secs_f64() * 100.0
+                );
             }
         }
     }
@@ -680,13 +761,33 @@ mod tests {
             return;
         };
         let (dw, dh): (usize, usize) = (
-            std::env::var("SCALE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1920),
-            std::env::var("SCALE_H").ok().and_then(|v| v.parse().ok()).unwrap_or(1080),
+            std::env::var("SCALE_W")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1920),
+            std::env::var("SCALE_H")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1080),
         );
         let png = crate::codec::png::decode(&std::fs::read(i).unwrap()).unwrap();
-        let src: Vec<u32> = png.rgba.as_chunks::<4>().0.iter().map(|p| pack(p[0] as u32, p[1] as u32, p[2] as u32, 255)).collect();
+        let src: Vec<u32> = png
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| pack(p[0] as u32, p[1] as u32, p[2] as u32, 255))
+            .collect();
         let mut dst = vec![0u32; dw * dh];
-        scale_bilinear(&src, png.width as usize, png.height as usize, &mut dst, dw, dh, 4);
+        scale_bilinear(
+            &src,
+            png.width as usize,
+            png.height as usize,
+            &mut dst,
+            dw,
+            dh,
+            4,
+        );
         let mut out = crate::pixmap::Pixmap::new(dw as u32, dh as u32);
         for (px, d) in dst.iter().zip(out.data.as_chunks_mut::<4>().0) {
             d.copy_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8, 255]);

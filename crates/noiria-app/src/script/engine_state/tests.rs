@@ -1658,7 +1658,11 @@ fn screenshot_and_thumb_capture_do_not_hold_the_scene_lock_while_composing() {
     }
     stop.store(true, Ordering::SeqCst);
     let worst = observer.join().unwrap();
-    eprintln!("SCENE_LOCK_WORST_WAIT_MS={:.2} COMPOSE_MS={:.2}", worst.as_secs_f64() * 1e3, compose.as_secs_f64() * 1e3);
+    eprintln!(
+        "SCENE_LOCK_WORST_WAIT_MS={:.2} COMPOSE_MS={:.2}",
+        worst.as_secs_f64() * 1e3,
+        compose.as_secs_f64() * 1e3
+    );
     assert!(
         worst < compose / 3,
         "シーンのロックを最大 {worst:?} 待たされた（合成 1 回 {compose:?}）"
@@ -1673,9 +1677,15 @@ fn oversized_dimensions_are_errors_not_allocations() {
     let dir = temp_game_dir("oversized-dims-test");
     let es = make_engine_state(&dir);
     let id = es.layer_new("image").unwrap();
-    assert!(es.layer_fill(id, "fore", 100_000, 100_000, 0, 0, 0, 255).is_err());
-    assert!(es.layer_fill(id, "fore", 1 << 31, 1 << 31, 0, 0, 0, 255).is_err());
-    assert!(es.layer_msgbox(id, "fore", 100_000, 100_000, 4, 0, 0, 0, 255).is_err());
+    assert!(es
+        .layer_fill(id, "fore", 100_000, 100_000, 0, 0, 0, 255)
+        .is_err());
+    assert!(es
+        .layer_fill(id, "fore", 1 << 31, 1 << 31, 0, 0, 0, 255)
+        .is_err());
+    assert!(es
+        .layer_msgbox(id, "fore", 100_000, 100_000, 4, 0, 0, 0, 255)
+        .is_err());
     assert!(es.thumb_capture_sized(100_000, 100_000).is_err());
     assert!(es.layer_fill(id, "fore", 8, 8, 0, 0, 0, 255).is_ok());
     std::fs::remove_dir_all(&dir).ok();
@@ -1696,7 +1706,15 @@ fn a_poisoned_scene_lock_does_not_cascade_into_later_ops() {
     assert!(panicked.is_err() && es.scene.is_poisoned());
     let id = es.layer_new("image").unwrap();
     es.layer_fill(id, "fore", 4, 4, 1, 2, 3, 255).unwrap();
-    es.layer_set_props(id, "fore", LayerProps { x: Some(3), ..LayerProps::default() }).unwrap();
+    es.layer_set_props(
+        id,
+        "fore",
+        LayerProps {
+            x: Some(3),
+            ..LayerProps::default()
+        },
+    )
+    .unwrap();
     assert!(!es.layer_moving());
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1706,14 +1724,18 @@ fn next_video_pixmap_reuses_unreferenced_buffer_and_protects_shared_frames() {
     let mut src = noiria_core::codec::video::open_video(FIXTURE_CLIP_5FRAMES.to_vec()).unwrap();
     let mut recycle: Vec<Arc<Pixmap>> = Vec::new();
 
-    let f0 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+    let f0 = next_video_pixmap(src.as_mut(), &mut recycle)
+        .unwrap()
+        .unwrap();
     let f0_data_ptr = f0.data.as_ptr();
     let f0_cap = f0.data.capacity();
     let f0_snapshot = f0.data.clone();
     let mut held_by_scene = f0.clone();
     push_recycle(&mut recycle, f0);
 
-    let f1 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+    let f1 = next_video_pixmap(src.as_mut(), &mut recycle)
+        .unwrap()
+        .unwrap();
     assert!(!Arc::ptr_eq(&held_by_scene, &f1));
     assert_ne!(f1.data.as_ptr(), f0_data_ptr);
     assert_eq!(held_by_scene.data, f0_snapshot);
@@ -1721,7 +1743,9 @@ fn next_video_pixmap_reuses_unreferenced_buffer_and_protects_shared_frames() {
     held_by_scene = f1.clone();
     push_recycle(&mut recycle, f1);
 
-    let f2 = next_video_pixmap(src.as_mut(), &mut recycle).unwrap().unwrap();
+    let f2 = next_video_pixmap(src.as_mut(), &mut recycle)
+        .unwrap()
+        .unwrap();
     assert_eq!(f2.data.as_ptr(), f0_data_ptr);
     assert_eq!(f2.data.capacity(), f0_cap);
     assert!(!Arc::ptr_eq(&held_by_scene, &f2));
@@ -1743,10 +1767,16 @@ fn layer_load_image_caches_and_shares_arc_pixmap() {
     let id4 = es.layer_new("image").unwrap();
     let id5 = es.layer_new("image").unwrap();
 
-    assert_eq!(es.layer_load_image(id1, "fore", "bg.png".into()).unwrap(), (2, 1));
+    assert_eq!(
+        es.layer_load_image(id1, "fore", "bg.png".into()).unwrap(),
+        (2, 1)
+    );
     std::fs::remove_file(dir.join("bg.png")).unwrap();
 
-    assert_eq!(es.layer_load_image(id2, "fore", "bg.png".into()).unwrap(), (2, 1));
+    assert_eq!(
+        es.layer_load_image(id2, "fore", "bg.png".into()).unwrap(),
+        (2, 1)
+    );
     assert_eq!(
         es.layer_load_image_ex(id3, "fore", "bg.png".into(), ImageLoadOpts::default())
             .unwrap(),
@@ -1765,14 +1795,40 @@ fn layer_load_image_caches_and_shares_arc_pixmap() {
         .unwrap(),
         (2, 1)
     );
-    es.layer_blit_image(id5, "fore", "bg.png", 0, 0, None).unwrap();
+    es.layer_blit_image(id5, "fore", "bg.png", 0, 0, None)
+        .unwrap();
 
     let scene = es.scene.lock().unwrap();
-    let p1 = scene.layer(Page::Fore, id1).unwrap().pixmap.as_ref().unwrap();
-    let p2 = scene.layer(Page::Fore, id2).unwrap().pixmap.as_ref().unwrap();
-    let p3 = scene.layer(Page::Fore, id3).unwrap().pixmap.as_ref().unwrap();
-    let p4 = scene.layer(Page::Fore, id4).unwrap().pixmap.as_ref().unwrap();
-    let p5 = scene.layer(Page::Fore, id5).unwrap().pixmap.as_ref().unwrap();
+    let p1 = scene
+        .layer(Page::Fore, id1)
+        .unwrap()
+        .pixmap
+        .as_ref()
+        .unwrap();
+    let p2 = scene
+        .layer(Page::Fore, id2)
+        .unwrap()
+        .pixmap
+        .as_ref()
+        .unwrap();
+    let p3 = scene
+        .layer(Page::Fore, id3)
+        .unwrap()
+        .pixmap
+        .as_ref()
+        .unwrap();
+    let p4 = scene
+        .layer(Page::Fore, id4)
+        .unwrap()
+        .pixmap
+        .as_ref()
+        .unwrap();
+    let p5 = scene
+        .layer(Page::Fore, id5)
+        .unwrap()
+        .pixmap
+        .as_ref()
+        .unwrap();
 
     assert!(Arc::ptr_eq(p1, p2));
     assert!(Arc::ptr_eq(p1, p3));

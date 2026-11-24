@@ -33,7 +33,11 @@ pub fn text(img: &mut RgbaImage, x: i32, y: i32, scale: i32, s: &str, color: Rgb
                         for dy in 0..scale {
                             for dx in 0..scale {
                                 let (px, py) = (cx + rx * scale + dx, y + ry as i32 * scale + dy);
-                                if px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                                if px >= 0
+                                    && py >= 0
+                                    && (px as u32) < img.width()
+                                    && (py as u32) < img.height()
+                                {
                                     img.put_pixel(px as u32, py as u32, color);
                                 }
                             }
@@ -70,24 +74,53 @@ pub fn place(bg: &mut RgbaImage, sprite: &RgbaImage, left: i32, top: i32, scale:
 pub fn style_candidates(bg: &RgbaImage) -> RgbaImage {
     let row_h = 470u32;
     let mut out = RgbaImage::new(1280, row_h * 3);
-    for (i, (style, label)) in [(Style::A, "A  FLAT MINIMAL"), (Style::B, "B  PAPER CUT"), (Style::C, "C  TALL FLAT")]
-        .into_iter()
-        .enumerate()
+    for (i, (style, label)) in [
+        (Style::A, "A  FLAT MINIMAL"),
+        (Style::B, "B  PAPER CUT"),
+        (Style::C, "C  TALL FLAT"),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let crop = imageops::crop_imm(bg, 0, 120, 1280, row_h).to_image();
         imageops::overlay(&mut out, &crop, 0, (i as u32 * row_h) as i64);
         let y0 = (i as u32 * row_h) as i32;
         let scale = 0.5;
-        for (k, (who, e)) in [(Who::Hinata, Expr::Normal), (Who::Hinata, Expr::Smile), (Who::Shiori, Expr::Normal), (Who::Shiori, Expr::Blush)]
-            .into_iter()
-            .enumerate()
+        for (k, (who, e)) in [
+            (Who::Hinata, Expr::Normal),
+            (Who::Hinata, Expr::Smile),
+            (Who::Shiori, Expr::Normal),
+            (Who::Shiori, Expr::Blush),
+        ]
+        .into_iter()
+        .enumerate()
         {
-            place(&mut out, &sprite_of(who, style, e), 190 + k as i32 * 270, y0 + 14, scale);
+            place(
+                &mut out,
+                &sprite_of(who, style, e),
+                190 + k as i32 * 270,
+                y0 + 14,
+                scale,
+            );
         }
         let mut words = label.split_whitespace();
-        text(&mut out, 14, y0 + 14, 6, words.next().unwrap_or(""), Rgba([58, 34, 58, 255]));
+        text(
+            &mut out,
+            14,
+            y0 + 14,
+            6,
+            words.next().unwrap_or(""),
+            Rgba([58, 34, 58, 255]),
+        );
         for (n, w) in words.enumerate() {
-            text(&mut out, 14, y0 + 72 + n as i32 * 30, 3, w, Rgba([58, 34, 58, 255]));
+            text(
+                &mut out,
+                14,
+                y0 + 72 + n as i32 * 30,
+                3,
+                w,
+                Rgba([58, 34, 58, 255]),
+            );
         }
     }
     out
@@ -96,7 +129,10 @@ pub fn style_candidates(bg: &RgbaImage) -> RgbaImage {
 /// 4 表情を単色背景に並べたシート。
 pub fn sheet(who: Who, style: Style) -> RgbaImage {
     let mut out = RgbaImage::from_pixel(2000, 900, Rgba([150, 168, 200, 255]));
-    for (k, e) in [Expr::Normal, Expr::Smile, Expr::Blush, Expr::Sad].into_iter().enumerate() {
+    for (k, e) in [Expr::Normal, Expr::Smile, Expr::Blush, Expr::Sad]
+        .into_iter()
+        .enumerate()
+    {
         place(&mut out, &sprite_of(who, style, e), k as i32 * 500, 0, 1.0);
     }
     out

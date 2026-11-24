@@ -13,12 +13,12 @@ use anyhow::{ensure, Context, Result};
 
 use windows::core::{GUID, HSTRING};
 use windows::Win32::Media::MediaFoundation::{
-    IMFAttributes, IMFMediaBuffer, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateAttributes,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
-    MFCreateSourceReaderFromURL, MFMediaType_Video, MFStartup, MFVideoFormat_H264,
-    MFVideoFormat_RGB32, MFSTARTUP_FULL, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
+    IMFAttributes, IMFMediaBuffer, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
+    MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Video, MFStartup,
+    MFVideoFormat_H264, MFVideoFormat_RGB32, MFSTARTUP_FULL, MF_MT_ALL_SAMPLES_INDEPENDENT,
+    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
@@ -481,7 +481,11 @@ mod tests {
         {
             let mut locked = LockedBuffer::lock(&buffer).unwrap();
             assert!(locked.max_len >= 16);
-            assert_eq!(locked.as_slice().len(), 0, "現在長は SetCurrentLength まで 0");
+            assert_eq!(
+                locked.as_slice().len(),
+                0,
+                "現在長は SetCurrentLength まで 0"
+            );
             locked.as_mut_slice()[..16].copy_from_slice(&[7u8; 16]);
         }
         // SAFETY: Unlock 済みの有効なバッファ。

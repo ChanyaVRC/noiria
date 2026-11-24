@@ -244,7 +244,11 @@ const BYTE_ORDER_LSB: u8 = b'l';
 /// セットアップハンドシェイクを行い、TrueColor visual（depth 24/32、
 /// red-mask==0xFF0000）を検証して返す。想定外の visual / image-byte-order は
 /// 明確なエラーにする（バイトスワップは初版非対応）。
-pub(crate) fn handshake(stream: &mut UnixStream, auth_name: &[u8], auth_data: &[u8]) -> Result<Setup> {
+pub(crate) fn handshake(
+    stream: &mut UnixStream,
+    auth_name: &[u8],
+    auth_data: &[u8],
+) -> Result<Setup> {
     let mut req = Vec::new();
     req.push(BYTE_ORDER_LSB);
     req.push(0);

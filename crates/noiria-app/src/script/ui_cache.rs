@@ -89,7 +89,11 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
         self.map.insert(k, (v, self.tick));
         self.bytes += sz;
         while self.bytes > self.cap_bytes {
-            let Some(oldest) = self.map.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone())
+            let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
             else {
                 break;
             };
@@ -183,7 +187,10 @@ impl UiCaches {
     /// 縮小画像のキャッシュに `w`x`h` の画像が何枚入るか。これを超えて先読みしても古いものを
     /// 追い出すだけ（かつ先読みのたびに再デコードになる）ので、先読みはこの枚数で打ち切る。
     pub(crate) fn scaled_capacity(&self, w: u32, h: u32) -> usize {
-        let one = (w as usize).saturating_mul(h as usize).saturating_mul(4).max(1);
+        let one = (w as usize)
+            .saturating_mul(h as usize)
+            .saturating_mul(4)
+            .max(1);
         self.scaled.cap_bytes / one
     }
 }
@@ -214,7 +221,10 @@ pub(crate) fn load_thumb_cached(
 ) -> Result<Arc<Pixmap>, String> {
     let sized = w != 0 && h != 0;
     let key = thumb_key(game_id, slot, w, h);
-    if let Some(p) = key.as_ref().and_then(|k| cache.lock_unpoisoned().thumbs.get(k)) {
+    if let Some(p) = key
+        .as_ref()
+        .and_then(|k| cache.lock_unpoisoned().thumbs.get(k))
+    {
         return Ok(p);
     }
     let (max_w, max_h) = if sized {
@@ -400,14 +410,25 @@ impl Prefetcher {
 impl Drop for Prefetcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(w) = self.worker.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(w) = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             drop(w.tx);
             let _ = w.handle.join();
         }
     }
 }
 
-fn run_job(cache: &Mutex<UiCaches>, game_dir: &GameDir, game_id: &str, stop: &AtomicBool, job: Job) {
+fn run_job(
+    cache: &Mutex<UiCaches>,
+    game_dir: &GameDir,
+    game_id: &str,
+    stop: &AtomicBool,
+    job: Job,
+) {
     match job {
         Job::Scaled { paths, w, h } => {
             for p in paths {
@@ -564,7 +585,11 @@ mod tests {
         drop(pf);
         let after_drop = cache.lock_unpoisoned().scaled.len();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert_eq!(cache.lock_unpoisoned().scaled.len(), after_drop, "drop 後も先読みが続いている");
+        assert_eq!(
+            cache.lock_unpoisoned().scaled.len(),
+            after_drop,
+            "drop 後も先読みが続いている"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -573,7 +598,10 @@ mod tests {
     fn scaled_prefetch_is_capped_to_what_the_cache_can_hold() {
         let caches = UiCaches::new();
         // 336x189x4 = 254,016 バイト。24MiB の上限には 98 枚入る。
-        assert_eq!(caches.scaled_capacity(336, 189), (24 << 20) / (336 * 189 * 4));
+        assert_eq!(
+            caches.scaled_capacity(336, 189),
+            (24 << 20) / (336 * 189 * 4)
+        );
         assert!(caches.scaled_capacity(336, 189) >= 90);
     }
 

@@ -93,10 +93,16 @@ mod tests {
         assert_eq!(to_u32(1e20), u32::MAX);
         assert_eq!(to_i32(-1e20), i32::MIN);
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!((to_u8(bad), to_u32(bad), to_i32(bad), to_time_ms(bad)), (0, 0, 0, 0));
+            assert_eq!(
+                (to_u8(bad), to_u32(bad), to_i32(bad), to_time_ms(bad)),
+                (0, 0, 0, 0)
+            );
         }
         assert_eq!(to_time_ms(1e30), u64::from(u32::MAX));
-        assert_eq!((to_coord(1e20), to_coord(-1e20), to_coord(-10.6)), (COORD_MAX, -COORD_MAX, -11));
+        assert_eq!(
+            (to_coord(1e20), to_coord(-1e20), to_coord(-10.6)),
+            (COORD_MAX, -COORD_MAX, -11)
+        );
     }
 
     #[test]

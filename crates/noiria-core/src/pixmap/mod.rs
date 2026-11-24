@@ -28,13 +28,20 @@ pub const MAX_BYTES: usize = 256 << 20;
 /// （`w*h*4` の確保失敗はプロセス abort）なので、外部由来の寸法は必ずこれを通す。
 pub fn checked_dims(w: u32, h: u32) -> Result<usize, String> {
     if w > MAX_DIM || h > MAX_DIM {
-        return Err(format!("画像の寸法が大きすぎます: {w}x{h}（1 辺は {MAX_DIM} 以下）"));
+        return Err(format!(
+            "画像の寸法が大きすぎます: {w}x{h}（1 辺は {MAX_DIM} 以下）"
+        ));
     }
     let bytes = (w as usize)
         .checked_mul(h as usize)
         .and_then(|n| n.checked_mul(4))
         .filter(|&n| n <= MAX_BYTES)
-        .ok_or_else(|| format!("画像の寸法が大きすぎます: {w}x{h}（{} MiB 以下）", MAX_BYTES >> 20))?;
+        .ok_or_else(|| {
+            format!(
+                "画像の寸法が大きすぎます: {w}x{h}（{} MiB 以下）",
+                MAX_BYTES >> 20
+            )
+        })?;
     Ok(bytes)
 }
 
@@ -83,7 +90,11 @@ impl Pixmap {
         }
         #[cfg(not(target_arch = "x86_64"))]
         premultiply_rgba_scalar(rgba, &mut data);
-        Self { width, height, data }
+        Self {
+            width,
+            height,
+            data,
+        }
     }
 
     /// 全画素が不透明 (alpha == 255) な RGBA8 バッファをコピー・乗算なしでそのまま包む。
@@ -605,7 +616,12 @@ impl Pixmap {
 
 #[inline]
 fn premultiply_rgba_scalar(rgba: &[u8], out: &mut [u8]) {
-    for (dst, px) in out.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
+    for (dst, px) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(rgba.as_chunks::<4>().0)
+    {
         let a = px[3] as u32;
         dst[0] = div255(px[0] as u32 * a) as u8;
         dst[1] = div255(px[1] as u32 * a) as u8;
@@ -616,7 +632,12 @@ fn premultiply_rgba_scalar(rgba: &[u8], out: &mut [u8]) {
 
 #[inline]
 fn blit_row_opaque_scalar(dst_row: &mut [u8], src_row: &[u8]) {
-    for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
+    for (d, s) in dst_row
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src_row.as_chunks::<4>().0)
+    {
         let sa = s[3] as u32;
         if sa == 255 {
             d.copy_from_slice(s);
@@ -631,7 +652,12 @@ fn blit_row_opaque_scalar(dst_row: &mut [u8], src_row: &[u8]) {
 
 #[inline]
 fn blit_row_opacity_scalar(dst_row: &mut [u8], src_row: &[u8], o: u32) {
-    for (d, s) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(src_row.as_chunks::<4>().0) {
+    for (d, s) in dst_row
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src_row.as_chunks::<4>().0)
+    {
         let sa = div255(s[3] as u32 * o);
         if sa == 0 && s[0] | s[1] | s[2] == 0 {
             continue;
@@ -655,7 +681,9 @@ fn lerp_bytes_scalar(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
 #[inline]
 fn universal_lut_scalar(out: &mut [u8], a: &[u8], b: &[u8], rule: &[u8], lut: &[u16; 256]) {
     for (i, ((o, pa), pb)) in out
-        .as_chunks_mut::<4>().0.iter_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
         .zip(a.as_chunks::<4>().0)
         .zip(b.as_chunks::<4>().0)
         .enumerate()

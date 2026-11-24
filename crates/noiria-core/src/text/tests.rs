@@ -67,8 +67,7 @@ fn wrapping_stays_in_box() {
     }
     // 複数行に折り返されている
     let max_line = r.glyphs.iter().map(|g| g.line_i).max().unwrap_or(0);
-    let distinct_y: std::collections::HashSet<i32> =
-        r.glyphs.iter().map(|g| g.y / 10).collect();
+    let distinct_y: std::collections::HashSet<i32> = r.glyphs.iter().map(|g| g.y / 10).collect();
     assert!(
         max_line >= 1 || distinct_y.len() > 1,
         "折返しが発生していない"
@@ -108,7 +107,14 @@ fn color_override_changes_pixels() {
     let sum = |r: &RasterText, c: usize| -> u32 {
         r.glyphs
             .iter()
-            .flat_map(|g| g.pixmap.data.as_chunks::<4>().0.iter().map(move |p| p[c] as u32))
+            .flat_map(|g| {
+                g.pixmap
+                    .data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(move |p| p[c] as u32)
+            })
             .sum()
     };
     // 赤指定は G 成分が大きく減る
@@ -825,7 +831,14 @@ fn edge_color_overrides_style_outline() {
     let sum_green = |r: &RasterText| -> u32 {
         r.glyphs
             .iter()
-            .flat_map(|g| g.pixmap.data.as_chunks::<4>().0.iter().map(move |p| p[1] as u32))
+            .flat_map(|g| {
+                g.pixmap
+                    .data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(move |p| p[1] as u32)
+            })
             .sum()
     };
     assert!(
@@ -929,7 +942,9 @@ fn appending_keeps_prefix_glyph_count_with_inline_image() {
 #[test]
 fn char_missing_from_every_font_does_not_load_the_whole_registry() {
     let mut e = engine();
-    e.load_game_fonts(vec![crate::font::tests::minimal_font_bytes("Missing Glyph Probe")]);
+    e.load_game_fonts(vec![crate::font::tests::minimal_font_bytes(
+        "Missing Glyph Probe",
+    )]);
     let style = TextStyle {
         font_family: "Missing Glyph Probe".into(),
         outline_width: 0,
@@ -948,7 +963,11 @@ fn char_missing_from_every_font_does_not_load_the_whole_registry() {
     let second = e.raster_segments(&[seg(text)], &style);
     assert!(e.fonts.len() <= 2);
     assert_eq!(first.glyphs.len(), second.glyphs.len());
-    assert!(t.elapsed().as_millis() < 500, "2 回目の描画が遅い: {:?}", t.elapsed());
+    assert!(
+        t.elapsed().as_millis() < 500,
+        "2 回目の描画が遅い: {:?}",
+        t.elapsed()
+    );
 }
 
 #[test]
@@ -1078,8 +1097,24 @@ fn fast_rasterize_glyph_matches_naive_reference_pixel_for_pixel() {
             .collect();
         for &pad in &[0u32, 1, 2, 3, 5, 14] {
             for &bold in &[false, true] {
-                let got = rasterize_glyph(w, h, &data, [240, 200, 120, 230], [10, 20, 40, 180], pad, bold);
-                let want = naive(w, h, &data, [240, 200, 120, 230], [10, 20, 40, 180], pad, bold);
+                let got = rasterize_glyph(
+                    w,
+                    h,
+                    &data,
+                    [240, 200, 120, 230],
+                    [10, 20, 40, 180],
+                    pad,
+                    bold,
+                );
+                let want = naive(
+                    w,
+                    h,
+                    &data,
+                    [240, 200, 120, 230],
+                    [10, 20, 40, 180],
+                    pad,
+                    bold,
+                );
                 assert_eq!(got.data, want.data, "w={w} h={h} pad={pad} bold={bold}");
             }
         }

@@ -60,7 +60,9 @@ impl<'a> OpRegistrar<'a> {
         let es = Rc::clone(self.es);
         self.set(
             name,
-            sync_native(name, arity, move |vm, _this, args| f(&es.borrow(), vm, args)),
+            sync_native(name, arity, move |vm, _this, args| {
+                f(&es.borrow(), vm, args)
+            }),
         );
     }
 
@@ -492,8 +494,8 @@ fn install_video_ops(reg: &OpRegistrar<'_>) {
         let id = as_u32(&arg(args, 0));
         let path = as_string(&arg(args, 1));
         let looping = as_bool(&arg(args, 2));
-        let frame = video_optional_frame(num(&arg(args, 3)))
-            .map_err(|e| vm.make_error("Error", e))?;
+        let frame =
+            video_optional_frame(num(&arg(args, 3))).map_err(|e| vm.make_error("Error", e))?;
         let position_ms = num(&arg(args, 4));
         es.video_play_at(
             id,
@@ -592,22 +594,26 @@ fn install_video_ops(reg: &OpRegistrar<'_>) {
 }
 
 fn install_input_ops(reg: &OpRegistrar<'_>) {
-    reg.async_op("op_input_next_event", 0, |_es, pending, vm, _args, handle| {
-        let mut p = pending.borrow_mut();
-        if let Some(ev) = p.input_buffer.pop_front() {
-            drop(p);
-            handle.resolve(vm, input_event_to_value(&ev));
-        } else if p.input_closed {
-            drop(p);
-            handle.resolve(vm, quit_event_value());
-        } else {
-            // ヘッドレスのロックステップ同期: 新しい入力待ちハンドルの登録。
-            // ack は `drive()` が静止条件（pump Idle）を確認してから出す
-            // （`PendingOps::input_acked` のドキュメント参照）。
-            p.input = Some(handle);
-            p.input_acked = false;
-        }
-    });
+    reg.async_op(
+        "op_input_next_event",
+        0,
+        |_es, pending, vm, _args, handle| {
+            let mut p = pending.borrow_mut();
+            if let Some(ev) = p.input_buffer.pop_front() {
+                drop(p);
+                handle.resolve(vm, input_event_to_value(&ev));
+            } else if p.input_closed {
+                drop(p);
+                handle.resolve(vm, quit_event_value());
+            } else {
+                // ヘッドレスのロックステップ同期: 新しい入力待ちハンドルの登録。
+                // ack は `drive()` が静止条件（pump Idle）を確認してから出す
+                // （`PendingOps::input_acked` のドキュメント参照）。
+                p.input = Some(handle);
+                p.input_acked = false;
+            }
+        },
+    );
 }
 
 fn install_sys_ops(reg: &OpRegistrar<'_>) {

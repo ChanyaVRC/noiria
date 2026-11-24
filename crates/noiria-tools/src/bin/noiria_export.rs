@@ -18,10 +18,10 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use noiria_tools::pack::excluded_summary;
 use noiria_tools::export::{
     run_export, run_export_with_policy, ExportOptions, ExportPolicy, Target,
 };
+use noiria_tools::pack::excluded_summary;
 
 struct Args {
     game: PathBuf,
@@ -222,7 +222,12 @@ fn main() -> Result<()> {
     );
     if args.list {
         for e in &report.pack_entries {
-            println!("  {}  {} バイト{}", e.path, e.plain_len, e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default());
+            println!(
+                "  {}  {} バイト{}",
+                e.path,
+                e.plain_len,
+                e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default()
+            );
         }
     }
     println!("{}", excluded_summary(&report.pack_excluded));

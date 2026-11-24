@@ -268,7 +268,8 @@ impl FontRegistry {
                 continue;
             };
 
-            let fits_file = |off: u64, len: u64| off.checked_add(len).is_some_and(|e| e <= file_len);
+            let fits_file =
+                |off: u64, len: u64| off.checked_add(len).is_some_and(|e| e <= file_len);
             if !fits_file(head_off, head_len)
                 || !fits_file(maxp_off, maxp_len)
                 || !fits_file(hhea_off, hhea_len)
@@ -307,7 +308,11 @@ impl FontRegistry {
             if hmtx_len < (hhea.number_of_h_metrics as u64) * 4 {
                 continue;
             }
-            let loca_entry_bytes = if head.index_to_loc_format == 1 { 4u64 } else { 2u64 };
+            let loca_entry_bytes = if head.index_to_loc_format == 1 {
+                4u64
+            } else {
+                2u64
+            };
             if loca_len < (num_glyphs as u64 + 1) * loca_entry_bytes {
                 continue;
             }
@@ -459,7 +464,12 @@ fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> std::io::Resul
     file.read_exact(buf)
 }
 
-fn file_has_supported_cmap(file: &mut File, cmap_off: u64, cmap_len: u64, buf: &mut Vec<u8>) -> bool {
+fn file_has_supported_cmap(
+    file: &mut File,
+    cmap_off: u64,
+    cmap_len: u64,
+    buf: &mut Vec<u8>,
+) -> bool {
     let mut hdr = [0u8; 4];
     if read_exact_at(file, cmap_off, &mut hdr).is_err() {
         return false;

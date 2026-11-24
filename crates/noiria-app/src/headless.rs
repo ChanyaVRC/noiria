@@ -375,17 +375,18 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
     let mut shots = 0u32;
     let end = p.start + p.duration;
 
-    let make_ev = |kind: &'static str, x: f64, y: f64, button: Option<&'static str>, key: Option<String>| {
-        InputEvent {
-            kind,
-            x,
-            y,
-            button,
-            key,
-            delta: None,
-            t: now_ms(&p),
-        }
-    };
+    let make_ev =
+        |kind: &'static str, x: f64, y: f64, button: Option<&'static str>, key: Option<String>| {
+            InputEvent {
+                kind,
+                x,
+                y,
+                button,
+                key,
+                delta: None,
+                t: now_ms(&p),
+            }
+        };
 
     log::info!(
         "スクリプト autotest 開始: {} ステップ, 出力先 {}{}",
@@ -398,7 +399,10 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
     loop {
         let now = p.clock.now();
         if now >= end {
-            log::warn!("仮想時間の上限（{}秒）に達したためスクリプトを打ち切ります", p.duration.as_secs());
+            log::warn!(
+                "仮想時間の上限（{}秒）に達したためスクリプトを打ち切ります",
+                p.duration.as_secs()
+            );
             break;
         }
         if drain_quit(&p) {

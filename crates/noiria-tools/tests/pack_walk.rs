@@ -39,7 +39,10 @@ fn link_to_outside_directory_is_an_error_not_silently_packed() {
     let err = pack_dir(&game, &KEY, &[], false, false)
         .expect_err("ゲームディレクトリ外を指すリンクは error にする");
     let msg = format!("{err:#}");
-    assert!(msg.contains("linked") && msg.contains("リンク"), "該当パスとリンクであることを示す: {msg}");
+    assert!(
+        msg.contains("linked") && msg.contains("リンク"),
+        "該当パスとリンクであることを示す: {msg}"
+    );
 }
 
 #[test]
@@ -49,10 +52,12 @@ fn link_loop_is_an_error_not_a_stack_overflow() {
     root.write("game/sub/a.txt", b"a");
     link_dir(&game.join("sub").join("loop"), &game);
 
-    let err = pack_dir(&game, &KEY, &[], false, false)
-        .expect_err("循環リンクは error にする");
+    let err = pack_dir(&game, &KEY, &[], false, false).expect_err("循環リンクは error にする");
     let msg = format!("{err:#}");
-    assert!(msg.contains("loop") && msg.contains("リンク"), "リンクだと明示する: {msg}");
+    assert!(
+        msg.contains("loop") && msg.contains("リンク"),
+        "リンクだと明示する: {msg}"
+    );
 }
 
 #[test]
@@ -84,7 +89,10 @@ fn case_only_duplicate_keys_are_an_error() {
     let err = pack_dir(&game, &KEY, &[], false, false)
         .expect_err("大文字小文字だけが違うキーは error にする");
     let msg = format!("{err:#}");
-    assert!(msg.contains("Room.png") && msg.contains("room.png"), "{msg}");
+    assert!(
+        msg.contains("Room.png") && msg.contains("room.png"),
+        "{msg}"
+    );
 }
 
 #[cfg(unix)]
@@ -95,8 +103,7 @@ fn non_utf8_file_name_is_an_error() {
     let game = game(&root);
     let name = std::ffi::OsStr::from_bytes(b"bad_\xff_name.txt");
     std::fs::write(game.join(name), b"x").unwrap();
-    let err = pack_dir(&game, &KEY, &[], false, false)
-        .expect_err("非 UTF-8 名は error にする");
+    let err = pack_dir(&game, &KEY, &[], false, false).expect_err("非 UTF-8 名は error にする");
     assert!(format!("{err:#}").contains("UTF-8"));
 }
 
@@ -108,7 +115,6 @@ fn unpaired_surrogate_file_name_is_an_error() {
     let game = game(&root);
     let name = std::ffi::OsString::from_wide(&[b'b' as u16, 0xD800, b'.' as u16, b't' as u16]);
     std::fs::write(game.join(name), b"x").unwrap();
-    let err = pack_dir(&game, &KEY, &[], false, false)
-        .expect_err("非 UTF-8 名は error にする");
+    let err = pack_dir(&game, &KEY, &[], false, false).expect_err("非 UTF-8 名は error にする");
     assert!(format!("{err:#}").contains("UTF-8"));
 }

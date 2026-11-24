@@ -84,7 +84,11 @@ pub(crate) fn letterbox_bands(vp: Viewport, cw: u32, ch: u32) -> Vec<(i32, i32, 
 
 fn scale_threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::thread::available_parallelism().map_or(2, |n| n.get()).min(4))
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .min(4)
+    })
 }
 
 /// 表示サイズへ拡大した 1 フレームのキャッシュ。同じ (フレーム世代, 出力サイズ) の再表示（Win32 の WM_PAINT、
@@ -99,8 +103,22 @@ pub(crate) struct ScaleCache {
 
 impl ScaleCache {
     /// `src`（`sw`x`sh`、世代 `generation`）を `dw`x`dh` へ拡大したものを返す。同サイズなら `src` そのもの。
-    pub(crate) fn get<'a>(&'a mut self, src: &'a [u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> &'a [u32] {
-        if (sw, sh) == (dw, dh) || sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw as usize * sh as usize {
+    pub(crate) fn get<'a>(
+        &'a mut self,
+        src: &'a [u32],
+        generation: u64,
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+    ) -> &'a [u32] {
+        if (sw, sh) == (dw, dh)
+            || sw == 0
+            || sh == 0
+            || dw == 0
+            || dh == 0
+            || src.len() < sw as usize * sh as usize
+        {
             return src;
         }
         let key = (generation, dw, dh);
@@ -141,7 +159,15 @@ impl LetterboxCache {
     }
 
     /// `src`（`sw`x`sh`、世代 `generation`）をレターボックス付きで `dw`x`dh` に置いたバッファと、ゲーム領域を返す。
-    pub(crate) fn get(&mut self, src: &[u32], generation: u64, sw: u32, sh: u32, dw: u32, dh: u32) -> (&[u32], Viewport) {
+    pub(crate) fn get(
+        &mut self,
+        src: &[u32],
+        generation: u64,
+        sw: u32,
+        sh: u32,
+        dw: u32,
+        dh: u32,
+    ) -> (&[u32], Viewport) {
         let vp = fit(dw, dh, sw, sh);
         let key = (generation, dw, dh);
         if self.key == Some(key) {
@@ -169,7 +195,14 @@ impl LetterboxCache {
 
 /// `LetterboxCache` を使い捨てで使う版（テスト用）。
 #[cfg(test)]
-pub(crate) fn blit_letterboxed(src: &[u32], sw: u32, sh: u32, dst: &mut Vec<u32>, dw: u32, dh: u32) -> Viewport {
+pub(crate) fn blit_letterboxed(
+    src: &[u32],
+    sw: u32,
+    sh: u32,
+    dst: &mut Vec<u32>,
+    dw: u32,
+    dh: u32,
+) -> Viewport {
     let mut cache = LetterboxCache::default();
     let (px, vp) = cache.get(src, 0, sw, sh, dw, dh);
     dst.clear();
@@ -266,13 +299,22 @@ mod tests {
     #[test]
     fn to_game_roundtrips_through_forward_mapping() {
         // ゲーム座標 → クライアント座標 → ゲーム座標が一致すること（複数のサイズ・端数倍率）。
-        for &(cw, ch) in &[(1280u32, 720u32), (1920, 1080), (1777, 1000), (800, 900), (3840, 2160)] {
+        for &(cw, ch) in &[
+            (1280u32, 720u32),
+            (1920, 1080),
+            (1777, 1000),
+            (800, 900),
+            (3840, 2160),
+        ] {
             let vp = fit(cw, ch, 1280, 720);
             for &(gx, gy) in &[(0.0, 0.0), (640.0, 360.0), (1279.0, 719.0), (333.0, 666.0)] {
                 let px = vp.x as f64 + gx * vp.w as f64 / 1280.0;
                 let py = vp.y as f64 + gy * vp.h as f64 / 720.0;
                 let (rx, ry) = vp.to_game(px, py, 1280, 720);
-                assert!((rx - gx).abs() < 1e-9 && (ry - gy).abs() < 1e-9, "{cw}x{ch}");
+                assert!(
+                    (rx - gx).abs() < 1e-9 && (ry - gy).abs() < 1e-9,
+                    "{cw}x{ch}"
+                );
             }
         }
     }
@@ -280,9 +322,15 @@ mod tests {
     #[test]
     fn initial_size_scales_with_dpi_including_fractional() {
         assert_eq!(initial_client_size(1280, 720, 96, 4000, 4000), (1280, 720));
-        assert_eq!(initial_client_size(1280, 720, 144, 4000, 4000), (1920, 1080));
+        assert_eq!(
+            initial_client_size(1280, 720, 144, 4000, 4000),
+            (1920, 1080)
+        );
         assert_eq!(initial_client_size(1280, 720, 120, 4000, 4000), (1600, 900));
-        assert_eq!(initial_client_size(1280, 720, 168, 4000, 4000), (2240, 1260));
+        assert_eq!(
+            initial_client_size(1280, 720, 168, 4000, 4000),
+            (2240, 1260)
+        );
     }
 
     #[test]
@@ -342,7 +390,10 @@ mod tests {
         let blue: Vec<u32> = dst[..4].iter().map(|p| p & 0xFF).collect();
         assert_eq!(blue[0], 0);
         assert_eq!(blue[3], 255);
-        assert!(blue[1] < blue[2] && blue[1] > 0 && blue[2] < 255, "{blue:?}");
+        assert!(
+            blue[1] < blue[2] && blue[1] > 0 && blue[2] < 255,
+            "{blue:?}"
+        );
     }
 
     fn painted(bands: &[(i32, i32, i32, i32)], cw: i32, ch: i32) -> Vec<bool> {
@@ -372,14 +423,27 @@ mod tests {
 
     #[test]
     fn letterbox_bands_are_exactly_the_complement_of_the_viewport() {
-        for &(cw, ch) in &[(1280u32, 720u32), (1281, 720), (1280, 721), (2000, 720), (1280, 1000), (1777, 1001), (3, 2)] {
+        for &(cw, ch) in &[
+            (1280u32, 720u32),
+            (1281, 720),
+            (1280, 721),
+            (2000, 720),
+            (1280, 1000),
+            (1777, 1001),
+            (3, 2),
+        ] {
             let vp = fit(cw, ch, 1280, 720);
             let bands = letterbox_bands(vp, cw, ch);
             let m = painted(&bands, cw as i32, ch as i32);
             for y in 0..ch as i32 {
                 for x in 0..cw as i32 {
-                    let inside = x >= vp.x && x < vp.x + vp.w as i32 && y >= vp.y && y < vp.y + vp.h as i32;
-                    assert_eq!(m[(y * cw as i32 + x) as usize], !inside, "{cw}x{ch} ({x},{y})");
+                    let inside =
+                        x >= vp.x && x < vp.x + vp.w as i32 && y >= vp.y && y < vp.y + vp.h as i32;
+                    assert_eq!(
+                        m[(y * cw as i32 + x) as usize],
+                        !inside,
+                        "{cw}x{ch} ({x},{y})"
+                    );
                 }
             }
         }
@@ -387,7 +451,9 @@ mod tests {
     }
 
     fn gradient(w: u32, h: u32) -> Vec<u32> {
-        (0..w * h).map(|i| (i.wrapping_mul(2654435761) >> 8) & 0x00FF_FFFF).collect()
+        (0..w * h)
+            .map(|i| (i.wrapping_mul(2654435761) >> 8) & 0x00FF_FFFF)
+            .collect()
     }
 
     /// 指摘 11: 拡大結果は `scale_bilinear`（Win32 と共通）と画素一致し、帯はゼロ。
@@ -399,13 +465,28 @@ mod tests {
             let mut cache = LetterboxCache::default();
             let (px, vp) = cache.get(&src, 1, sw, sh, dw, dh);
             let mut want = vec![0u32; vp.w as usize * vp.h as usize];
-            noiria_core::scale::scale_bilinear(&src, sw as usize, sh as usize, &mut want, vp.w as usize, vp.h as usize, 1);
+            noiria_core::scale::scale_bilinear(
+                &src,
+                sw as usize,
+                sh as usize,
+                &mut want,
+                vp.w as usize,
+                vp.h as usize,
+                1,
+            );
             for y in 0..dh as usize {
                 for x in 0..dw as usize {
-                    let inside = x >= vp.x as usize && x < (vp.x as u32 + vp.w) as usize && y >= vp.y as usize && y < (vp.y as u32 + vp.h) as usize;
+                    let inside = x >= vp.x as usize
+                        && x < (vp.x as u32 + vp.w) as usize
+                        && y >= vp.y as usize
+                        && y < (vp.y as u32 + vp.h) as usize;
                     let got = px[y * dw as usize + x];
                     if inside {
-                        assert_eq!(got, want[(y - vp.y as usize) * vp.w as usize + (x - vp.x as usize)], "{dw}x{dh} ({x},{y})");
+                        assert_eq!(
+                            got,
+                            want[(y - vp.y as usize) * vp.w as usize + (x - vp.x as usize)],
+                            "{dw}x{dh} ({x},{y})"
+                        );
                     } else {
                         assert_eq!(got, 0, "bar {dw}x{dh} ({x},{y})");
                     }
@@ -420,7 +501,10 @@ mod tests {
     fn letterbox_cache_does_not_redo_work_for_the_same_frame_and_size() {
         let (sw, sh) = (64u32, 36u32);
         let a = gradient(sw, sh);
-        let b = gradient(sw, sh).iter().map(|p| !p & 0x00FF_FFFF).collect::<Vec<_>>();
+        let b = gradient(sw, sh)
+            .iter()
+            .map(|p| !p & 0x00FF_FFFF)
+            .collect::<Vec<_>>();
         let mut c = LetterboxCache::default();
         let first = c.get(&a, 1, sw, sh, 200, 54).0.to_vec();
         assert_eq!((c.scales(), c.zero_fills), (1, 1));
@@ -430,7 +514,11 @@ mod tests {
         assert_eq!((c.scales(), c.zero_fills), (1, 1), "再表示では何もしない");
         let second = c.get(&b, 2, sw, sh, 200, 54).0.to_vec();
         assert_ne!(second, first);
-        assert_eq!((c.scales(), c.zero_fills), (2, 1), "新しいフレームは拡大し直すが、全面ゼロ埋めはしない");
+        assert_eq!(
+            (c.scales(), c.zero_fills),
+            (2, 1),
+            "新しいフレームは拡大し直すが、全面ゼロ埋めはしない"
+        );
         // 左右の黒帯は前フレームのまま 0（ゼロ埋めし直さなくても汚れない）。
         assert_eq!(second[0], 0);
         // 幅だけ変わる（ビューポートの大きさは同じ）と、拡大は使い回して配置だけやり直す。

@@ -219,4 +219,3 @@ impl Default for Texts {
         Self::new()
     }
 }
-

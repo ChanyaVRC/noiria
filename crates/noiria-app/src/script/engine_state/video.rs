@@ -495,7 +495,6 @@ pub(super) fn playback_loop(job: PlaybackJob) {
     }
 }
 
-
 impl EngineState {
     // ---- 動画 ----
 
@@ -593,7 +592,12 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) fn video_play(&mut self, id: u32, path: &str, looping: bool) -> Result<(), EngineError> {
+    pub(crate) fn video_play(
+        &mut self,
+        id: u32,
+        path: &str,
+        looping: bool,
+    ) -> Result<(), EngineError> {
         self.log_op(format!("video_play {id} {path} loop={looping}"));
         self.video_play_from(id, path, looping, None, None)
     }
@@ -626,7 +630,12 @@ impl EngineState {
 
     /// [openvideo]（W6）: 動画を開くだけで再生は開始しない。[playvideo] が使う
     /// `prepared` スロットへ格納する（同一レイヤ向けの既存 prepared があれば置き換える）。
-    pub(crate) fn video_open(&mut self, id: u32, path: &str, looping: bool) -> Result<(), EngineError> {
+    pub(crate) fn video_open(
+        &mut self,
+        id: u32,
+        path: &str,
+        looping: bool,
+    ) -> Result<(), EngineError> {
         self.log_op(format!("video_open {id} {path} loop={looping}"));
         let source = self.game_dir.open_video(path).map_err(|e| e.to_string())?;
         {
@@ -679,7 +688,12 @@ impl EngineState {
 
     /// [preparevideo]（W6）: `video_open` に加えて現在の開始フレームをデコードして表示する。
     /// 表示後は同じフレーム位置へ戻し、再生開始位置を保持する。
-    pub(crate) fn video_prepare(&mut self, id: u32, path: &str, looping: bool) -> Result<(), EngineError> {
+    pub(crate) fn video_prepare(
+        &mut self,
+        id: u32,
+        path: &str,
+        looping: bool,
+    ) -> Result<(), EngineError> {
         self.log_op(format!("video_prepare {id} {path} loop={looping}"));
         self.video_open(id, path, looping)?;
         self.prepare_opened_video(id)
@@ -745,7 +759,11 @@ impl EngineState {
         });
     }
 
-    pub(crate) fn video_set_segment_loop(&mut self, start: usize, end: usize) -> Result<(), EngineError> {
+    pub(crate) fn video_set_segment_loop(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<(), EngineError> {
         if start >= end {
             return Err(format!(
                 "動画区間は start < end である必要があります: {start}..{end}"
@@ -874,4 +892,3 @@ impl EngineState {
             .is_some_and(|c| c.paused.load(Ordering::Relaxed))
     }
 }
-

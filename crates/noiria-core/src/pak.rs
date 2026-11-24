@@ -558,8 +558,7 @@ impl Pak {
             index_plain_len <= MAX_INDEX_PLAIN_LEN,
             "index の展開後サイズが大きすぎます（壊れた pak）"
         );
-        let index_len_usize =
-            usize::try_from(index_len).context("index の範囲指定が不正です")?;
+        let index_len_usize = usize::try_from(index_len).context("index の範囲指定が不正です")?;
 
         let mut index_cipher = vec![0u8; index_len_usize];
         source
@@ -635,8 +634,7 @@ impl Pak {
             end <= self.source.len(),
             "pak エントリの範囲がファイル外です: {path}"
         );
-        let stored_len =
-            usize::try_from(e.stored_len).context("pak エントリのサイズが不正です")?;
+        let stored_len = usize::try_from(e.stored_len).context("pak エントリのサイズが不正です")?;
 
         let mut buf = vec![0u8; stored_len];
         self.source
@@ -1189,11 +1187,7 @@ mod tests {
 
     /// 平文インデックスを書き換えて再圧縮・再暗号化し、ヘッダの長さだけ直す
     /// （予約領域＝インデックス CRC はそのまま残す）。
-    fn with_rewritten_index(
-        bytes: &[u8],
-        key: &[u8; 32],
-        f: impl FnOnce(&mut Vec<u8>),
-    ) -> Vec<u8> {
+    fn with_rewritten_index(bytes: &[u8], key: &[u8; 32], f: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
         let mut plain = index_plain_of(bytes, key);
         f(&mut plain);
         let mut c = crate::codec::deflate::deflate_compress(&plain);
@@ -1431,7 +1425,8 @@ mod tests {
         entries.push(("bgm/x.wav".to_string(), wav_plain));
         let key = test_key();
         let (bytes, _) = build_with_special_codec(entries, &key, |path, _| {
-            path.ends_with(".wav").then(|| (CODEC_WAV_FLAC, blob.clone()))
+            path.ends_with(".wav")
+                .then(|| (CODEC_WAV_FLAC, blob.clone()))
         });
         (bytes, key)
     }
@@ -1772,8 +1767,12 @@ mod tests {
         }
         wav_plain.extend_from_slice(b"SFX!");
 
-        let stored_a: Vec<u8> = (0..8192u32).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
-        let stored_b: Vec<u8> = (0..6000u32).map(|i| (i.wrapping_mul(97) >> 2) as u8).collect();
+        let stored_a: Vec<u8> = (0..8192u32)
+            .map(|i| (i.wrapping_mul(31) >> 3) as u8)
+            .collect();
+        let stored_b: Vec<u8> = (0..6000u32)
+            .map(|i| (i.wrapping_mul(97) >> 2) as u8)
+            .collect();
         let deflated: Vec<u8> = "concurrent deflate payload ".repeat(400).into_bytes();
 
         let key = test_key();
@@ -1785,7 +1784,10 @@ mod tests {
                 ("d.wav".to_string(), wav_plain.clone()),
             ],
             &key,
-            |path, _| path.ends_with(".wav").then(|| (CODEC_WAV_FLAC, wav_blob.clone())),
+            |path, _| {
+                path.ends_with(".wav")
+                    .then(|| (CODEC_WAV_FLAC, wav_blob.clone()))
+            },
         );
         let tmp = TempPakFile::write("concurrent", &bytes);
         let pak = Arc::new(Pak::open_file(tmp.path(), &key).unwrap());

@@ -91,7 +91,6 @@ fn packed_sample_game_matches_directory_backend_byte_for_byte() {
             .unwrap_or_else(|e| panic!("pak backend read failed {rel}: {e:#}"));
         assert_eq!(from_dir, from_pak, "内容が不一致: {rel}");
     }
-
 }
 
 /// W8: WebP 変換を有効にした場合、画像エントリは生バイトこそ変わるが
@@ -148,7 +147,6 @@ fn packed_sample_game_with_webp_matches_directory_by_decoded_pixels() {
         image_checked > 0,
         "PNG が 1 つも見つかりませんでした（sample アセット構成が変わった?）"
     );
-
 }
 
 /// W9: wav-flac 変換を有効にした場合、`read_bytes`（エンジンが実際に使う生バイト API）が
@@ -196,7 +194,6 @@ fn packed_sample_game_with_flac_matches_directory_backend_byte_for_byte() {
         wav_checked > 0,
         "WAV が 1 つも見つかりませんでした（sample アセット構成が変わった?）"
     );
-
 }
 
 #[test]

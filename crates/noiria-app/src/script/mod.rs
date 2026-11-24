@@ -1,8 +1,15 @@
 //! スクリプトスレッド: tokio current-thread + LocalSet 上で V8 (JsRuntime) を動かす。
 
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b1_tests;
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b2_tests;
+#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
+mod b3_tests;
 pub(crate) mod engine_state;
 #[cfg(feature = "engine-v8")]
 mod loader;
+mod numconv;
 #[cfg(feature = "engine-v8")]
 mod ops_audio;
 #[cfg(feature = "engine-v8")]
@@ -17,25 +24,18 @@ mod ops_text;
 mod ops_trans;
 #[cfg(feature = "engine-v8")]
 mod ops_video;
-mod numconv;
-mod runtime_modules;
-mod ui_cache;
-#[cfg(feature = "engine-v8")]
-mod state;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b1_tests;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b2_tests;
-#[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
-mod b3_tests;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod r2_tests;
+mod runtime_modules;
+#[cfg(feature = "engine-v8")]
+mod state;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod tag_behavior_tests;
 #[cfg(all(test, feature = "engine-v8", feature = "engine-tsint"))]
 mod tag_harness;
 #[cfg(feature = "engine-tsint")]
 pub(crate) mod tsint_engine;
+mod ui_cache;
 #[cfg(feature = "engine-v8")]
 mod util;
 
@@ -1172,7 +1172,8 @@ ops.op_quit();
             &|| {
                 pending_waits.get() == 1
                     && op_log
-                        .lock().unwrap()
+                        .lock()
+                        .unwrap()
                         .iter()
                         .any(|line| line == "log info armed")
             },
@@ -1186,7 +1187,8 @@ ops.op_quit();
             &|| {
                 pending_waits.get() == 1
                     && op_log
-                        .lock().unwrap()
+                        .lock()
+                        .unwrap()
                         .iter()
                         .any(|line| line == "log info before-scene-gate")
             },
@@ -1204,7 +1206,8 @@ ops.op_quit();
         );
         assert!(
             op_log
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .iter()
                 .any(|line| line == "log info continued"),
             "barrier 完了前に JavaScript 継続が完走していません"

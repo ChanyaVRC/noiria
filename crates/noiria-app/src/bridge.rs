@@ -14,7 +14,9 @@ pub(crate) type SharedScene = Arc<Mutex<Scene>>;
 /// シーンのロック。別スレッドがロックを握ったまま panic して毒化していても中身を取り出す。描画ループが先に
 /// `PoisonError` で落ちると、本来のエラー（毒化の原因になった panic）が報告されないまま窓だけが消えるため。
 pub(crate) fn lock_scene(scene: &SharedScene) -> std::sync::MutexGuard<'_, Scene> {
-    scene.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    scene
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `lock().unwrap()` の毒化の連鎖を断つ `Mutex` 拡張。別スレッドがロックを握ったまま panic しても
@@ -25,7 +27,8 @@ pub(crate) trait LockExt<T> {
 
 impl<T> LockExt<T> for std::sync::Mutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -57,7 +60,12 @@ pub(crate) fn frame_wait(
 /// 描画ループがこの周期に再合成すべきか。動いている間（`animating`）と、動きが終わった直後の 1 周期
 /// （`was_animating`）は描く。終わった周期は `animating` が false で `revision` も変わらないため、これが
 /// 無いと文字送りの最後のグリフ（「…」の 」 など）が次の更新まで画面に出ない。
-pub(crate) fn needs_redraw(revision: u64, last_drawn: u64, animating: bool, was_animating: bool) -> bool {
+pub(crate) fn needs_redraw(
+    revision: u64,
+    last_drawn: u64,
+    animating: bool,
+    was_animating: bool,
+) -> bool {
     revision != last_drawn || animating || was_animating
 }
 
@@ -277,7 +285,12 @@ impl TickSync {
 
     /// tsint 側（ヘッドレス `Intake::Direct` 用）: 新しい tick 要求または `notify_script` が
     /// 届くまで Condvar で待機する（従来の `thread::sleep(1ms)` ポーリングによる遅延を排除）。
-    pub(crate) fn wait_for_request_or_wake(&self, seen_req: u64, seen_wake: u64, timeout: Duration) {
+    pub(crate) fn wait_for_request_or_wake(
+        &self,
+        seen_req: u64,
+        seen_wake: u64,
+        timeout: Duration,
+    ) {
         if self.0.requested.load(Ordering::SeqCst) > seen_req
             || self.0.wake_seq.load(Ordering::SeqCst) > seen_wake
         {
@@ -471,7 +484,11 @@ mod redraw_tests {
     fn last_drawn_glyphs(redraw_after_finish: bool) -> usize {
         let t0 = Instant::now();
         let total = 40;
-        let reveal = TextReveal { from_glyph: 0, start: Some(t0), cps: 35.0 };
+        let reveal = TextReveal {
+            from_glyph: 0,
+            start: Some(t0),
+            cps: 35.0,
+        };
         let (mut last_rev, mut was) = (0u64, false);
         let mut last_shown = 0;
         for k in 0..200u64 {
@@ -552,8 +569,15 @@ mod frame_wait_tests {
     fn animating_waits_only_for_the_rest_of_the_interval() {
         assert_eq!(frame_wait(true, IV, ms(6), None, None, IDLE), ms(10));
         assert_eq!(frame_wait(true, IV, ms(0), None, None, IDLE), IV);
-        assert_eq!(frame_wait(true, IV, ms(16), None, None, IDLE), Duration::ZERO);
-        assert_eq!(frame_wait(true, IV, ms(40), None, None, IDLE), Duration::ZERO, "遅れたら待たずに次へ");
+        assert_eq!(
+            frame_wait(true, IV, ms(16), None, None, IDLE),
+            Duration::ZERO
+        );
+        assert_eq!(
+            frame_wait(true, IV, ms(40), None, None, IDLE),
+            Duration::ZERO,
+            "遅れたら待たずに次へ"
+        );
     }
 
     #[test]
@@ -567,7 +591,13 @@ mod frame_wait_tests {
     fn idle_and_deadlines_take_the_minimum() {
         assert_eq!(frame_wait(false, IV, ms(3), None, None, IDLE), IDLE);
         assert_eq!(frame_wait(false, IV, ms(3), Some(ms(5)), None, IDLE), ms(5));
-        assert_eq!(frame_wait(true, IV, ms(3), Some(ms(5)), Some(ms(2)), IDLE), ms(2));
-        assert_eq!(frame_wait(false, IV, ms(3), None, Some(ms(7)), Duration::MAX), ms(7));
+        assert_eq!(
+            frame_wait(true, IV, ms(3), Some(ms(5)), Some(ms(2)), IDLE),
+            ms(2)
+        );
+        assert_eq!(
+            frame_wait(false, IV, ms(3), None, Some(ms(7)), Duration::MAX),
+            ms(7)
+        );
     }
 }

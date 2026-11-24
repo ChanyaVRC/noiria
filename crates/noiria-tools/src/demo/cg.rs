@@ -17,9 +17,24 @@ pub struct FigureMeta {
 }
 
 /// 足元 `feet`（画面座標）に、スケール `s` で全身を立てる。夜の色調を乗せて背景へ合成する。
-fn place_figure(bg: &mut Canvas, who: Who, expr: Expr, opts: Opts, feet: (f32, f32), s: f32, tint: [f32; 3]) -> FigureMeta {
+fn place_figure(
+    bg: &mut Canvas,
+    who: Who,
+    expr: Expr,
+    opts: Opts,
+    feet: (f32, f32),
+    s: f32,
+    tint: [f32; 3],
+) -> FigureMeta {
     // 設計座標の足元 (250, 960) が `feet` に来るよう平行移動する
-    let xf = Xf { s, rot: 0.0, tx: feet.0 - 250.0, ty: feet.1 - 960.0, cx: 250.0, cy: 960.0 };
+    let xf = Xf {
+        s,
+        rot: 0.0,
+        tx: feet.0 - 250.0,
+        ty: feet.1 - 960.0,
+        cx: 250.0,
+        cy: 960.0,
+    };
     let mut layer = Canvas::new(bg.w, bg.h);
     {
         let mut ctx = Ctx::new(&mut layer, xf);
@@ -50,7 +65,10 @@ fn place_figure(bg: &mut Canvas, who: Who, expr: Expr, opts: Opts, feet: (f32, f
             }
         }
     }
-    FigureMeta { bbox: (x0, y0, x1, y1), area }
+    FigureMeta {
+        bbox: (x0, y0, x1, y1),
+        area,
+    }
 }
 
 const FIGURE_SCALE: f32 = 0.26;
@@ -60,8 +78,19 @@ const NIGHT_TINT: [f32; 3] = [0.62, 0.68, 0.96];
 pub fn cg_hinata_with_meta() -> (RgbaImage, FigureMeta) {
     let mut cv = hill_night_canvas();
     add_meteors(&mut cv, 7, 9);
-    let opts = Opts { pose: Pose::Sky, head_ang: Some(-0.2) };
-    let meta = place_figure(&mut cv, Who::Hinata, Expr::Smile, opts, (400.0, 552.0), FIGURE_SCALE, NIGHT_TINT);
+    let opts = Opts {
+        pose: Pose::Sky,
+        head_ang: Some(-0.2),
+    };
+    let meta = place_figure(
+        &mut cv,
+        Who::Hinata,
+        Expr::Smile,
+        opts,
+        (400.0, 552.0),
+        FIGURE_SCALE,
+        NIGHT_TINT,
+    );
     (cv.to_image(true), meta)
 }
 
@@ -77,16 +106,38 @@ pub fn cg_shiori_with_meta() -> (RgbaImage, FigureMeta) {
     let steel = col(120, 130, 178);
     let dark = col(70, 78, 126);
     let hub = (872.0, 520.0);
-    for foot in [(826.0, bg::ROOFTOP_FLOOR_Y + 90.0), (918.0, bg::ROOFTOP_FLOOR_Y + 90.0), (872.0, bg::ROOFTOP_FLOOR_Y + 100.0)] {
-        let m = Mask::from_path(&Path::stroke(&[(hub.0, hub.1, 7.0), (foot.0, foot.1, 7.0)]), (cv.w, cv.h));
+    for foot in [
+        (826.0, bg::ROOFTOP_FLOOR_Y + 90.0),
+        (918.0, bg::ROOFTOP_FLOOR_Y + 90.0),
+        (872.0, bg::ROOFTOP_FLOOR_Y + 100.0),
+    ] {
+        let m = Mask::from_path(
+            &Path::stroke(&[(hub.0, hub.1, 7.0), (foot.0, foot.1, 7.0)]),
+            (cv.w, cv.h),
+        );
         cv.fill_solid(&m, dark);
     }
-    for (a, b, w, c) in [((872.0, 520.0), (872.0, 484.0), 12.0, dark), ((862.0, 494.0), (948.0, 372.0), 30.0, steel), ((944.0, 378.0), (956.0, 360.0), 38.0, dark)] {
+    for (a, b, w, c) in [
+        ((872.0, 520.0), (872.0, 484.0), 12.0, dark),
+        ((862.0, 494.0), (948.0, 372.0), 30.0, steel),
+        ((944.0, 378.0), (956.0, 360.0), 38.0, dark),
+    ] {
         let m = Mask::from_path(&Path::stroke(&[(a.0, a.1, w), (b.0, b.1, w)]), (cv.w, cv.h));
         cv.fill_solid(&m, c);
     }
-    let opts = Opts { pose: Pose::Stand, head_ang: Some(-0.12) };
-    let meta = place_figure(&mut cv, Who::Shiori, Expr::Blush, opts, (760.0, bg::ROOFTOP_FLOOR_Y + 88.0), FIGURE_SCALE, NIGHT_TINT);
+    let opts = Opts {
+        pose: Pose::Stand,
+        head_ang: Some(-0.12),
+    };
+    let meta = place_figure(
+        &mut cv,
+        Who::Shiori,
+        Expr::Blush,
+        opts,
+        (760.0, bg::ROOFTOP_FLOOR_Y + 88.0),
+        FIGURE_SCALE,
+        NIGHT_TINT,
+    );
     (cv.to_image(true), meta)
 }
 

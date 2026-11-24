@@ -1242,7 +1242,10 @@ mod tests {
 
     #[test]
     fn avi_list_nesting_is_depth_limited() {
-        assert!(MjpegAvi::parse(nested_avi(3)).is_ok(), "実在する程度の入れ子は読める");
+        assert!(
+            MjpegAvi::parse(nested_avi(3)).is_ok(),
+            "実在する程度の入れ子は読める"
+        );
         assert!(MjpegAvi::parse(nested_avi(200)).is_err());
         // 数万重でもスタックを使い切らず Err を返す。
         assert!(MjpegAvi::parse(nested_avi(20_000)).is_err());
@@ -1318,7 +1321,11 @@ mod tests {
             assert!((video.fps() - 15.0).abs() < 0.1);
 
             for (i, want) in expected.iter().enumerate() {
-                assert_eq!(video.next_frame().unwrap().as_ref(), Some(want), "frame {i}");
+                assert_eq!(
+                    video.next_frame().unwrap().as_ref(),
+                    Some(want),
+                    "frame {i}"
+                );
             }
             assert!(video.next_frame().unwrap().is_none());
 
@@ -1410,7 +1417,8 @@ mod tests {
         );
         let ivf = include_bytes!("../../tests/fixtures/vp9_p2_10bit_yuv420_16x16_2f.ivf").to_vec();
 
-        let cases: [(&str, &str, Vec<u8>); 2] = [("avi_reuse", "avi", avi), ("ivf_reuse", "ivf", ivf)];
+        let cases: [(&str, &str, Vec<u8>); 2] =
+            [("avi_reuse", "avi", avi), ("ivf_reuse", "ivf", ivf)];
         for (tag, ext, bytes) in cases {
             let mut ref_src = open_video(bytes.clone()).unwrap();
             let mut expected = Vec::new();
