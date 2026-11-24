@@ -153,48 +153,40 @@ impl EngineState {
     /// フォント（`fonts/*.ttf|ttc`）を `game_dir` から読み込んで `Texts::engine` へ
     /// 注入する。フォントが 1 つも無い/読めないゲームでは何もせず、従来どおり
     /// システムフォントのみで動く（Windows の既存挙動は不変）。
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        scene: SharedScene,
-        wake: WakeSink,
-        trans_notify: Arc<Notify>,
-        audio_tx: Sender<AudioCmd>,
-        audio_shared: Arc<AudioShared>,
-        game_dir: GameDir,
-        config: GameConfig,
-        start: Instant,
-        clock: Clock,
-        input_sync: InputSync,
-        tick_sync: TickSync,
-        pending_waits: PendingWaits,
-        op_log: Option<SharedOpLog>,
-    ) -> Self {
+    pub fn from_ctx(
+        ctx: super::EngineCtx,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<crate::bridge::InputEvent>) {
         let mut texts = Texts::new();
         texts
             .engine
-            .load_game_fonts(load_game_font_bytes(&game_dir));
+            .load_game_fonts(load_game_font_bytes(&ctx.game_dir));
         let ui_cache = Arc::new(Mutex::new(UiCaches::new()));
-        let prefetcher = Prefetcher::new(ui_cache.clone(), game_dir.clone(), config.id.clone());
-        Self {
-            scene,
-            wake,
-            trans_notify,
-            audio_tx,
-            audio_shared,
-            game_dir,
-            config,
-            start,
-            clock,
-            input_sync,
-            tick_sync,
-            pending_waits,
+        let prefetcher = Prefetcher::new(
+            ui_cache.clone(),
+            ctx.game_dir.clone(),
+            ctx.config.id.clone(),
+        );
+        let state = Self {
+            scene: ctx.scene,
+            wake: ctx.proxy,
+            trans_notify: ctx.trans_notify,
+            audio_tx: ctx.audio_tx,
+            audio_shared: ctx.audio_shared,
+            game_dir: ctx.game_dir,
+            config: ctx.config,
+            start: ctx.start,
+            clock: ctx.clock,
+            input_sync: ctx.input_sync,
+            tick_sync: ctx.tick_sync,
+            pending_waits: ctx.pending_waits,
             texts,
             videos: Videos::new(),
-            op_log,
+            op_log: ctx.op_log,
             pending_thumb: Mutex::new(None),
             ui_cache,
             prefetcher,
-        }
+        };
+        (state, ctx.input_rx)
     }
 
     // ---- 定型処理 ----

@@ -70,23 +70,22 @@ pub(super) struct VideoEvents {
 }
 
 impl VideoEvents {
-    pub(super) fn signal(&mut self, kind: VideoEventKind) {
-        let count = match kind {
+    fn count_mut(&mut self, kind: VideoEventKind) -> &mut u64 {
+        match kind {
             VideoEventKind::Loop => &mut self.loop_count,
             VideoEventKind::Period => &mut self.period_count,
             VideoEventKind::Prepare => &mut self.prepare_count,
             VideoEventKind::SegLoop => &mut self.seg_loop_count,
-        };
+        }
+    }
+
+    pub(super) fn signal(&mut self, kind: VideoEventKind) {
+        let count = self.count_mut(kind);
         *count = count.saturating_add(1);
     }
 
     fn take(&mut self, kind: VideoEventKind) -> bool {
-        let count = match kind {
-            VideoEventKind::Loop => &mut self.loop_count,
-            VideoEventKind::Period => &mut self.period_count,
-            VideoEventKind::Prepare => &mut self.prepare_count,
-            VideoEventKind::SegLoop => &mut self.seg_loop_count,
-        };
+        let count = self.count_mut(kind);
         if *count == 0 {
             false
         } else {
@@ -107,12 +106,7 @@ impl VideoEvents {
     }
 
     fn clear(&mut self, kind: VideoEventKind) {
-        match kind {
-            VideoEventKind::Loop => self.loop_count = 0,
-            VideoEventKind::Period => self.period_count = 0,
-            VideoEventKind::Prepare => self.prepare_count = 0,
-            VideoEventKind::SegLoop => self.seg_loop_count = 0,
-        }
+        *self.count_mut(kind) = 0;
     }
 }
 
@@ -151,6 +145,18 @@ impl Videos {
             current: None,
             prepared: None,
             generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn for_each_control_and_events(
+        &self,
+        mut f: impl FnMut(&Mutex<PlaybackControl>, &Mutex<VideoEvents>),
+    ) {
+        if let Some(prepared) = self.prepared.as_ref() {
+            f(&prepared.control, &prepared.events);
+        }
+        if let Some(current) = self.current.as_ref() {
+            f(&current.control, &current.events);
         }
     }
 }
@@ -239,24 +245,40 @@ pub(crate) fn video_optional_frame(frame: f64) -> Result<Option<usize>, EngineEr
     Ok(Some(frame as usize))
 }
 
+pub(super) struct PlaybackJob {
+    pub(super) scene: SharedScene,
+    pub(super) wake: WakeSink,
+    pub(super) id: u32,
+    pub(super) source: Box<dyn VideoSource>,
+    pub(super) looping: bool,
+    pub(super) initial_index: usize,
+    pub(super) stop: Arc<AtomicBool>,
+    pub(super) paused: Arc<AtomicBool>,
+    pub(super) control: Arc<Mutex<PlaybackControl>>,
+    pub(super) events: Arc<Mutex<VideoEvents>>,
+    pub(super) generation: Arc<AtomicU64>,
+    pub(super) playback_generation: u64,
+    pub(super) playing: Arc<AtomicBool>,
+}
+
 /// 動画再生スレッド本体。fps 間隔で `next_frame()` を呼び、対象レイヤ
 /// (fore/back 両方) の pixmap を差し替えて再描画を要求する。
-#[allow(clippy::too_many_arguments)]
-pub(super) fn playback_loop(
-    scene: SharedScene,
-    wake: WakeSink,
-    id: u32,
-    mut source: Box<dyn VideoSource>,
-    looping: bool,
-    initial_index: usize,
-    stop: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    control: Arc<Mutex<PlaybackControl>>,
-    events: Arc<Mutex<VideoEvents>>,
-    generation: Arc<AtomicU64>,
-    playback_generation: u64,
-    playing: Arc<AtomicBool>,
-) {
+pub(super) fn playback_loop(job: PlaybackJob) {
+    let PlaybackJob {
+        scene,
+        wake,
+        id,
+        mut source,
+        looping,
+        initial_index,
+        stop,
+        paused,
+        control,
+        events,
+        generation,
+        playback_generation,
+        playing,
+    } = job;
     let _playing_guard = PlaybackStateGuard(playing.clone());
     let fps = if source.fps() > 0.0 {
         source.fps() as f64
@@ -501,28 +523,24 @@ impl EngineState {
             fps,
         });
 
-        let scene = self.scene.clone();
-        let wake = self.wake.clone();
-        let generation = self.videos.generation.clone();
+        let job = PlaybackJob {
+            scene: self.scene.clone(),
+            wake: self.wake.clone(),
+            id,
+            source,
+            looping,
+            initial_index,
+            stop,
+            paused,
+            control,
+            events,
+            generation: self.videos.generation.clone(),
+            playback_generation,
+            playing,
+        };
         std::thread::Builder::new()
             .name("noiria-video".into())
-            .spawn(move || {
-                playback_loop(
-                    scene,
-                    wake,
-                    id,
-                    source,
-                    looping,
-                    initial_index,
-                    stop,
-                    paused,
-                    control,
-                    events,
-                    generation,
-                    playback_generation,
-                    playing,
-                )
-            })
+            .spawn(move || playback_loop(job))
             .expect("動画再生スレッドの起動に失敗");
     }
 
@@ -585,13 +603,7 @@ impl EngineState {
 
     pub fn video_stop(&mut self) {
         self.log_op("video_stop");
-        let _scene = self.scene.lock_unpoisoned();
-        if let Some(current) = self.videos.current.as_ref() {
-            current.stop.store(true, Ordering::Relaxed);
-            current.playing.store(false, Ordering::Relaxed);
-            *current.events.lock_unpoisoned() = VideoEvents::default();
-        }
-        self.videos.generation.fetch_add(1, Ordering::SeqCst);
+        self.invalidate_current_video();
     }
 
     pub fn video_is_playing(&self) -> bool {
@@ -707,41 +719,19 @@ impl EngineState {
     pub fn video_set_period_event(&mut self, frame: usize) {
         self.log_op(format!("video_set_period_event {frame}"));
         let _scene = self.scene.lock_unpoisoned();
-        if let Some(prepared) = self.videos.prepared.as_ref() {
-            let mut control = prepared.control.lock_unpoisoned();
-            control.period_frame = Some(frame);
-            drop(control);
-            prepared
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::Period);
-        }
-        if let Some(current) = self.videos.current.as_ref() {
-            let mut control = current.control.lock_unpoisoned();
-            control.period_frame = Some(frame);
-            drop(control);
-            current.events.lock_unpoisoned().clear(VideoEventKind::Period);
-        }
+        self.videos.for_each_control_and_events(|control, events| {
+            control.lock_unpoisoned().period_frame = Some(frame);
+            events.lock_unpoisoned().clear(VideoEventKind::Period);
+        });
     }
 
     pub fn video_cancel_period_event(&mut self) {
         self.log_op("video_cancel_period_event");
         let _scene = self.scene.lock_unpoisoned();
-        if let Some(prepared) = self.videos.prepared.as_ref() {
-            let mut control = prepared.control.lock_unpoisoned();
-            control.period_frame = None;
-            drop(control);
-            prepared
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::Period);
-        }
-        if let Some(current) = self.videos.current.as_ref() {
-            let mut control = current.control.lock_unpoisoned();
-            control.period_frame = None;
-            drop(control);
-            current.events.lock_unpoisoned().clear(VideoEventKind::Period);
-        }
+        self.videos.for_each_control_and_events(|control, events| {
+            control.lock_unpoisoned().period_frame = None;
+            events.lock_unpoisoned().clear(VideoEventKind::Period);
+        });
     }
 
     pub fn video_set_segment_loop(&mut self, start: usize, end: usize) -> Result<(), EngineError> {
@@ -752,52 +742,28 @@ impl EngineState {
         }
         self.log_op(format!("video_set_segment_loop {start} {end}"));
         let _scene = self.scene.lock_unpoisoned();
-        if let Some(prepared) = self.videos.prepared.as_ref() {
-            let mut control = prepared.control.lock_unpoisoned();
-            control.segment_revision.fetch_add(1, Ordering::SeqCst);
-            control.segment_loop = Some((start, end));
-            drop(control);
-            prepared
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::SegLoop);
-        }
-        if let Some(current) = self.videos.current.as_ref() {
-            let mut control = current.control.lock_unpoisoned();
-            control.segment_revision.fetch_add(1, Ordering::SeqCst);
-            control.segment_loop = Some((start, end));
-            drop(control);
-            current
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::SegLoop);
-        }
+        self.videos.for_each_control_and_events(|control, events| {
+            {
+                let mut control = control.lock_unpoisoned();
+                control.segment_revision.fetch_add(1, Ordering::SeqCst);
+                control.segment_loop = Some((start, end));
+            }
+            events.lock_unpoisoned().clear(VideoEventKind::SegLoop);
+        });
         Ok(())
     }
 
     pub fn video_cancel_segment_loop(&mut self) {
         self.log_op("video_cancel_segment_loop");
         let _scene = self.scene.lock_unpoisoned();
-        if let Some(prepared) = self.videos.prepared.as_ref() {
-            let mut control = prepared.control.lock_unpoisoned();
-            control.segment_revision.fetch_add(1, Ordering::SeqCst);
-            control.segment_loop = None;
-            drop(control);
-            prepared
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::SegLoop);
-        }
-        if let Some(current) = self.videos.current.as_ref() {
-            let mut control = current.control.lock_unpoisoned();
-            control.segment_revision.fetch_add(1, Ordering::SeqCst);
-            control.segment_loop = None;
-            drop(control);
-            current
-                .events
-                .lock_unpoisoned()
-                .clear(VideoEventKind::SegLoop);
-        }
+        self.videos.for_each_control_and_events(|control, events| {
+            {
+                let mut control = control.lock_unpoisoned();
+                control.segment_revision.fetch_add(1, Ordering::SeqCst);
+                control.segment_loop = None;
+            }
+            events.lock_unpoisoned().clear(VideoEventKind::SegLoop);
+        });
     }
 
     pub fn video_take_event(&mut self, kind: &str) -> bool {

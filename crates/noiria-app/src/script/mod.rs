@@ -223,24 +223,10 @@ extension!(
     ],
     options = { ctx: EngineCtx },
     state = |state, opt| {
-        let ctx = opt.ctx;
-        state.put(InputRx(Rc::new(tokio::sync::Mutex::new(ctx.input_rx))));
+        let (engine_state, input_rx) = EngineState::from_ctx(opt.ctx);
+        state.put(InputRx(Rc::new(tokio::sync::Mutex::new(input_rx))));
         state.put(state::InputWaitEpoch::default());
-        state.put(EngineState::new(
-            ctx.scene,
-            ctx.proxy,
-            ctx.trans_notify,
-            ctx.audio_tx,
-            ctx.audio_shared,
-            ctx.game_dir,
-            ctx.config,
-            ctx.start,
-            ctx.clock,
-            ctx.input_sync,
-            ctx.tick_sync,
-            ctx.pending_waits,
-            ctx.op_log,
-        ));
+        state.put(engine_state);
     },
 );
 

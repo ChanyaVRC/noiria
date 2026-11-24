@@ -14,7 +14,7 @@ use noiria_core::codec::video::VideoSource;
 use noiria_core::scene::{Page, Scene};
 
 use super::video::{
-    next_video_pixmap, playback_loop, push_recycle, PlaybackControl, VideoCommitHook,
+    next_video_pixmap, playback_loop, push_recycle, PlaybackControl, PlaybackJob, VideoCommitHook,
     VideoEventKind, VideoEvents,
 };
 use super::*;
@@ -24,21 +24,24 @@ fn make_engine_state(dir: &std::path::Path) -> EngineState {
     let (user_tx, _user_rx) = unbounded();
     let (audio_tx, audio_rx) = unbounded();
     drop(audio_rx);
-    EngineState::new(
-        Arc::new(Mutex::new(Scene::new(64, 64))),
-        WakeSink::Channel(user_tx),
-        Arc::new(Notify::new()),
+    let (_input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel();
+    EngineState::from_ctx(crate::script::EngineCtx {
+        scene: Arc::new(Mutex::new(Scene::new(64, 64))),
+        proxy: WakeSink::Channel(user_tx),
+        input_rx,
+        trans_notify: Arc::new(Notify::new()),
         audio_tx,
-        Arc::new(AudioShared::default()),
+        audio_shared: Arc::new(AudioShared::default()),
         game_dir,
         config,
-        Instant::now(),
-        Clock::Real,
-        InputSync::new(),
-        TickSync::new(),
-        PendingWaits::new(),
-        None,
-    )
+        start: Instant::now(),
+        clock: Clock::Real,
+        input_sync: InputSync::new(),
+        tick_sync: TickSync::new(),
+        pending_waits: PendingWaits::new(),
+        op_log: None,
+    })
+    .0
 }
 
 #[test]
@@ -1471,21 +1474,21 @@ fn video_playback_uses_each_frame_dimensions() {
     let id = es.layer_new("image").unwrap();
     let playing = Arc::new(AtomicBool::new(true));
 
-    playback_loop(
-        es.scene.clone(),
-        es.wake.clone(),
+    playback_loop(PlaybackJob {
+        scene: es.scene.clone(),
+        wake: es.wake.clone(),
         id,
-        Box::new(ChangingFrameSource::new()),
-        false,
-        0,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(Mutex::new(PlaybackControl::default())),
-        Arc::new(Mutex::new(VideoEvents::default())),
-        Arc::new(AtomicU64::new(1)),
-        1,
-        playing.clone(),
-    );
+        source: Box::new(ChangingFrameSource::new()),
+        looping: false,
+        initial_index: 0,
+        stop: Arc::new(AtomicBool::new(false)),
+        paused: Arc::new(AtomicBool::new(false)),
+        control: Arc::new(Mutex::new(PlaybackControl::default())),
+        events: Arc::new(Mutex::new(VideoEvents::default())),
+        generation: Arc::new(AtomicU64::new(1)),
+        playback_generation: 1,
+        playing: playing.clone(),
+    });
 
     assert!(!playing.load(Ordering::Relaxed));
     let scene = es.scene.lock().unwrap();
@@ -1505,21 +1508,21 @@ fn video_playback_clears_playing_when_worker_panics() {
     let worker_playing = playing.clone();
 
     let result = std::thread::spawn(move || {
-        playback_loop(
-            Arc::new(Mutex::new(Scene::new(1, 1))),
-            WakeSink::Channel(wake_tx),
-            1,
-            Box::new(PanickingVideoSource),
-            false,
-            0,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(Mutex::new(PlaybackControl::default())),
-            Arc::new(Mutex::new(VideoEvents::default())),
-            Arc::new(AtomicU64::new(1)),
-            1,
-            worker_playing,
-        )
+        playback_loop(PlaybackJob {
+            scene: Arc::new(Mutex::new(Scene::new(1, 1))),
+            wake: WakeSink::Channel(wake_tx),
+            id: 1,
+            source: Box::new(PanickingVideoSource),
+            looping: false,
+            initial_index: 0,
+            stop: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            control: Arc::new(Mutex::new(PlaybackControl::default())),
+            events: Arc::new(Mutex::new(VideoEvents::default())),
+            generation: Arc::new(AtomicU64::new(1)),
+            playback_generation: 1,
+            playing: worker_playing,
+        })
     })
     .join();
 

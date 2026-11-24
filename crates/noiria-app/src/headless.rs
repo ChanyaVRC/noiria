@@ -160,6 +160,39 @@ fn advance_tick(p: &HeadlessParams) {
     }
 }
 
+fn now_ms(p: &HeadlessParams) -> f64 {
+    p.clock.now().duration_since(p.start).as_secs_f64() * 1000.0
+}
+
+/// 入力イベントを送信し、スクリプト側の ack（直前イベントの同期処理完了）を待ってから返る。
+fn send_input(p: &HeadlessParams, ev: InputEvent) {
+    let gen_before = p.input_sync.generation();
+    let _ = p.input_tx.send(ev);
+    p.tick_sync.notify_script();
+    wait_for_ack(&p.input_sync, gen_before);
+}
+
+fn drain_quit(p: &HeadlessParams) -> bool {
+    let mut quit = false;
+    while let Ok(ev) = p.user_rx.try_recv() {
+        quit |= matches!(ev, UserEvent::Quit);
+    }
+    quit
+}
+
+fn step_scene_animations(p: &HeadlessParams, scene: &mut noiria_core::scene::Scene, now: Instant) {
+    if scene
+        .transition
+        .as_ref()
+        .is_some_and(|t| t.is_finished(now))
+    {
+        scene.swap_after_transition();
+        p.trans_notify.notify_waiters();
+        p.tick_sync.notify_script();
+    }
+    scene.settle_finished_tweens(now);
+}
+
 pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
     if let Some(steps) = p.script.take() {
         return run_script(p, steps);
@@ -183,50 +216,33 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
     // move 送信の 300ms 後に撮る追加ショット（ホバーハイライト検証用）
     let mut hover_shot_at: Option<Instant> = None;
 
-    let now_ms =
-        |clock: &Clock, start: Instant| clock.now().duration_since(start).as_secs_f64() * 1000.0;
-    // click/key: 送信直後にスクリプト側の ack（次の入力待ちへ戻った = 直前のイベントの
-    // 同期処理完了）を待ってから返る。呼び出し側は、このリターン後まで `p.clock.advance()`
-    // を呼ばないことで、送信 tick とスクリプト側処理 tick を一致させる
-    // （ファイル冒頭 `wait_for_ack` のドキュメント参照）。
-    let click = |x: f64,
-                 y: f64,
-                 clock: &Clock,
-                 start: Instant,
-                 tx: &UnboundedSender<InputEvent>,
-                 sync: &InputSync,
-                 tick_sync: &TickSync| {
-        let gen_before = sync.generation();
-        let _ = tx.send(InputEvent {
-            kind: "click",
-            x,
-            y,
-            button: Some("left"),
-            key: None,
-            delta: None,
-            t: now_ms(clock, start),
-        });
-        tick_sync.notify_script();
-        wait_for_ack(sync, gen_before);
+    let send_click = |p: &HeadlessParams, x: f64, y: f64| {
+        send_input(
+            p,
+            InputEvent {
+                kind: "click",
+                x,
+                y,
+                button: Some("left"),
+                key: None,
+                delta: None,
+                t: now_ms(p),
+            },
+        );
     };
-    let key = |k: &str,
-               clock: &Clock,
-               start: Instant,
-               tx: &UnboundedSender<InputEvent>,
-               sync: &InputSync,
-               tick_sync: &TickSync| {
-        let gen_before = sync.generation();
-        let _ = tx.send(InputEvent {
-            kind: "key",
-            x: 0.0,
-            y: 0.0,
-            button: None,
-            key: Some(k.to_string()),
-            delta: None,
-            t: now_ms(clock, start),
-        });
-        tick_sync.notify_script();
-        wait_for_ack(sync, gen_before);
+    let send_key = |p: &HeadlessParams, k: &str| {
+        send_input(
+            p,
+            InputEvent {
+                kind: "key",
+                x: 0.0,
+                y: 0.0,
+                button: None,
+                key: Some(k.to_string()),
+                delta: None,
+                t: now_ms(p),
+            },
+        );
     };
 
     log::info!(
@@ -247,14 +263,7 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             log::info!("自動テスト時間満了");
             break;
         }
-        // スクリプト側からの Quit ([close] 等) を処理
-        let mut quit = false;
-        while let Ok(ev) = p.user_rx.try_recv() {
-            if matches!(ev, UserEvent::Quit) {
-                quit = true;
-            }
-        }
-        if quit {
+        if drain_quit(&p) {
             log::info!("スクリプトから終了要求を受信");
             break;
         }
@@ -262,16 +271,7 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
         let now = p.clock.now();
         {
             let mut scene = p.scene.lock_unpoisoned();
-            if scene
-                .transition
-                .as_ref()
-                .is_some_and(|t| t.is_finished(now))
-            {
-                scene.swap_after_transition();
-                p.trans_notify.notify_waiters();
-                p.tick_sync.notify_script();
-            }
-            scene.settle_finished_tweens(now);
+            step_scene_animations(&p, &mut scene, now);
             compose_frame(&scene, now, &mut bufs, &mut frame);
         }
 
@@ -305,41 +305,41 @@ pub fn run_headless(mut p: HeadlessParams) -> Result<()> {
             let elapsed = now.duration_since(p.start).as_secs();
             if !sent_auto && elapsed >= 6 {
                 sent_auto = true;
-                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "a");
             } else if sent_auto && !sent_auto_off && elapsed >= 8 {
                 sent_auto_off = true;
-                key("a", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "a");
             } else if !sent_save && elapsed >= 9 {
                 sent_save = true;
-                key("F5", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "F5");
             } else if !sent_load && elapsed >= 14 {
                 sent_load = true;
-                key("F9", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "F9");
             } else if !sent_menu_open && elapsed >= 18 {
                 sent_menu_open = true;
-                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "Escape");
             } else if sent_menu_open && !sent_menu_close && elapsed >= 21 {
                 sent_menu_close = true;
-                key("Escape", &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                send_key(&p, "Escape");
             } else {
                 // move → (次tick) click の交互。ホバーハイライトも検証する
                 let (x, y) = choreography_click(click_step / 2);
                 if click_step.is_multiple_of(2) {
-                    let gen_before = p.input_sync.generation();
-                    let _ = p.input_tx.send(InputEvent {
-                        kind: "move",
-                        x,
-                        y,
-                        button: None,
-                        key: None,
-                        delta: None,
-                        t: now_ms(&p.clock, p.start),
-                    });
-                    p.tick_sync.notify_script();
-                    wait_for_ack(&p.input_sync, gen_before);
+                    send_input(
+                        &p,
+                        InputEvent {
+                            kind: "move",
+                            x,
+                            y,
+                            button: None,
+                            key: None,
+                            delta: None,
+                            t: now_ms(&p),
+                        },
+                    );
                     hover_shot_at = Some(now + Duration::from_millis(300));
                 } else {
-                    click(x, y, &p.clock, p.start, &p.input_tx, &p.input_sync, &p.tick_sync);
+                    send_click(&p, x, y);
                 }
                 click_step += 1;
             }
@@ -375,14 +375,7 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
     let mut shots = 0u32;
     let end = p.start + p.duration;
 
-    let send = |ev: InputEvent| {
-        let gen_before = p.input_sync.generation();
-        let _ = p.input_tx.send(ev);
-        p.tick_sync.notify_script();
-        wait_for_ack(&p.input_sync, gen_before);
-    };
-    let now_ms = || p.clock.now().duration_since(p.start).as_secs_f64() * 1000.0;
-    let ev = |kind: &'static str, x: f64, y: f64, button: Option<&'static str>, key: Option<String>| {
+    let make_ev = |kind: &'static str, x: f64, y: f64, button: Option<&'static str>, key: Option<String>| {
         InputEvent {
             kind,
             x,
@@ -390,7 +383,7 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
             button,
             key,
             delta: None,
-            t: now_ms(),
+            t: now_ms(&p),
         }
     };
 
@@ -408,23 +401,14 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
             log::warn!("仮想時間の上限（{}秒）に達したためスクリプトを打ち切ります", p.duration.as_secs());
             break;
         }
-        let mut quit = false;
-        while let Ok(e) = p.user_rx.try_recv() {
-            quit |= matches!(e, UserEvent::Quit);
-        }
-        if quit {
+        if drain_quit(&p) {
             log::info!("スクリプトから終了要求を受信");
             break;
         }
 
         {
             let mut scene = p.scene.lock_unpoisoned();
-            if scene.transition.as_ref().is_some_and(|t| t.is_finished(now)) {
-                scene.swap_after_transition();
-                p.trans_notify.notify_waiters();
-                p.tick_sync.notify_script();
-            }
-            scene.settle_finished_tweens(now);
+            step_scene_animations(&p, &mut scene, now);
         }
 
         let t_ms = now.duration_since(p.start).as_millis() as u64;
@@ -435,14 +419,14 @@ fn run_script(p: HeadlessParams, steps: Vec<Step>) -> Result<()> {
         while let Some(step) = runner.poll(t_ms) {
             match step {
                 Step::Wait(_) => {}
-                Step::Move(x, y) => send(ev("move", x, y, None, None)),
+                Step::Move(x, y) => send_input(&p, make_ev("move", x, y, None, None)),
                 Step::Click(x, y, b) => {
-                    send(ev("move", x, y, None, None));
+                    send_input(&p, make_ev("move", x, y, None, None));
                     let button = if b == Button::Left { "left" } else { "right" };
-                    send(ev("click", x, y, Some(button), None));
+                    send_input(&p, make_ev("click", x, y, Some(button), None));
                 }
-                Step::Key(k) => send(ev("key", 0.0, 0.0, None, Some(k))),
-                Step::KeyUp(k) => send(ev("keyup", 0.0, 0.0, None, Some(k))),
+                Step::Key(k) => send_input(&p, make_ev("key", 0.0, 0.0, None, Some(k))),
+                Step::KeyUp(k) => send_input(&p, make_ev("keyup", 0.0, 0.0, None, Some(k))),
                 Step::Shot(name) => {
                     {
                         let scene = p.scene.lock_unpoisoned();
