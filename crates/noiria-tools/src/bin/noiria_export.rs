@@ -4,16 +4,6 @@
 //!                  [--targets windows,linux] [--bin-windows <exe>] [--bin-linux <bin>]
 //!                  [--exe-name <name>] [--no-webp] [--no-flac] [--skip-missing-targets]
 //!                  [--exclude <glob>]... [--no-default-excludes] [--no-project-excludes] [--list] [--list-excluded]
-//! `--exclude`/`--no-default-excludes`/`--no-project-excludes`/`--list`/`--list-excluded` と game.json の `pack.exclude` は noiria-pack と同じ（`--out` ディレクトリが
-//! `--game` 内にあれば自動的に pak から外れる）。出力は `<out>/<target>.tmp` に全部書いてから
-//! `<out>/<target>` と入れ替える（失敗しても旧出力は壊れない）。
-//! `--targets` 省略時は windows,linux 両方。`--bin-*` 省略時は `target/dist/` 配下の
-//! 既定ファイル名（`noiria.exe`/`noiria`）を探す（先に dist プロファイルでビルドしておく
-//! 必要がある。`docs/distribution.md` 参照）。`--exe-name` 省略時は game.json の title を
-//! 安全な文字だけへ正規化した名前を使う。`--no-webp` を指定しない限り、pack 時に
-//! `.png` を WebP ロスレスへ自動変換する（元 PNG より小さい場合のみ採用、W8）。
-//! `--no-flac` を指定しない限り、pack 時に `.wav` を wav-flac (pak codec=2) へ可逆変換する
-//! （元 WAV より小さい場合のみ採用、W9）。
 
 use std::path::PathBuf;
 
@@ -21,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use noiria_tools::export::{
     run_export, run_export_with_policy, ExportOptions, ExportPolicy, Target,
 };
-use noiria_tools::pack::excluded_summary;
+use noiria_tools::pack::{print_pack_listing, CommonPackCli};
 
 struct Args {
     game: PathBuf,
@@ -30,14 +20,8 @@ struct Args {
     bin_windows: Option<PathBuf>,
     bin_linux: Option<PathBuf>,
     exe_name: Option<String>,
-    webp: bool,
-    flac: bool,
     skip_missing_targets: bool,
-    exclude: Vec<String>,
-    default_excludes: bool,
-    project_excludes: bool,
-    list: bool,
-    list_excluded: bool,
+    common: CommonPackCli,
 }
 
 fn parse_targets(spec: &str) -> Result<Vec<Target>> {
@@ -57,111 +41,51 @@ fn parse_targets(spec: &str) -> Result<Vec<Target>> {
 }
 
 fn parse_args() -> Result<Args> {
-    let mut game: Option<PathBuf> = None;
-    let mut out: Option<PathBuf> = None;
+    let mut common = CommonPackCli::default();
     let mut targets: Option<Vec<Target>> = None;
     let mut bin_windows: Option<PathBuf> = None;
     let mut bin_linux: Option<PathBuf> = None;
     let mut exe_name: Option<String> = None;
-    let mut webp = true;
-    let mut flac = true;
     let mut skip_missing_targets = false;
-    let mut exclude: Vec<String> = Vec::new();
-    let mut default_excludes = true;
-    let mut project_excludes = true;
-    let mut list = false;
-    let mut list_excluded = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
-        match argv[i].as_str() {
-            "--game" => {
-                game = Some(argv.get(i + 1).context("--game には値が必要です")?.into());
-                i += 1;
+        if !common.try_consume(&argv, &mut i)? {
+            let next_val = |flag: &str, i: &mut usize| -> Result<&String> {
+                let v = argv
+                    .get(*i + 1)
+                    .with_context(|| format!("{flag} には値が必要です"))?;
+                *i += 1;
+                Ok(v)
+            };
+            match argv[i].as_str() {
+                "--targets" => targets = Some(parse_targets(next_val("--targets", &mut i)?)?),
+                "--bin-windows" => bin_windows = Some(next_val("--bin-windows", &mut i)?.into()),
+                "--bin-linux" => bin_linux = Some(next_val("--bin-linux", &mut i)?.into()),
+                "--exe-name" => exe_name = Some(next_val("--exe-name", &mut i)?.clone()),
+                "--skip-missing-targets" => skip_missing_targets = true,
+                other => bail!("不明な引数です: {other}"),
             }
-            "--out" => {
-                out = Some(argv.get(i + 1).context("--out には値が必要です")?.into());
-                i += 1;
-            }
-            "--targets" => {
-                let spec = argv.get(i + 1).context("--targets には値が必要です")?;
-                targets = Some(parse_targets(spec)?);
-                i += 1;
-            }
-            "--bin-windows" => {
-                bin_windows = Some(
-                    argv.get(i + 1)
-                        .context("--bin-windows には値が必要です")?
-                        .into(),
-                );
-                i += 1;
-            }
-            "--bin-linux" => {
-                bin_linux = Some(
-                    argv.get(i + 1)
-                        .context("--bin-linux には値が必要です")?
-                        .into(),
-                );
-                i += 1;
-            }
-            "--exe-name" => {
-                exe_name = Some(
-                    argv.get(i + 1)
-                        .context("--exe-name には値が必要です")?
-                        .clone(),
-                );
-                i += 1;
-            }
-            "--no-webp" => {
-                webp = false;
-            }
-            "--no-flac" => {
-                flac = false;
-            }
-            "--skip-missing-targets" => {
-                skip_missing_targets = true;
-            }
-            "--exclude" => {
-                exclude.push(
-                    argv.get(i + 1)
-                        .context("--exclude には値が必要です")?
-                        .clone(),
-                );
-                i += 1;
-            }
-            "--no-default-excludes" => {
-                default_excludes = false;
-            }
-            "--no-project-excludes" => {
-                project_excludes = false;
-            }
-            "--list-excluded" => {
-                list_excluded = true;
-            }
-            "--list" => {
-                list = true;
-            }
-            other => bail!("不明な引数です: {other}"),
         }
         i += 1;
     }
 
     Ok(Args {
-        game: game.context("--game <ゲームディレクトリ> は必須です")?,
-        out: out.context("--out <出力先ディレクトリ> は必須です")?,
+        game: common
+            .game
+            .take()
+            .context("--game <ゲームディレクトリ> は必須です")?,
+        out: common
+            .out
+            .take()
+            .context("--out <出力先ディレクトリ> は必須です")?,
         targets: targets.unwrap_or_else(|| vec![Target::Windows, Target::Linux]),
         bin_windows,
         bin_linux,
         exe_name,
-        webp,
-        flac,
         skip_missing_targets,
-        exclude,
-        default_excludes,
-        project_excludes,
-        list,
-        list_excluded,
+        common,
     })
 }
 
@@ -177,11 +101,11 @@ fn main() -> Result<()> {
         bin_windows: args.bin_windows,
         bin_linux: args.bin_linux,
         exe_name: args.exe_name,
-        webp: args.webp,
-        flac: args.flac,
-        exclude: args.exclude,
-        default_excludes: args.default_excludes,
-        project_excludes: args.project_excludes,
+        webp: args.common.webp,
+        flac: args.common.flac,
+        exclude: args.common.exclude,
+        default_excludes: args.common.default_excludes,
+        project_excludes: args.common.project_excludes,
     };
     let report = if args.skip_missing_targets {
         run_export_with_policy(&opts, ExportPolicy::SkipMissingTargets)
@@ -220,22 +144,12 @@ fn main() -> Result<()> {
         "flac 変換: {} 件, 削減 {} バイト",
         report.flac_converted_count, report.flac_bytes_saved
     );
-    if args.list {
-        for e in &report.pack_entries {
-            println!(
-                "  {}  {} バイト{}",
-                e.path,
-                e.plain_len,
-                e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default()
-            );
-        }
-    }
-    println!("{}", excluded_summary(&report.pack_excluded));
-    if args.list_excluded {
-        for e in &report.pack_excluded {
-            println!("  除外: {}", e.describe());
-        }
-    }
+    print_pack_listing(
+        &report.pack_entries,
+        &report.pack_excluded,
+        args.common.list,
+        args.common.list_excluded,
+    );
     for t in &report.targets {
         println!(
             "{}: {} ({} バイト)",

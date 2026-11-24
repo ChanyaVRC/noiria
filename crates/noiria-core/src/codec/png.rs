@@ -176,7 +176,8 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     let mut cur_row = vec![0u8; stride];
     for y in 0..h {
         let src = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
-        unfilter_row(src[0], &src[1..], &prev_row, channels, &mut cur_row)?;
+        cur_row.copy_from_slice(&src[1..]);
+        unfilter_row_in_place(src[0], &mut cur_row, 0, &prev_row, channels, stride)?;
         let dst_pixels = &mut out.as_chunks_mut::<4>().0[y * w..(y + 1) * w];
         match ihdr.color_type {
             0 => {
@@ -238,16 +239,18 @@ fn unfilter_row_in_place(
     channels: usize,
     stride: usize,
 ) -> Result<()> {
-    if shift >= stride {
-        let (dst, tail) = buf.split_at_mut(shift);
-        return unfilter_row(filter, &tail[..stride], prev, channels, &mut dst[..stride]);
-    }
     let buf = &mut buf[..shift + stride];
     let prev = &prev[..stride];
     match filter {
-        0 => buf.copy_within(shift..shift + stride, 0),
+        0 => {
+            if shift != 0 {
+                buf.copy_within(shift..shift + stride, 0);
+            }
+        }
         1 => {
-            buf.copy_within(shift..shift + channels, 0);
+            if shift != 0 {
+                buf.copy_within(shift..shift + channels, 0);
+            }
             for i in channels..stride {
                 buf[i] = buf[shift + i].wrapping_add(buf[i - channels]);
             }
@@ -276,49 +279,6 @@ fn unfilter_row_in_place(
                     prev[i],
                     prev[i - channels],
                 ));
-            }
-        }
-        f => bail!("非対応のフィルタタイプ: {f}"),
-    }
-    Ok(())
-}
-
-fn unfilter_row(
-    filter: u8,
-    row: &[u8],
-    prev: &[u8],
-    channels: usize,
-    dst: &mut [u8],
-) -> Result<()> {
-    let stride = row.len();
-    match filter {
-        0 => dst.copy_from_slice(row),
-        1 => {
-            dst[..channels].copy_from_slice(&row[..channels]);
-            for i in channels..stride {
-                dst[i] = row[i].wrapping_add(dst[i - channels]);
-            }
-        }
-        2 => {
-            for ((d, &r), &p) in dst.iter_mut().zip(row).zip(prev) {
-                *d = r.wrapping_add(p);
-            }
-        }
-        3 => {
-            for i in 0..channels {
-                dst[i] = row[i].wrapping_add(prev[i] >> 1);
-            }
-            for i in channels..stride {
-                let avg = ((dst[i - channels] as u16 + prev[i] as u16) >> 1) as u8;
-                dst[i] = row[i].wrapping_add(avg);
-            }
-        }
-        4 => {
-            for i in 0..channels {
-                dst[i] = row[i].wrapping_add(prev[i]);
-            }
-            for i in channels..stride {
-                dst[i] = row[i].wrapping_add(paeth(dst[i - channels], prev[i], prev[i - channels]));
             }
         }
         f => bail!("非対応のフィルタタイプ: {f}"),

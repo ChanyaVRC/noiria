@@ -110,3 +110,45 @@ pub(crate) fn parse_table_directory(data: &[u8], index: u32) -> Result<TableDire
 
     Ok(TableDirectory { tables })
 }
+
+/// ランダムアクセス読込（`read_at`）から SFNT ヘッダとテーブルディレクトリを読む。
+/// `Font::from_file` と `FontRegistry::index_file` の共通実装。
+pub(crate) fn read_sfnt_directory_at(
+    read_at: &mut impl FnMut(u64, &mut [u8]) -> std::io::Result<()>,
+    file_len: u64,
+    sfnt_offset: u64,
+    dir_buf: &mut Vec<u8>,
+) -> Result<TableDirectory> {
+    ensure!(
+        sfnt_offset.checked_add(12).is_some_and(|e| e <= file_len),
+        "sfnt テーブルのオフセットが範囲外です"
+    );
+    let mut sh = [0u8; 12];
+    read_at(sfnt_offset, &mut sh)?;
+    let sfnt_version = u32::from_be_bytes([sh[0], sh[1], sh[2], sh[3]]);
+    if sfnt_version == TAG_OTTO {
+        bail!("OpenType/CFF ('OTTO') は非対応です（glyf 系アウトラインのみ対応）");
+    }
+    ensure!(
+        sfnt_version == TAG_TRUE_TYPE || sfnt_version == TAG_TRUETYPE_MAC,
+        "未知の sfnt バージョンです: 0x{sfnt_version:08X}"
+    );
+    let num_tables = u16::from_be_bytes([sh[4], sh[5]]) as usize;
+    let rec_len = num_tables * 16;
+    ensure!(
+        sfnt_offset
+            .checked_add(12 + rec_len as u64)
+            .is_some_and(|e| e <= file_len),
+        "テーブルがファイル範囲外を指しています"
+    );
+    dir_buf.resize(rec_len, 0);
+    read_at(sfnt_offset + 12, dir_buf)?;
+    let mut tables = HashMap::with_capacity(num_tables);
+    for rec in dir_buf.as_chunks::<16>().0 {
+        let tag = [rec[0], rec[1], rec[2], rec[3]];
+        let off = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]);
+        let len = u32::from_be_bytes([rec[12], rec[13], rec[14], rec[15]]);
+        tables.insert(tag, (off, len));
+    }
+    Ok(TableDirectory { tables })
+}

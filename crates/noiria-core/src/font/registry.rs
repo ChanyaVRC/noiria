@@ -87,16 +87,12 @@ pub struct FontKey {
     pub index: u32,
 }
 
-struct Entry {
-    key: FontKey,
-}
-
 /// システムフォントの索引。`global()` でプロセス内 1 個の共有インスタンスを得る。
 pub struct FontRegistry {
     /// family 名（ASCII 大文字小文字無視で正規化）→ 最初に見つかったフォント。
     by_family: HashMap<String, FontKey>,
     /// グリフ単位フォールバック走査用の全登録フォント一覧。
-    all: Vec<Entry>,
+    all: Vec<FontKey>,
 }
 
 impl FontRegistry {
@@ -203,120 +199,70 @@ impl FontRegistry {
         let mut name_buf = Vec::new();
         let mut cmap_hdr = Vec::new();
         for (index, sfnt_offset) in sfnt_offsets.into_iter().enumerate() {
-            let Some(sfnt_end) = sfnt_offset.checked_add(12) else {
+            let Ok(dir) = sfnt::read_sfnt_directory_at(
+                &mut |off, buf| read_exact_at(&mut file, off, buf),
+                file_len,
+                sfnt_offset,
+                &mut dir_buf,
+            ) else {
                 continue;
             };
-            if sfnt_end > file_len || file.seek(SeekFrom::Start(sfnt_offset)).is_err() {
-                continue;
-            }
-            let mut sh = [0u8; 12];
-            if file.read_exact(&mut sh).is_err() {
-                continue;
-            }
-            let version = u32::from_be_bytes([sh[0], sh[1], sh[2], sh[3]]);
-            if version != 0x0001_0000 && version != 0x7472_7565 {
-                continue;
-            }
-            let num_tables = u16::from_be_bytes([sh[4], sh[5]]) as usize;
-            let records_len = num_tables * 16;
-            if sfnt_end.saturating_add(records_len as u64) > file_len {
-                continue;
-            }
-            dir_buf.resize(records_len, 0);
-            if file.read_exact(&mut dir_buf).is_err() {
-                continue;
-            }
-
-            let mut head_loc = None;
-            let mut maxp_loc = None;
-            let mut hhea_loc = None;
-            let mut hmtx_loc = None;
-            let mut cmap_loc = None;
-            let mut loca_loc = None;
-            let mut glyf_loc = None;
-            let mut name_loc = None;
-            for rec in dir_buf.as_chunks::<16>().0 {
-                let tag: [u8; 4] = [rec[0], rec[1], rec[2], rec[3]];
-                let off = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]) as u64;
-                let len = u32::from_be_bytes([rec[12], rec[13], rec[14], rec[15]]) as u64;
-                let slot = match &tag {
-                    b"head" => &mut head_loc,
-                    b"maxp" => &mut maxp_loc,
-                    b"hhea" => &mut hhea_loc,
-                    b"hmtx" => &mut hmtx_loc,
-                    b"cmap" => &mut cmap_loc,
-                    b"loca" => &mut loca_loc,
-                    b"glyf" => &mut glyf_loc,
-                    b"name" => &mut name_loc,
-                    _ => continue,
-                };
-                *slot = Some((off, len));
-            }
-
+            let fits_file =
+                |off: u64, len: u64| off.checked_add(len).is_some_and(|e| e <= file_len);
+            let req_loc = |tag: &[u8; 4]| -> Option<(u64, u64)> {
+                let (o, l) = dir.find(tag)?;
+                let (o, l) = (u64::from(o), u64::from(l));
+                fits_file(o, l).then_some((o, l))
+            };
             let (
                 Some((head_off, head_len)),
                 Some((maxp_off, maxp_len)),
                 Some((hhea_off, hhea_len)),
-                Some((hmtx_off, hmtx_len)),
+                Some((_, hmtx_len)),
                 Some((cmap_off, cmap_len)),
-                Some((loca_off, loca_len)),
-                Some((glyf_off, glyf_len)),
+                Some((_, loca_len)),
+                Some(_),
             ) = (
-                head_loc, maxp_loc, hhea_loc, hmtx_loc, cmap_loc, loca_loc, glyf_loc,
+                req_loc(b"head"),
+                req_loc(b"maxp"),
+                req_loc(b"hhea"),
+                req_loc(b"hmtx"),
+                req_loc(b"cmap"),
+                req_loc(b"loca"),
+                req_loc(b"glyf"),
             )
             else {
                 continue;
             };
-
-            let fits_file =
-                |off: u64, len: u64| off.checked_add(len).is_some_and(|e| e <= file_len);
-            if !fits_file(head_off, head_len)
-                || !fits_file(maxp_off, maxp_len)
-                || !fits_file(hhea_off, hhea_len)
-                || !fits_file(hmtx_off, hmtx_len)
-                || !fits_file(cmap_off, cmap_len)
-                || !fits_file(loca_off, loca_len)
-                || !fits_file(glyf_off, glyf_len)
-            {
-                continue;
-            }
             if head_len < 54 || maxp_len < 6 || hhea_len < 36 || cmap_len < 4 {
                 continue;
             }
 
             let mut head_bytes = [0u8; 54];
-            if read_exact_at(&mut file, head_off, &mut head_bytes).is_err() {
-                continue;
-            }
-            let Ok(head) = tables::parse_head(&head_bytes) else {
-                continue;
-            };
             let mut maxp_bytes = [0u8; 6];
-            if read_exact_at(&mut file, maxp_off, &mut maxp_bytes).is_err() {
-                continue;
-            }
-            let Ok(num_glyphs) = tables::parse_maxp_num_glyphs(&maxp_bytes) else {
-                continue;
-            };
             let mut hhea_bytes = [0u8; 36];
-            if read_exact_at(&mut file, hhea_off, &mut hhea_bytes).is_err() {
+            if read_exact_at(&mut file, head_off, &mut head_bytes).is_err()
+                || read_exact_at(&mut file, maxp_off, &mut maxp_bytes).is_err()
+                || read_exact_at(&mut file, hhea_off, &mut hhea_bytes).is_err()
+            {
                 continue;
             }
-            let Ok(hhea) = tables::parse_hhea(&hhea_bytes) else {
+            let (Ok(head), Ok(num_glyphs), Ok(hhea)) = (
+                tables::parse_head(&head_bytes),
+                tables::parse_maxp_num_glyphs(&maxp_bytes),
+                tables::parse_hhea(&hhea_bytes),
+            ) else {
                 continue;
             };
-            if hmtx_len < (hhea.number_of_h_metrics as u64) * 4 {
-                continue;
-            }
             let loca_entry_bytes = if head.index_to_loc_format == 1 {
                 4u64
             } else {
                 2u64
             };
-            if loca_len < (num_glyphs as u64 + 1) * loca_entry_bytes {
-                continue;
-            }
-            if !file_has_supported_cmap(&mut file, cmap_off, cmap_len, &mut cmap_hdr) {
+            if hmtx_len < u64::from(hhea.number_of_h_metrics) * 4
+                || loca_len < (u64::from(num_glyphs) + 1) * loca_entry_bytes
+                || !file_has_supported_cmap(&mut file, cmap_off, cmap_len, &mut cmap_hdr)
+            {
                 continue;
             }
 
@@ -324,15 +270,15 @@ impl FontRegistry {
                 source: FontSource::Path(path.to_path_buf()),
                 index: index as u32,
             };
-            if let Some((name_off, name_len)) = name_loc {
-                if fits_file(name_off, name_len) && name_len <= 16 << 20 {
+            if let Some((name_off, name_len)) = req_loc(b"name") {
+                if name_len <= 16 << 20 {
                     name_buf.resize(name_len as usize, 0);
                     if read_exact_at(&mut file, name_off, &mut name_buf).is_ok() {
                         self.register_name_table(&name_buf, &key);
                     }
                 }
             }
-            self.all.push(Entry { key });
+            self.all.push(key);
         }
     }
 
@@ -425,7 +371,7 @@ impl FontRegistry {
             if let Ok(Some(name_bytes)) = dir.find_slice(bytes, b"name") {
                 self.register_name_table(name_bytes, &key);
             }
-            self.all.push(Entry { key });
+            self.all.push(key);
         }
     }
 
@@ -442,12 +388,12 @@ impl FontRegistry {
 
     /// レジストリ内の任意の 1 フォント（何も見つからない場合の最終フォールバック用）。
     pub fn any(&self) -> Option<FontKey> {
-        self.all.first().map(|e| e.key.clone())
+        self.all.first().cloned()
     }
 
     /// 登録済み全フォント（グリフ単位フォールバックの走査用）。
     pub fn iter_all(&self) -> impl Iterator<Item = &FontKey> {
-        self.all.iter().map(|e| &e.key)
+        self.all.iter()
     }
 
     pub fn len(&self) -> usize {

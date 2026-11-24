@@ -28,12 +28,11 @@ pub use glyf::{Contour, Outline, Point, Segment};
 pub use raster::{rasterize, size_q6, GlyphCache, GlyphMask};
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 
 /// `glyf` テーブル本体の保持形態。システムフォントはファイルハンドルを保持して
 /// グリフ単位でオンデマンド読込し、10〜15 MiB の TTC 全体を RAM に常駐させない。
@@ -199,41 +198,12 @@ impl Font {
             0
         };
 
-        ensure!(
-            sfnt_offset.checked_add(12).is_some_and(|e| e <= file_len),
-            "sfnt テーブルのオフセットが範囲外です"
-        );
-        let mut sh = [0u8; 12];
-        read_file_exact_at(file_ref, sfnt_offset, &mut sh)?;
-        let sfnt_version = u32::from_be_bytes([sh[0], sh[1], sh[2], sh[3]]);
-        if sfnt_version == 0x4F54_544F {
-            bail!("OpenType/CFF ('OTTO') は非対応です（glyf 系アウトラインのみ対応）");
-        }
-        ensure!(
-            sfnt_version == 0x0001_0000 || sfnt_version == 0x7472_7565,
-            "未知の sfnt バージョンです: 0x{sfnt_version:08X}"
-        );
-        let num_tables = u16::from_be_bytes([sh[4], sh[5]]) as usize;
-        let rec_len = num_tables * 16;
-        ensure!(
-            sfnt_offset
-                .checked_add(12 + rec_len as u64)
-                .is_some_and(|e| e <= file_len),
-            "テーブルがファイル範囲外を指しています"
-        );
-        let mut dir_bytes = vec![0u8; rec_len];
-        read_file_exact_at(file_ref, sfnt_offset + 12, &mut dir_bytes)?;
-        let mut tables = HashMap::with_capacity(num_tables);
-        for rec in dir_bytes.as_chunks::<16>().0 {
-            let tag = [rec[0], rec[1], rec[2], rec[3]];
-            let off = u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]);
-            let len = u32::from_be_bytes([rec[12], rec[13], rec[14], rec[15]]);
-            tables.insert(tag, (off, len));
-        }
+        let mut read_at = |off: u64, buf: &mut [u8]| read_file_exact_at(file_ref, off, buf);
+        let mut dir_buf = Vec::new();
+        let dir = sfnt::read_sfnt_directory_at(&mut read_at, file_len, sfnt_offset, &mut dir_buf)?;
 
-        let (glyf_offset, glyf_length) = tables
-            .get(b"glyf")
-            .copied()
+        let (glyf_offset, glyf_length) = dir
+            .find(b"glyf")
             .ok_or_else(|| anyhow::anyhow!("必須テーブル 'glyf' がありません"))?;
         ensure!(
             u64::from(glyf_offset)
@@ -243,7 +213,7 @@ impl Font {
         );
 
         let mut read_opt = |tag: &[u8; 4]| -> Result<Option<Cow<'_, [u8]>>> {
-            let Some(&(off, len)) = tables.get(tag) else {
+            let Some((off, len)) = dir.find(tag) else {
                 return Ok(None);
             };
             let end = u64::from(off)
@@ -251,7 +221,7 @@ impl Font {
                 .ok_or_else(|| anyhow::anyhow!("テーブル長の計算がオーバーフローしました"))?;
             ensure!(end <= file_len, "テーブルがファイル範囲外を指しています");
             let mut buf = vec![0u8; len as usize];
-            read_file_exact_at(file_ref, u64::from(off), &mut buf)?;
+            read_at(u64::from(off), &mut buf)?;
             Ok(Some(Cow::Owned(buf)))
         };
         let font = Self::parse_tables(&mut read_opt)?;
