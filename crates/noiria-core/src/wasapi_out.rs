@@ -171,7 +171,9 @@ impl WasapiOutput {
         ensure!(channels >= 1, "チャンネル数が不正です: {channels}");
         ensure!(sample_rate > 0, "サンプルレートが不正です");
 
-        let device_format = classify_format(mix_format, mix_format_ptr)?;
+        // SAFETY: `mix_format` は `mix_format_ptr` の借用で、GetMixFormat が返した
+        // 有効な WAVEFORMATEX(EXTENSIBLE) バッファを指す（`_free_guard` で生存中）。
+        let device_format = unsafe { classify_format(mix_format, mix_format_ptr) }?;
 
         // 共有モード・イベント駆動: hnsBufferDuration/hnsPeriodicity は仕様上
         // 0 を渡す（システムが最小レイテンシのバッファを選ぶ）。
@@ -293,13 +295,18 @@ impl WasapiOutput {
         // SAFETY: `frames` は GetBufferSize 以下（上で確認）。GetBuffer/ReleaseBuffer は
         // 1 対で、間に他の GetBuffer を挟まない（この関数内で完結する）。
         let ptr = unsafe { self.render_client.GetBuffer(frames) }.context("GetBuffer に失敗")?;
-        let written = write_device_buffer(
-            ptr,
-            frames as usize,
-            self.channels as usize,
-            src,
-            self.device_format,
-        );
+        // SAFETY: `ptr` は `GetBuffer(frames)` が返した `frames * channels * bytes_per_sample`
+        // バイト以上の書き込み可能なデバイス領域（`nBlockAlign` は `classify_format` で検証済み）で
+        // `src` とは重ならない。
+        let written = unsafe {
+            write_device_buffer(
+                ptr,
+                frames as usize,
+                self.channels as usize,
+                src,
+                self.device_format,
+            )
+        };
         let flags = if written.is_ok() { 0 } else { BUFFERFLAGS_SILENT };
         // SAFETY: 直前の GetBuffer(frames) と同じフレーム数での対の返却。
         let released = unsafe { self.render_client.ReleaseBuffer(frames, flags) }
@@ -321,7 +328,11 @@ impl Drop for CoTaskMemGuard {
 
 /// `fmt` が指す mix format を分類する。`ptr` は `fmt` の借用元と同じ生ポインタで、
 /// `WAVE_FORMAT_EXTENSIBLE` のときだけ拡張部まで読むため `cbSize` を検査する。
-fn classify_format(fmt: &WAVEFORMATEX, ptr: *mut WAVEFORMATEX) -> Result<DeviceFormat> {
+///
+/// # Safety
+/// `ptr` は `fmt` と同じ割り当ての先頭を指し、`fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE`
+/// の場合は `size_of::<WAVEFORMATEX>() + fmt.cbSize` バイト以上が読み取り可能であること。
+unsafe fn classify_format(fmt: &WAVEFORMATEX, ptr: *mut WAVEFORMATEX) -> Result<DeviceFormat> {
     // WAVEFORMATEX は packed(1) なので、フィールドは一度ローカル変数へコピーしてから
     // 使う（&packed_struct.field は未整列参照になり UB になるため）。
     let tag = fmt.wFormatTag;
@@ -370,11 +381,13 @@ const WAVE_FORMAT_IEEE_FLOAT_TAG: u16 = WAVE_FORMAT_IEEE_FLOAT as u16;
 /// スクラッチ (f32, `channels` 単位インターリーブ, `dst_frames` フレーム) をデバイスの
 /// ネイティブフォーマットへ変換して `dst` へ書き込む。
 ///
-/// `dst` は WASAPI が `GetBuffer(dst_frames)` で貸した領域で、`dst_frames * channels`
-/// サンプルぶんのバイト数（`classify_format` が nBlockAlign で保証）が有効。
 /// 貸与領域の整列は WASAPI が文書化していないので、スライスを作らず（f32/i16 の
 /// 整列を仮定せず）バイト単位のコピー / `write_unaligned` で書く。
-fn write_device_buffer(
+///
+/// # Safety
+/// `dst` が非 null のとき、`dst` は `dst_frames * channels * fmt.bytes_per_sample()` バイト
+/// 以上の書き込み可能な領域を指し、`src` と重ならないこと。
+unsafe fn write_device_buffer(
     dst: *mut u8,
     dst_frames: usize,
     channels: usize,
@@ -515,25 +528,28 @@ mod tests {
     fn classify_ext(e: &WAVEFORMATEXTENSIBLE) -> Result<DeviceFormat> {
         let ptr = e as *const WAVEFORMATEXTENSIBLE as *mut WAVEFORMATEX;
         // SAFETY: `ptr` は有効な WAVEFORMATEXTENSIBLE（先頭が WAVEFORMATEX）を指す。
-        classify_format(unsafe { &*ptr }, ptr)
+        unsafe { classify_format(&*ptr, ptr) }
     }
 
     #[test]
     fn classify_format_accepts_float32_and_pcm16_and_rejects_the_rest() {
         let f32_fmt = wave_format(WAVE_FORMAT_IEEE_FLOAT_TAG, 32, 2, 8);
-        assert_eq!(
-            classify_format(&f32_fmt, &f32_fmt as *const _ as *mut _).unwrap(),
-            DeviceFormat::F32
-        );
-        let pcm16 = wave_format(WAVE_FORMAT_PCM, 16, 2, 4);
-        assert_eq!(
-            classify_format(&pcm16, &pcm16 as *const _ as *mut _).unwrap(),
-            DeviceFormat::I16
-        );
-        let pcm24 = wave_format(WAVE_FORMAT_PCM, 24, 2, 6);
-        assert!(classify_format(&pcm24, &pcm24 as *const _ as *mut _).is_err());
-        let bad_align = wave_format(WAVE_FORMAT_IEEE_FLOAT_TAG, 32, 2, 12);
-        assert!(classify_format(&bad_align, &bad_align as *const _ as *mut _).is_err());
+        // SAFETY: 各ローカル変数は有効な WAVEFORMATEX で EXTENSIBLE ではない。
+        unsafe {
+            assert_eq!(
+                classify_format(&f32_fmt, &f32_fmt as *const _ as *mut _).unwrap(),
+                DeviceFormat::F32
+            );
+            let pcm16 = wave_format(WAVE_FORMAT_PCM, 16, 2, 4);
+            assert_eq!(
+                classify_format(&pcm16, &pcm16 as *const _ as *mut _).unwrap(),
+                DeviceFormat::I16
+            );
+            let pcm24 = wave_format(WAVE_FORMAT_PCM, 24, 2, 6);
+            assert!(classify_format(&pcm24, &pcm24 as *const _ as *mut _).is_err());
+            let bad_align = wave_format(WAVE_FORMAT_IEEE_FLOAT_TAG, 32, 2, 12);
+            assert!(classify_format(&bad_align, &bad_align as *const _ as *mut _).is_err());
+        }
     }
 
     #[test]
@@ -559,8 +575,11 @@ mod tests {
         let src = [0.5f32, -0.5, 1.5, -2.0, 0.0, 0.25];
         for offset in 0..4 {
             let mut f32_dst = vec![0u8; 4 * src.len() + 8];
-            write_device_buffer(f32_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::F32)
-                .unwrap();
+            // SAFETY: `f32_dst[offset..]` は `4 * src.len()` バイト以上の書き込み可能な独自バッファ。
+            unsafe {
+                write_device_buffer(f32_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::F32)
+            }
+            .unwrap();
             let got: Vec<f32> = f32_dst[offset..offset + 4 * src.len()]
                 .chunks(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
@@ -568,8 +587,11 @@ mod tests {
             assert_eq!(got, src, "F32 offset={offset}");
 
             let mut i16_dst = vec![0u8; 2 * src.len() + 8];
-            write_device_buffer(i16_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::I16)
-                .unwrap();
+            // SAFETY: `i16_dst[offset..]` は `2 * src.len()` バイト以上の書き込み可能な独自バッファ。
+            unsafe {
+                write_device_buffer(i16_dst[offset..].as_mut_ptr(), 3, 2, &src, DeviceFormat::I16)
+            }
+            .unwrap();
             let got: Vec<i16> = i16_dst[offset..offset + 2 * src.len()]
                 .chunks(2)
                 .map(|b| i16::from_le_bytes(b.try_into().unwrap()))
@@ -585,7 +607,12 @@ mod tests {
             );
         }
         let mut dst = [0u8; 64];
-        assert!(write_device_buffer(dst.as_mut_ptr(), 4, 2, &src, DeviceFormat::F32).is_err());
-        assert!(write_device_buffer(std::ptr::null_mut(), 3, 2, &src, DeviceFormat::F32).is_err());
+        // SAFETY: 長さ不一致 / null は書き込み前に `ensure!` で Err になる。
+        unsafe {
+            assert!(write_device_buffer(dst.as_mut_ptr(), 4, 2, &src, DeviceFormat::F32).is_err());
+            assert!(
+                write_device_buffer(std::ptr::null_mut(), 3, 2, &src, DeviceFormat::F32).is_err()
+            );
+        }
     }
 }

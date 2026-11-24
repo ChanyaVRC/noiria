@@ -68,7 +68,8 @@ impl AxisCache {
 fn horiz_row(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 availability was checked above.
+        // SAFETY: AVX2 availability was checked above, and `xs` was built by `fill_axis`
+        // for `src_row.len()`, so every `(x0, x1)` index is strictly `< src_row.len()`.
         unsafe { horiz_row_avx2(src_row, xs, dst) };
         return;
     }
@@ -109,12 +110,19 @@ fn vert_row_scalar(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
     }
 }
 
+/// # Safety
+/// - Caller must verify `is_x86_feature_detected!("avx2")`.
+/// - Every `(x0, x1, _)` tap in `xs[..xs.len().min(dst.len())]` must satisfy
+///   `(x0 as usize) < src_row.len()` and `(x1 as usize) < src_row.len()`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn horiz_row_avx2(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
     use std::arch::x86_64::*;
 
     let dw = xs.len().min(dst.len());
+    debug_assert!(xs[..dw]
+        .iter()
+        .all(|&(x0, x1, _)| (x0 as usize) < src_row.len() && (x1 as usize) < src_row.len()));
     let src_ptr = src_row.as_ptr();
     let dst_ptr = dst.as_mut_ptr();
     let v128 = _mm256_set1_epi16(128);
@@ -189,6 +197,8 @@ unsafe fn horiz_row_avx2(src_row: &[u32], xs: &[AxisTap], dst: &mut [u32]) {
     }
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn vert_row_avx2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
@@ -224,6 +234,8 @@ unsafe fn vert_row_avx2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {
     vert_row_scalar(&r0[i..len], &r1[i..len], wy, &mut dst[i..len]);
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn vert_row_sse2(r0: &[u32], r1: &[u32], wy: u32, dst: &mut [u32]) {

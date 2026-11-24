@@ -9,18 +9,24 @@ use super::{
 
 // For 0 <= v <= 65025, ((v + 128) * 257) >> 16 == ((v + 128) + ((v + 128) >> 8)) >> 8 == (v + 127) / 255.
 // v + 128 <= 65153 fits in u16 without overflow, so vpmulhuw computes exact div255 in 1 instruction.
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn div255_epi16_avx2(v: __m256i, v128: __m256i, v0101: __m256i) -> __m256i {
     _mm256_mulhi_epu16(_mm256_add_epi16(v, v128), v0101)
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn div255_epi16_sse2(v: __m128i, v128: __m128i, v0101: __m128i) -> __m128i {
     _mm_mulhi_epu16(_mm_add_epi16(v, v128), v0101)
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn to_bgrx_u32_avx2(src: &[u8], out: &mut [u32]) {
     let n = out.len().min(src.len() / 4);
@@ -40,6 +46,8 @@ pub(super) unsafe fn to_bgrx_u32_avx2(src: &[u8], out: &mut [u32]) {
     to_bgrx_u32_scalar(&src[i * 4..], &mut out[i..]);
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("ssse3")`.
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn to_bgrx_u32_ssse3(src: &[u8], out: &mut [u32]) {
     let n = out.len().min(src.len() / 4);
@@ -56,6 +64,8 @@ pub(super) unsafe fn to_bgrx_u32_ssse3(src: &[u8], out: &mut [u32]) {
     to_bgrx_u32_scalar(&src[i * 4..], &mut out[i..]);
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn lerp_bytes_avx2(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
     let len = out.len().min(a.len()).min(b.len());
@@ -87,6 +97,8 @@ pub(super) unsafe fn lerp_bytes_avx2(out: &mut [u8], a: &[u8], b: &[u8], t256: u
     lerp_bytes_scalar(&mut out[i..len], &a[i..len], &b[i..len], t256);
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 pub(super) unsafe fn lerp_bytes_sse2(out: &mut [u8], a: &[u8], b: &[u8], t256: u32) {
     let len = out.len().min(a.len()).min(b.len());
@@ -118,6 +130,8 @@ pub(super) unsafe fn lerp_bytes_sse2(out: &mut [u8], a: &[u8], b: &[u8], t256: u
     lerp_bytes_scalar(&mut out[i..len], &a[i..len], &b[i..len], t256);
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
     let len = rgba.len().min(out.len()) & !3;
@@ -161,6 +175,8 @@ pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
     premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 pub(super) unsafe fn premultiply_rgba_sse2(rgba: &[u8], out: &mut [u8]) {
     let len = rgba.len().min(out.len()) & !3;
@@ -201,6 +217,8 @@ pub(super) struct BlitRect {
     pub(super) opacity: u32,
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn blit_rect_avx2(dst: &mut [u8], src: &[u8], rect: BlitRect) {
     for r in 0..rect.rows {
@@ -221,6 +239,8 @@ pub(super) unsafe fn blit_rect_avx2(dst: &mut [u8], src: &[u8], rect: BlitRect) 
     }
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 #[inline]
 pub(super) unsafe fn blit_row_opaque_avx2(dst_row: &mut [u8], src_row: &[u8]) {
@@ -267,6 +287,8 @@ pub(super) unsafe fn blit_row_opaque_avx2(dst_row: &mut [u8], src_row: &[u8]) {
     blit_row_opaque_scalar(&mut dst_row[i..len], &src_row[i..len]);
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 #[inline]
 pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o: u32) {
@@ -319,6 +341,8 @@ pub(super) unsafe fn blit_row_opacity_avx2(dst_row: &mut [u8], src_row: &[u8], o
     blit_row_opacity_scalar(&mut dst_row[i..len], &src_row[i..len], o);
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 pub(super) unsafe fn blit_rect_sse2(dst: &mut [u8], src: &[u8], rect: BlitRect) {
     for r in 0..rect.rows {
@@ -339,6 +363,8 @@ pub(super) unsafe fn blit_rect_sse2(dst: &mut [u8], src: &[u8], rect: BlitRect) 
     }
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 #[inline]
 pub(super) unsafe fn blit_row_opaque_sse2(dst_row: &mut [u8], src_row: &[u8]) {
@@ -378,6 +404,8 @@ pub(super) unsafe fn blit_row_opaque_sse2(dst_row: &mut [u8], src_row: &[u8]) {
     blit_row_opaque_scalar(&mut dst_row[i..len], &src_row[i..len]);
 }
 
+/// # Safety
+/// Caller must ensure SSE2 is available (guaranteed on x86_64).
 #[target_feature(enable = "sse2")]
 #[inline]
 pub(super) unsafe fn blit_row_opacity_sse2(dst_row: &mut [u8], src_row: &[u8], o: u32) {
@@ -413,6 +441,8 @@ pub(super) unsafe fn blit_row_opacity_sse2(dst_row: &mut [u8], src_row: &[u8], o
     blit_row_opacity_scalar(&mut dst_row[i..len], &src_row[i..len], o);
 }
 
+/// # Safety
+/// Caller must verify `is_x86_feature_detected!("avx2")`.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn universal_avx2(
     out: &mut [u8],
@@ -421,7 +451,11 @@ pub(super) unsafe fn universal_avx2(
     rule: &[u8],
     lut: &[u16; 256],
 ) {
-    let pixels = rule.len();
+    let pixels = rule
+        .len()
+        .min(out.len() / 4)
+        .min(a.len() / 4)
+        .min(b.len() / 4);
     let zero = _mm256_setzero_si256();
     let v256 = _mm256_set1_epi16(256);
 

@@ -523,8 +523,11 @@ fn shared_in_wndproc<'a>(hwnd: HWND) -> Option<&'a WindowShared> {
     unsafe { shared_of(hwnd) }
 }
 
-/// 窓プロシージャ。`RegisterClassW` へ渡すために `unsafe extern "system"` だが、本体は `wndproc_impl`（安全な関数）で、
-/// 呼び出し側（OS）に課す条件は「有効な窓ハンドルとそのメッセージ」だけ。
+/// 窓プロシージャ。`RegisterClassW` へ渡すために `unsafe extern "system"` だが、本体は `wndproc_impl`（安全な関数）。
+///
+/// # Safety
+/// OS（Windows）からのウィンドウメッセージ配送コールバックとして、`run_windowed` が登録した
+/// クラスの有効な `hwnd` と対応するメッセージ引数 (`wparam`, `lparam`) で呼ばれること。
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     wndproc_impl(hwnd, msg, wparam, lparam)
 }

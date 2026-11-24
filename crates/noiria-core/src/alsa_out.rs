@@ -93,7 +93,8 @@ struct Symbols {
 /// 受けることはない。
 macro_rules! load_symbol {
     ($handle:expr, $name:literal, $ty:ty) => {{
-        let ptr = dlsym_nonnull($handle, $name)?;
+        // SAFETY: 呼び出し元 (`Symbols::load`) が `handle` の有効性を保証する。
+        let ptr = unsafe { dlsym_nonnull($handle, $name)? };
         // SAFETY: `ptr` は libasound の `$name` の関数アドレス（null でないことを確認済み）。
         // `$ty` はその C 関数の実際のシグネチャ（ALSA の公開ヘッダどおり）で、
         // ポインタ幅同士の transmute（サイズはコンパイル時に検査される）。
@@ -102,41 +103,45 @@ macro_rules! load_symbol {
 }
 
 impl Symbols {
-    fn load(handle: *mut c_void) -> Result<Self> {
+    /// # Safety
+    /// `handle` は `dlopen("libasound.so*")` が返した有効な共有ライブラリハンドルであること。
+    unsafe fn load(handle: *mut c_void) -> Result<Self> {
         Ok(Self {
-            open: load_symbol!(handle, "snd_pcm_open", FnPcmOpen),
-            close: load_symbol!(handle, "snd_pcm_close", FnPcmClose),
-            hw_params_malloc: load_symbol!(handle, "snd_pcm_hw_params_malloc", FnHwParamsMalloc),
-            hw_params_free: load_symbol!(handle, "snd_pcm_hw_params_free", FnHwParamsFree),
-            hw_params_any: load_symbol!(handle, "snd_pcm_hw_params_any", FnHwParamsAny),
-            set_access: load_symbol!(handle, "snd_pcm_hw_params_set_access", FnSetAccess),
-            set_format: load_symbol!(handle, "snd_pcm_hw_params_set_format", FnSetFormat),
+            open: load_symbol!(handle, c"snd_pcm_open", FnPcmOpen),
+            close: load_symbol!(handle, c"snd_pcm_close", FnPcmClose),
+            hw_params_malloc: load_symbol!(handle, c"snd_pcm_hw_params_malloc", FnHwParamsMalloc),
+            hw_params_free: load_symbol!(handle, c"snd_pcm_hw_params_free", FnHwParamsFree),
+            hw_params_any: load_symbol!(handle, c"snd_pcm_hw_params_any", FnHwParamsAny),
+            set_access: load_symbol!(handle, c"snd_pcm_hw_params_set_access", FnSetAccess),
+            set_format: load_symbol!(handle, c"snd_pcm_hw_params_set_format", FnSetFormat),
             set_channels_near: load_symbol!(
                 handle,
-                "snd_pcm_hw_params_set_channels_near",
+                c"snd_pcm_hw_params_set_channels_near",
                 FnSetChannelsNear
             ),
-            set_rate_near: load_symbol!(handle, "snd_pcm_hw_params_set_rate_near", FnSetRateNear),
-            hw_params_commit: load_symbol!(handle, "snd_pcm_hw_params", FnHwParamsCommit),
-            get_channels: load_symbol!(handle, "snd_pcm_hw_params_get_channels", FnGetChannels),
-            get_rate: load_symbol!(handle, "snd_pcm_hw_params_get_rate", FnGetRate),
-            prepare: load_symbol!(handle, "snd_pcm_prepare", FnPrepare),
-            writei: load_symbol!(handle, "snd_pcm_writei", FnWritei),
-            drain: load_symbol!(handle, "snd_pcm_drain", FnDrain),
-            strerror: load_symbol!(handle, "snd_strerror", FnStrerror),
+            set_rate_near: load_symbol!(handle, c"snd_pcm_hw_params_set_rate_near", FnSetRateNear),
+            hw_params_commit: load_symbol!(handle, c"snd_pcm_hw_params", FnHwParamsCommit),
+            get_channels: load_symbol!(handle, c"snd_pcm_hw_params_get_channels", FnGetChannels),
+            get_rate: load_symbol!(handle, c"snd_pcm_hw_params_get_rate", FnGetRate),
+            prepare: load_symbol!(handle, c"snd_pcm_prepare", FnPrepare),
+            writei: load_symbol!(handle, c"snd_pcm_writei", FnWritei),
+            drain: load_symbol!(handle, c"snd_pcm_drain", FnDrain),
+            strerror: load_symbol!(handle, c"snd_strerror", FnStrerror),
         })
     }
 }
 
 /// `dlsym` で `name` を引き、null なら `Err`（null を関数ポインタにしてはならない）。
-fn dlsym_nonnull(handle: *mut c_void, name: &str) -> Result<*mut c_void> {
-    let cname = CString::new(name).expect("シンボル名にNUL文字は含まれない");
-    // SAFETY: `handle` は dlopen が返した有効なハンドル、`cname` は NUL 終端の C 文字列で
-    // 呼び出しの間生きている。
-    let ptr = unsafe { dlsym(handle, cname.as_ptr()) };
+///
+/// # Safety
+/// `handle` は `dlopen` が返した有効なハンドルであること。
+unsafe fn dlsym_nonnull(handle: *mut c_void, name: &CStr) -> Result<*mut c_void> {
+    // SAFETY: `handle` の有効性は呼び出し元が保証し、`name` は NUL 終端の `CStr`。
+    let ptr = unsafe { dlsym(handle, name.as_ptr()) };
     ensure!(
         !ptr.is_null(),
-        "ALSA: シンボル '{name}' が見つかりません（dlerror: {}）",
+        "ALSA: シンボル '{}' が見つかりません（dlerror: {}）",
+        name.to_string_lossy(),
         last_dlerror()
     );
     Ok(ptr)
@@ -172,9 +177,11 @@ fn strerror(syms: &Symbols, err: c_int) -> String {
 /// `libasound.so.2`（無ければ `libasound.so`）を dlopen する。
 /// 見つからない環境では `Err` を返す（呼び出し元は無音続行にフォールバック）。
 fn load_libasound() -> Result<(*mut c_void, &'static str)> {
-    for name in ["libasound.so.2", "libasound.so"] {
-        let cname = CString::new(name).expect("固定文字列にNUL文字は含まれない");
-        // SAFETY: `cname` は NUL 終端で呼び出しの間生きている。flag は有効な RTLD_NOW。
+    for (cname, name) in [
+        (c"libasound.so.2", "libasound.so.2"),
+        (c"libasound.so", "libasound.so"),
+    ] {
+        // SAFETY: `cname` は NUL 終端の静的 C 文字列。flag は有効な RTLD_NOW。
         let handle = unsafe { dlopen(cname.as_ptr(), RTLD_NOW) };
         if !handle.is_null() {
             return Ok((handle, name));
@@ -196,7 +203,8 @@ fn symbols() -> Result<(Symbols, &'static str)> {
         return Ok(*s);
     }
     let (handle, lib_name) = load_libasound()?;
-    let loaded = (Symbols::load(handle)?, lib_name);
+    // SAFETY: `handle` は直前の `load_libasound` が返した非 null の libasound ハンドル。
+    let loaded = (unsafe { Symbols::load(handle) }?, lib_name);
     Ok(*SYMBOLS.get_or_init(|| loaded))
 }
 
@@ -282,7 +290,8 @@ impl AlsaOutput {
         );
         ensure!(!pcm.is_null(), "snd_pcm_open が null を返しました");
 
-        let result = Self::configure(pcm, syms);
+        // SAFETY: `pcm` は上で open に成功した非 null ハンドル。失敗時は直下で必ず close する。
+        let result = unsafe { Self::configure(pcm, syms) };
         if let Err(e) = &result {
             // configure 失敗時は pcm を必ず閉じる（configure 側は params の
             // free のみ責務を持ち、pcm のクローズはこちらの責務にする）。
@@ -294,7 +303,10 @@ impl AlsaOutput {
         result
     }
 
-    fn configure(pcm: *mut SndPcmT, syms: Symbols) -> Result<Self> {
+    /// # Safety
+    /// `pcm` は `snd_pcm_open` が返した有効な非 null ハンドルで、呼び出し中生存すること。
+    /// 成功時は `Self` が所有権を引き取り、失敗時は呼び出し元が `close` すること。
+    unsafe fn configure(pcm: *mut SndPcmT, syms: Symbols) -> Result<Self> {
         let mut params: *mut SndPcmHwParamsT = std::ptr::null_mut();
         // SAFETY: `&mut params` は書き込み可能な出力先。
         let ret = unsafe { (syms.hw_params_malloc)(&mut params) };
@@ -422,6 +434,7 @@ impl AlsaOutput {
         let mut io = RealPcm {
             syms: &self.syms,
             pcm: self.pcm,
+            channels: self.channels as usize,
         };
         let result = pump(
             &mut io,
@@ -450,10 +463,15 @@ impl Drop for AlsaOutput {
     }
 }
 
+enum PcmChunk<'a> {
+    F32(&'a [f32]),
+    I16(&'a [i16]),
+}
+
 /// `pump` が PCM に対して行う操作（本物は libasound、テストは偽物）。
 trait PcmIo {
-    /// 先頭 `frames` フレーム分（`ptr` から `frames * channels` サンプルが有効）を書く。
-    fn writei(&mut self, ptr: *const c_void, frames: c_ulong) -> c_long;
+    /// 先頭 `frames` フレーム分を書く。
+    fn writei(&mut self, chunk: PcmChunk<'_>, frames: usize) -> c_long;
     fn prepare(&mut self) -> c_int;
     fn strerror(&self, err: c_int) -> String;
 }
@@ -461,13 +479,25 @@ trait PcmIo {
 struct RealPcm<'a> {
     syms: &'a Symbols,
     pcm: *mut SndPcmT,
+    channels: usize,
 }
 
 impl PcmIo for RealPcm<'_> {
-    fn writei(&mut self, ptr: *const c_void, frames: c_ulong) -> c_long {
-        // SAFETY: `pcm` は open 済みの有効なハンドル。`pump` が `ptr` から `frames` フレーム
-        // （= frames * channels サンプル、デバイスフォーマットの幅）が読める領域を渡す。
-        unsafe { (self.syms.writei)(self.pcm, ptr, frames) }
+    fn writei(&mut self, chunk: PcmChunk<'_>, frames: usize) -> c_long {
+        let needed = frames * self.channels;
+        let ptr = match chunk {
+            PcmChunk::F32(s) => {
+                assert!(s.len() >= needed);
+                s.as_ptr() as *const c_void
+            }
+            PcmChunk::I16(s) => {
+                assert!(s.len() >= needed);
+                s.as_ptr() as *const c_void
+            }
+        };
+        // SAFETY: `pcm` は open 済みの有効なハンドル。上でスライス長が `frames * channels`
+        // 以上であることを検証済みのため、`snd_pcm_writei` が読む範囲はすべて有効。
+        unsafe { (self.syms.writei)(self.pcm, ptr, frames as c_ulong) }
     }
     fn prepare(&mut self) -> c_int {
         // SAFETY: `pcm` は open 済みの有効なハンドル。
@@ -534,14 +564,12 @@ fn pump(
         while frames_written < CHUNK_FRAMES {
             let sample_offset = frames_written * channels;
             let remaining = CHUNK_FRAMES - frames_written;
-            // `sample_offset..` のスライスは `remaining * channels` サンプルを持つ
-            // （buf 長 = CHUNK_FRAMES * channels）ので、writei が読む範囲に収まる。
-            let chunk_ptr: *const c_void = match format {
-                DeviceFormat::F32 => f32_buf[sample_offset..].as_ptr() as *const c_void,
-                DeviceFormat::I16 => i16_buf[sample_offset..].as_ptr() as *const c_void,
+            let chunk = match format {
+                DeviceFormat::F32 => PcmChunk::F32(&f32_buf[sample_offset..]),
+                DeviceFormat::I16 => PcmChunk::I16(&i16_buf[sample_offset..]),
             };
 
-            let ret = io.writei(chunk_ptr, remaining as c_ulong);
+            let ret = io.writei(chunk, remaining);
             if ret > 0 {
                 // 要求したフレーム数を超えて書いたと報告されても、範囲外へ進めない。
                 frames_written += (ret as usize).min(remaining);
@@ -662,7 +690,7 @@ mod tests {
     }
 
     impl PcmIo for ScriptedPcm {
-        fn writei(&mut self, _ptr: *const c_void, frames: c_ulong) -> c_long {
+        fn writei(&mut self, _chunk: PcmChunk<'_>, frames: usize) -> c_long {
             let ret = self
                 .script
                 .get(self.calls)

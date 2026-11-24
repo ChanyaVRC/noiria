@@ -167,6 +167,16 @@ impl Default for Videos {
     }
 }
 
+impl Drop for Videos {
+    fn drop(&mut self) {
+        if let Some(current) = self.current.as_ref() {
+            current.stop.store(true, Ordering::Relaxed);
+            current.playing.store(false, Ordering::Relaxed);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 struct PlaybackStateGuard(Arc<AtomicBool>);
 
 impl Drop for PlaybackStateGuard {
