@@ -62,11 +62,11 @@ const FAST_SIZE: usize = 1 << FAST_BITS;
 /// Vorbis のコードワード割当ては entry 番号昇順に貪欲割当てを行うため、
 /// 構築時に 2 分木と 10bit 反転テーブルを展開して O(1) 復号できるようにする。
 struct Huffman {
-    /// 先読み `FAST_BITS` ビット（LSB ファースト）に対する `(entry, len)`。
-    /// `len == 0` は `FAST_BITS` 超（`nodes` を辿る）。
-    fast: Vec<(u32, u8)>,
+    /// 先読み `FAST_BITS` ビット（LSB ファースト）に対するパック済み `(len << 24) | entry`。
+    /// `len == 0` は `FAST_BITS` 超（`nodes` を辿る）。`entries <= 1<<20` なので下位 24bit に収まる。
+    fast: Box<[u32]>,
     /// 2 分木ノード。正の値は子ノード添字、負の値 `-(entry as i32) - 1` は葉、0 は無効。
-    nodes: Vec<[i32; 2]>,
+    nodes: Box<[[i32; 2]]>,
     /// 仕様書 Errata 20150226: used entry がちょうど1個の特殊ケース。
     single_entry: Option<u32>,
 }
@@ -83,15 +83,15 @@ impl Huffman {
                 "単一エントリコードブックの符号長は 1 でなければなりません"
             );
             return Ok(Self {
-                fast: Vec::new(),
-                nodes: Vec::new(),
+                fast: Box::new([]),
+                nodes: Box::new([]),
                 single_entry: Some(e),
             });
         }
 
         let mut open: std::collections::VecDeque<(u8, u64)> = std::collections::VecDeque::new();
         open.push_back((0u8, 0u64));
-        let mut fast = vec![(0u32, 0u8); FAST_SIZE];
+        let mut fast = vec![0u32; FAST_SIZE];
         let mut nodes: Vec<[i32; 2]> = vec![[0, 0]];
         for &e in &used {
             let l = lengths[e as usize];
@@ -116,10 +116,11 @@ impl Huffman {
                         rev |= 1 << i;
                     }
                 }
+                let packed = e | ((l as u32) << 24);
                 let step = 1usize << l;
                 let mut idx = rev;
                 while idx < FAST_SIZE {
-                    fast[idx] = (e, l);
+                    fast[idx] = packed;
                     idx += step;
                 }
             } else {
@@ -149,8 +150,8 @@ impl Huffman {
         );
 
         Ok(Self {
-            fast,
-            nodes,
+            fast: fast.into_boxed_slice(),
+            nodes: nodes.into_boxed_slice(),
             single_entry: None,
         })
     }
@@ -162,13 +163,14 @@ impl Huffman {
             return Ok(e);
         }
         let peek = br.peek(FAST_BITS) as usize;
-        let (entry, len) = self.fast[peek];
+        let packed = self.fast[peek];
+        let len = packed >> 24;
         if len != 0 {
-            br.consume(len as u32);
+            br.consume(len);
             if br.eof {
                 bail!("パケット終端でコードブック復号が続行できません");
             }
-            return Ok(entry);
+            return Ok(packed & 0x00FF_FFFF);
         }
         let mut cur = 0usize;
         loop {
@@ -202,7 +204,7 @@ pub struct Codebook {
     pub dimensions: u32,
     huffman: Huffman,
     /// lookup_type 1/2 の場合の VQ ベクトル (entries 個、各 dimensions 要素)。フラット格納。
-    lookup: Option<Vec<f32>>,
+    lookup: Option<Box<[f32]>>,
 }
 
 impl Codebook {
@@ -323,7 +325,7 @@ impl Codebook {
                         }
                     }
                 }
-                Some(vectors)
+                Some(vectors.into_boxed_slice())
             }
             _ => bail!("非対応の codebook lookup type: {lookup_type}"),
         };

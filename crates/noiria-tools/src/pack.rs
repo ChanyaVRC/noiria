@@ -119,6 +119,86 @@ pub fn excluded_summary(excluded: &[ExcludedEntry]) -> String {
     )
 }
 
+/// `noiria-pack` と `noiria-export` の共通 CLI フラグ。
+pub struct CommonPackCli {
+    pub game: Option<PathBuf>,
+    pub out: Option<PathBuf>,
+    pub exclude: Vec<String>,
+    pub default_excludes: bool,
+    pub project_excludes: bool,
+    pub list: bool,
+    pub list_excluded: bool,
+    pub webp: bool,
+    pub flac: bool,
+}
+
+impl Default for CommonPackCli {
+    fn default() -> Self {
+        Self {
+            game: None,
+            out: None,
+            exclude: Vec::new(),
+            default_excludes: true,
+            project_excludes: true,
+            list: false,
+            list_excluded: false,
+            webp: true,
+            flac: true,
+        }
+    }
+}
+
+impl CommonPackCli {
+    /// `argv[*i]` が共通フラグなら消費して `Ok(true)` を返す（値を取るフラグは `*i` を 1 進める）。
+    pub fn try_consume(&mut self, argv: &[String], i: &mut usize) -> Result<bool> {
+        let next_val = |flag: &str, i: &mut usize| -> Result<&String> {
+            let v = argv
+                .get(*i + 1)
+                .with_context(|| format!("{flag} には値が必要です"))?;
+            *i += 1;
+            Ok(v)
+        };
+        match argv[*i].as_str() {
+            "--game" => self.game = Some(next_val("--game", i)?.into()),
+            "--out" => self.out = Some(next_val("--out", i)?.into()),
+            "--exclude" => self.exclude.push(next_val("--exclude", i)?.clone()),
+            "--no-default-excludes" => self.default_excludes = false,
+            "--no-project-excludes" => self.project_excludes = false,
+            "--list" => self.list = true,
+            "--list-excluded" => self.list_excluded = true,
+            "--no-webp" => self.webp = false,
+            "--no-flac" => self.flac = false,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+/// `--list` / `--list-excluded` と除外件数要約の共通出力。
+pub fn print_pack_listing(
+    entries: &[PackedEntry],
+    excluded: &[ExcludedEntry],
+    list: bool,
+    list_excluded: bool,
+) {
+    if list {
+        for e in entries {
+            println!(
+                "  {}  {} バイト{}",
+                e.path,
+                e.plain_len,
+                e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default()
+            );
+        }
+    }
+    println!("{}", excluded_summary(excluded));
+    if list_excluded {
+        for e in excluded {
+            println!("  除外: {}", e.describe());
+        }
+    }
+}
+
 /// `game_dir` 配下を再帰的に走査し、`(相対パス, 平文バイト列)` を集めて NPK1 pak を作る。
 /// 相対パスは OS に関わらず常に `/` 区切り（`noiria_core::pak` の index キーと揃える）。
 /// `exclude` は glob（[`PackOptions::exclude`]）。既定除外は有効（ドットファイル・ゴミ）。

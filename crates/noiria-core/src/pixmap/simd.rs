@@ -134,9 +134,10 @@ pub(super) unsafe fn lerp_bytes_sse2(out: &mut [u8], a: &[u8], b: &[u8], t256: u
 
 /// # Safety
 /// Caller must verify `is_x86_feature_detected!("avx2")`.
+/// `src` and `dst` must each be valid for `len` bytes; they may alias only if `src == dst`.
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
-    let len = rgba.len().min(out.len()) & !3;
+pub(super) unsafe fn premultiply_rgba_avx2_raw(src_ptr: *const u8, dst_ptr: *mut u8, len: usize) {
+    let len = len & !3;
     let zero = _mm256_setzero_si256();
     let v128 = _mm256_set1_epi16(128);
     let v0101 = _mm256_set1_epi16(0x0101);
@@ -150,13 +151,17 @@ pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
         11, -128, 11, -128, 11, -128, 15, -128, 15, -128, 15, -128, 15, -128,
     );
     let mut i = 0;
-    let src_ptr = rgba.as_ptr();
-    let dst_ptr = out.as_mut_ptr();
+    let in_place = std::ptr::eq(src_ptr, dst_ptr);
     while i + 32 <= len {
         let vs = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
-        let res = if _mm256_testc_si256(vs, alpha_mask) != 0 {
-            vs
-        } else if _mm256_testz_si256(vs, alpha_mask) != 0 {
+        if _mm256_testc_si256(vs, alpha_mask) != 0 {
+            if !in_place {
+                _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, vs);
+            }
+            i += 32;
+            continue;
+        }
+        let res = if _mm256_testz_si256(vs, alpha_mask) != 0 {
             zero
         } else {
             let a_lo = _mm256_shuffle_epi8(vs, shuf_lo);
@@ -174,21 +179,31 @@ pub(super) unsafe fn premultiply_rgba_avx2(rgba: &[u8], out: &mut [u8]) {
         _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, res);
         i += 32;
     }
-    premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
+    if in_place {
+        super::premultiply_rgba_in_place_scalar(std::slice::from_raw_parts_mut(
+            dst_ptr.add(i),
+            len - i,
+        ));
+    } else {
+        premultiply_rgba_scalar(
+            std::slice::from_raw_parts(src_ptr.add(i), len - i),
+            std::slice::from_raw_parts_mut(dst_ptr.add(i), len - i),
+        );
+    }
 }
 
 /// # Safety
 /// Caller must ensure SSE2 is available (guaranteed on x86_64).
+/// `src` and `dst` must each be valid for `len` bytes; they may alias only if `src == dst`.
 #[target_feature(enable = "sse2")]
-pub(super) unsafe fn premultiply_rgba_sse2(rgba: &[u8], out: &mut [u8]) {
-    let len = rgba.len().min(out.len()) & !3;
+pub(super) unsafe fn premultiply_rgba_sse2_raw(src_ptr: *const u8, dst_ptr: *mut u8, len: usize) {
+    let len = len & !3;
     let zero = _mm_setzero_si128();
     let v128 = _mm_set1_epi16(128);
     let v0101 = _mm_set1_epi16(0x0101);
     let alpha_mask = _mm_set1_epi32(0xFF00_0000u32 as i32);
     let mut i = 0;
-    let src_ptr = rgba.as_ptr();
-    let dst_ptr = out.as_mut_ptr();
+    let in_place = std::ptr::eq(src_ptr, dst_ptr);
     while i + 16 <= len {
         let vs = _mm_loadu_si128(src_ptr.add(i) as *const __m128i);
         let s_lo = _mm_unpacklo_epi8(vs, zero);
@@ -205,7 +220,17 @@ pub(super) unsafe fn premultiply_rgba_sse2(rgba: &[u8], out: &mut [u8]) {
         _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, res);
         i += 16;
     }
-    premultiply_rgba_scalar(&rgba[i..len], &mut out[i..len]);
+    if in_place {
+        super::premultiply_rgba_in_place_scalar(std::slice::from_raw_parts_mut(
+            dst_ptr.add(i),
+            len - i,
+        ));
+    } else {
+        premultiply_rgba_scalar(
+            std::slice::from_raw_parts(src_ptr.add(i), len - i),
+            std::slice::from_raw_parts_mut(dst_ptr.add(i), len - i),
+        );
+    }
 }
 
 #[derive(Clone, Copy)]

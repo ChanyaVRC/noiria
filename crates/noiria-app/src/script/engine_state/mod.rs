@@ -36,12 +36,22 @@ use crate::script::ui_cache::{
 /// `vm.make_error("Error", ..)` にそれぞれ変換する。
 pub(crate) type EngineError = String;
 
-/// タグ振る舞いテストハーネス専用の ops 呼び出しログ（`crates/noiria-app/src/script/tag_harness.rs`）。
-/// `Arc<Mutex<..>>` にしているのは V8/tsint いずれの `spawn()` も `EngineCtx` を別スレッドへ
-/// `move` するため（`Rc<RefCell<..>>` は `!Send` で `spawn` を壊す）。本番経路
-/// （`main.rs`）は常に `None` を渡すため、通常プレイでは 1 バイトも書き込まれない
-/// （`docs/implementation-notes.md`「2026-07-11 タグ振る舞いテストスイート」参照）。
+#[cfg(test)]
 pub(crate) type SharedOpLog = Arc<Mutex<Vec<String>>>;
+
+#[cfg(test)]
+macro_rules! log_op {
+    ($self:expr, $($arg:tt)*) => {
+        if let Some(log) = &$self.op_log {
+            log.lock_unpoisoned().push(format!($($arg)*));
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! log_op {
+    ($self:expr, $($arg:tt)*) => {};
+}
 
 mod args;
 #[cfg(test)]
@@ -135,12 +145,12 @@ pub(crate) struct EngineState {
     pub(crate) pending_waits: PendingWaits,
     pub(crate) texts: Texts,
     pub(crate) videos: Videos,
-    /// タグ振る舞いテストハーネス専用（既定 `None`）。`Some` の場合のみ `log_op` が
-    /// 呼び出し列を蓄積する。
+    /// タグ振る舞いテストハーネス専用（テストビルドのみ存在）。
+    #[cfg(test)]
     pub(crate) op_log: Option<SharedOpLog>,
     /// `thumb_capture` が縮小して保持する直近のスクリーンショット（`thumb_save` が書き出す）。
     /// メニューを開く直前の画面を取っておき、メニュー上でのセーブにメニューが写り込まないようにする。
-    pending_thumb: Mutex<Option<Pixmap>>,
+    pending_thumb: Mutex<Option<Box<Pixmap>>>,
     /// モダン UI のパネル・サムネイル・縮小画像の描画結果（開くたびに塗り直し/復号し直さない）。
     ui_cache: Arc<Mutex<UiCaches>>,
     prefetcher: Prefetcher,
@@ -182,6 +192,7 @@ impl EngineState {
             pending_waits: ctx.pending_waits,
             texts,
             videos: Videos::new(),
+            #[cfg(test)]
             op_log: ctx.op_log,
             pending_thumb: Mutex::new(None),
             ui_cache,
@@ -191,16 +202,6 @@ impl EngineState {
     }
 
     // ---- 定型処理 ----
-
-    /// タグ振る舞いテストハーネス用の ops 呼び出し記録。`op_log` が `None`（本番既定）の
-    /// 間は何もしない。高頻度なポーリング系 op（`text_is_done`/`audio_is_playing`/
-    /// `layer_moving`/`trans_active` 等）には意図的に呼ばない（`wl`/`wm`/`wt` の
-    /// ポーリングでログが埋もれるのを避けるため）。
-    fn log_op(&self, line: impl Into<String>) {
-        if let Some(log) = &self.op_log {
-            log.lock_unpoisoned().push(line.into());
-        }
-    }
 
     fn with_layer<R>(
         &self,
@@ -242,12 +243,12 @@ impl EngineState {
             _ => return Err(format!("不明なレイヤ種別: {kind}")),
         };
         let id = self.scene.lock_unpoisoned().alloc_layer(kind_enum);
-        self.log_op(format!("layer_new {kind} -> {id}"));
+        log_op!(self, "layer_new {kind} -> {id}");
         Ok(id)
     }
 
     pub(crate) fn layer_free(&self, id: u32) {
-        self.log_op(format!("layer_free {id}"));
+        log_op!(self, "layer_free {id}");
         self.with_scene(|scene| scene.free_layer(id));
     }
 
@@ -257,12 +258,12 @@ impl EngineState {
         page: &str,
         path: String,
     ) -> Result<(u32, u32), EngineError> {
-        self.log_op(format!("layer_load_image {id} {page} {path}"));
+        log_op!(self, "layer_load_image {id} {page} {path}");
         let pixmap = load_image_cached(&self.ui_cache, &self.game_dir, &path)?;
         let size = (pixmap.width, pixmap.height);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok(size)
     }
@@ -277,10 +278,14 @@ impl EngineState {
         path: String,
         opts: ImageLoadOpts,
     ) -> Result<(u32, u32), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_load_image_ex {id} {page} {path} clip={:?} flipH={} flipV={} gray={}",
-            opts.clip, opts.flip_h, opts.flip_v, opts.grayscale
-        ));
+            opts.clip,
+            opts.flip_h,
+            opts.flip_v,
+            opts.grayscale
+        );
         let base = load_image_cached(&self.ui_cache, &self.game_dir, &path)?;
         let pixmap = if opts.clip.is_none() && !opts.flip_h && !opts.flip_v && !opts.grayscale {
             base
@@ -304,13 +309,13 @@ impl EngineState {
         let size = (pixmap.width, pixmap.height);
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok(size)
     }
 
     pub(crate) fn layer_clear_image(&self, id: u32, page: &str) -> Result<(), EngineError> {
-        self.log_op(format!("layer_clear_image {id} {page}"));
+        log_op!(self, "layer_clear_image {id} {page}");
         self.with_layer(page, id, |layer| {
             layer.pixmap = None;
             layer.image_path = None;
@@ -329,9 +334,10 @@ impl EngineState {
         b: u8,
         a: u8,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_fill {id} {page} {w}x{h} rgba=({r},{g},{b},{a})"
-        ));
+        );
         let mut p = Pixmap::try_new(w, h)?;
         p.fill([r, g, b, a]);
         let p = Arc::new(p);
@@ -354,7 +360,7 @@ impl EngineState {
         b: u8,
         a: u8,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("layer_msgbox {id} {page} {w}x{h}"));
+        log_op!(self, "layer_msgbox {id} {page} {w}x{h}");
         let mut p = Pixmap::try_new(w, h)?;
         p.fill_rounded_rect(0, 0, w, h, radius, [r, g, b, a]);
         let p = Arc::new(p);
@@ -375,10 +381,13 @@ impl EngineState {
     ) -> Result<(), EngineError> {
         let spec = noiria_core::uiraster::PanelSpec::from_slice(spec_raw)
             .ok_or_else(|| "layer_panel: 数値列が短すぎます".to_string())?;
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_panel {id} {page} {}x{} pad={}",
-            spec.w, spec.h, spec.pad
-        ));
+            spec.w,
+            spec.h,
+            spec.pad
+        );
         let key = panel_key(spec_raw);
         let cached = self.ui_cache.lock_unpoisoned().panels.get(&key);
         let p = match cached {
@@ -407,9 +416,7 @@ impl EngineState {
         w: u32,
         h: u32,
     ) -> Result<(u32, u32), EngineError> {
-        self.log_op(format!(
-            "layer_load_image_scaled {id} {page} {path} {w}x{h}"
-        ));
+        log_op!(self, "layer_load_image_scaled {id} {page} {path} {w}x{h}");
         if w == 0 || h == 0 {
             return Err("layer_load_image_scaled: 寸法が 0 です".to_string());
         }
@@ -417,7 +424,7 @@ impl EngineState {
         let pixmap = load_scaled_cached(&self.ui_cache, &self.game_dir, &path, w, h)?;
         self.with_layer(page, id, |layer| {
             layer.pixmap = Some(pixmap);
-            layer.image_path = Some(path);
+            layer.image_path = Some(path.into_boxed_str());
         })?;
         Ok((w, h))
     }
@@ -428,7 +435,7 @@ impl EngineState {
         page: &str,
         props: LayerProps,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("layer_set_props {id} {page} {props:?}"));
+        log_op!(self, "layer_set_props {id} {page} {props:?}");
         self.with_layer(page, id, |layer| {
             if let Some(x) = props.x {
                 layer.x = x;
@@ -457,14 +464,14 @@ impl EngineState {
         page: &str,
         args: MoveArgs,
     ) -> Result<(), EngineError> {
-        self.log_op(format!("layer_move {id} {page} {args:?}"));
+        log_op!(self, "layer_move {id} {page} {args:?}");
         let now = self.clock.now();
         self.with_layer(page, id, |layer| {
             let (from_x, from_y, from_opacity) = match &layer.tween {
                 Some(t) => (t.current_x(now), t.current_y(now), t.current_opacity(now)),
                 None => (layer.x, layer.y, layer.opacity),
             };
-            layer.tween = Some(Tween {
+            layer.tween = Some(Box::new(Tween {
                 from_x,
                 from_y,
                 from_opacity,
@@ -475,14 +482,14 @@ impl EngineState {
                 duration: Duration::from_millis(args.time_ms),
                 accel: args.accel,
                 spline: None,
-            });
+            }));
             layer.tween_queue.clear();
         })
     }
 
     /// 画像の「見える幅」（左端から何画素ぶん合成するか）を即座に決める（進行中の `layer_crop_move` は止まる）。
     pub(crate) fn layer_set_crop(&self, id: u32, page: &str, w: u32) -> Result<(), EngineError> {
-        self.log_op(format!("layer_set_crop {id} {page} {w}"));
+        log_op!(self, "layer_set_crop {id} {page} {w}");
         self.with_layer(page, id, |layer| {
             layer.crop_w = Some(w);
             layer.crop_tween = None;
@@ -499,26 +506,27 @@ impl EngineState {
         time_ms: u64,
         accel: f32,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_crop_move {id} {page} to={to} time_ms={time_ms} accel={accel}"
-        ));
+        );
         let now = self.clock.now();
         self.with_layer(page, id, |layer| {
             let full = layer.pixmap.as_ref().map(|p| p.width).unwrap_or(0);
             let from = layer.effective_crop(now).unwrap_or(full);
             layer.crop_w = Some(from);
-            layer.crop_tween = Some(CropTween {
+            layer.crop_tween = Some(Box::new(CropTween {
                 from,
                 to,
                 start: now,
                 duration: Duration::from_millis(time_ms),
                 accel,
-            });
+            }));
         })
     }
 
     pub(crate) fn layer_move_cancel(&self, id: u32, page: &str) -> Result<(), EngineError> {
-        self.log_op(format!("layer_move_cancel {id} {page}"));
+        log_op!(self, "layer_move_cancel {id} {page}");
         self.with_layer(page, id, |layer| {
             layer.tween = None;
             layer.tween_queue.clear();
@@ -528,7 +536,7 @@ impl EngineState {
     /// 全レイヤの tween を即座に完了させる（スキップモード用）。[stopmove]（W5）もこれを
     /// そのまま流用する（全レイヤの move を目標値で即完了させるという効果が一致するため）。
     pub(crate) fn layer_move_skip(&self) {
-        self.log_op("layer_move_skip");
+        log_op!(self, "layer_move_skip");
         self.with_scene(|scene| scene.skip_all_tweens());
     }
 
@@ -575,15 +583,18 @@ impl EngineState {
         if spline && points.len() < 2 {
             return Err("[move] spline=true の path= には少なくとも 2 点が必要です".to_string());
         }
+        #[cfg(test)]
         match total_time_ms {
-            Some(total) => self.log_op(format!(
+            Some(total) => log_op!(
+                self,
                 "layer_move_path_distance {id} {page} legs={} spline={spline} totalMs={total}",
                 points.len()
-            )),
-            None => self.log_op(format!(
+            ),
+            None => log_op!(
+                self,
                 "layer_move_path {id} {page} legs={} spline={spline}",
                 points.len()
-            )),
+            ),
         }
         let now = self.clock.now();
         self.with_layer(page, id, |layer| {
@@ -638,12 +649,12 @@ impl EngineState {
                 positions.extend(resolved.iter().map(|wp| (wp.x, wp.y)));
                 let segments = natural_spline_segments(&positions);
                 for (waypoint, segment) in resolved.iter_mut().zip(segments) {
-                    waypoint.spline = Some(segment);
+                    waypoint.spline = Some(Box::new(segment));
                 }
             }
             let mut legs = resolved.into_iter();
             let first = legs.next().expect("points は非空を確認済み");
-            layer.tween = Some(Tween {
+            layer.tween = Some(Box::new(Tween {
                 from_x,
                 from_y,
                 from_opacity,
@@ -654,7 +665,7 @@ impl EngineState {
                 duration: first.duration,
                 accel: first.accel,
                 spline: first.spline,
-            });
+            }));
             layer.tween_queue = legs.collect();
         })
     }
@@ -670,7 +681,7 @@ impl EngineState {
 
     /// KAG の backlay。id < 0 で全レイヤ。
     pub(crate) fn backlay(&self, id: i32) {
-        self.log_op(format!("backlay {id}"));
+        log_op!(self, "backlay {id}");
         self.with_scene(|scene| scene.backlay(if id < 0 { None } else { Some(id as u32) }));
     }
 
@@ -685,9 +696,10 @@ impl EngineState {
         dst_page: &str,
         copy_position: bool,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_copy {src_id}/{src_page} -> {dst_id}/{dst_page} copy_position={copy_position}"
-        ));
+        );
         let sp = parse_page(src_page)?;
         let dp = parse_page(dst_page)?;
         self.with_scene(|scene| scene.copy_layer(sp, src_id, dp, dst_id, copy_position));
@@ -709,9 +721,10 @@ impl EngineState {
         dy: i32,
         clip: Option<BlitClip>,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "layer_blit_image {id} {page} {path} dx={dx} dy={dy} clip={clip:?}"
-        ));
+        );
         let src = load_image_cached(&self.ui_cache, &self.game_dir, path)?;
         let region: Cow<'_, Pixmap> = match clip {
             Some(c) => {
@@ -731,16 +744,16 @@ impl EngineState {
 
     /// 画面揺れ。
     pub(crate) fn quake(&self, ax: i32, ay: i32, ms: u32) {
-        self.log_op(format!("quake ax={ax} ay={ay} ms={ms}"));
+        log_op!(self, "quake ax={ax} ay={ay} ms={ms}");
         let now = self.clock.now();
         self.with_scene(|scene| {
-            scene.quake = Some((ax, ay, now, ms));
+            scene.quake = Some(Box::new((ax, ay, now, ms)));
         });
     }
 
     /// [stopquake]（W5）: 画面揺れを即座に停止する。
     pub(crate) fn quake_stop(&self) {
-        self.log_op("quake_stop");
+        log_op!(self, "quake_stop");
         self.with_scene(|scene| {
             scene.quake = None;
         });
@@ -749,11 +762,14 @@ impl EngineState {
     // ---- テキスト ----
 
     pub(crate) fn text_style(&mut self, id: u32, style: TextStyle) {
-        self.log_op(format!(
+        log_op!(
+            self,
             "text_style {id} align={:?} line_height={} font_family={}",
-            style.align, style.line_height, style.font_family
-        ));
-        self.texts.styles.insert(id, style);
+            style.align,
+            style.line_height,
+            style.font_family
+        );
+        self.texts.layers.entry(id).or_default().style = style;
     }
 
     fn ensure_inline_images(&mut self, segments: &[TextSegment]) {
@@ -779,30 +795,27 @@ impl EngineState {
         append: bool,
         cps: f64,
     ) -> Result<PrintResult, EngineError> {
-        self.log_op(format!(
+        log_op!(
+            self,
             "text_print {id} append={append} cps={cps} segs={segments:?}"
-        ));
+        );
 
         let (style, all, from_glyph) = {
-            let texts = &mut self.texts;
-            let style = texts.styles.entry(id).or_default().clone();
-            let entry = texts.segments.entry(id).or_default();
-
-            // 追記時: 前回レイアウトの総グリフ数をキャッシュから使う
+            let layer = self.texts.layers.entry(id).or_default();
             let from_glyph = if append {
-                texts.glyph_counts.get(&id).copied().unwrap_or(0)
+                layer.glyph_count
             } else {
-                entry.clear();
+                layer.segments.clear();
                 0
             };
-            entry.extend(segments);
-            (style, entry.clone(), from_glyph)
+            layer.segments.extend(segments);
+            (layer.style.clone(), layer.segments.clone(), from_glyph)
         };
         self.ensure_inline_images(&all);
         let raster = self.texts.engine.raster_segments(&all, &style);
-        self.texts.glyph_counts.insert(id, raster.glyphs.len());
-
         let total = raster.glyphs.len();
+        self.texts.layers.entry(id).or_default().glyph_count = total;
+
         let added = total.saturating_sub(from_glyph);
         let raster = Arc::new(raster);
         let reveal_start = if cps > 0.0 {
@@ -811,44 +824,46 @@ impl EngineState {
             None
         };
         self.with_layer("fore", id, move |layer| {
-            layer.text = Some(TextContent {
+            layer.text = Some(Box::new(TextContent {
                 raster,
                 reveal: TextReveal {
                     from_glyph,
                     start: reveal_start,
                     cps: cps as f32,
                 },
-            });
+            }));
         })?;
         Ok(PrintResult { total, added })
     }
 
     pub(crate) fn text_reflow(&mut self, id: u32) -> Result<(), EngineError> {
-        self.log_op(format!("text_reflow {id}"));
-        let style = self.texts.styles.entry(id).or_default().clone();
-        let segments = self.texts.segments.entry(id).or_default().clone();
+        log_op!(self, "text_reflow {id}");
+        let (style, segments) = {
+            let layer = self.texts.layers.entry(id).or_default();
+            (layer.style.clone(), layer.segments.clone())
+        };
         self.ensure_inline_images(&segments);
         let raster = self.texts.engine.raster_segments(&segments, &style);
-        self.texts.glyph_counts.insert(id, raster.glyphs.len());
+        self.texts.layers.entry(id).or_default().glyph_count = raster.glyphs.len();
         let raster = Arc::new(raster);
         self.with_layer("fore", id, move |layer| match &mut layer.text {
             Some(text) => text.raster = raster,
             None => {
-                layer.text = Some(TextContent {
+                layer.text = Some(Box::new(TextContent {
                     raster,
                     reveal: TextReveal {
                         from_glyph: 0,
                         start: None,
                         cps: 0.0,
                     },
-                });
+                }));
             }
         })
     }
 
     /// リベールを即時完了させる。
     pub(crate) fn text_complete(&self, id: u32) {
-        self.log_op(format!("text_complete {id}"));
+        log_op!(self, "text_complete {id}");
         let _ = self.with_layer("fore", id, |layer| {
             if let Some(text) = &mut layer.text {
                 text.reveal.start = None;
@@ -867,9 +882,11 @@ impl EngineState {
     }
 
     pub(crate) fn text_clear(&mut self, id: u32) {
-        self.log_op(format!("text_clear {id}"));
-        self.texts.segments.remove(&id);
-        self.texts.glyph_counts.remove(&id);
+        log_op!(self, "text_clear {id}");
+        if let Some(layer) = self.texts.layers.get_mut(&id) {
+            layer.segments.clear();
+            layer.glyph_count = 0;
+        }
         let _ = self.with_layer("fore", id, |layer| {
             layer.text = None;
         });
@@ -884,14 +901,14 @@ impl EngineState {
             .and_then(|l| l.text.as_ref())
             .map(|t| t.raster.rects())
             .unwrap_or_default();
-        self.log_op(format!("text_rects {id} {rects:?}"));
+        log_op!(self, "text_rects {id} {rects:?}");
         rects
     }
 
     // ---- トランジション ----
 
     pub(crate) fn trans_begin(&self, args: TransArgs) -> Result<(), EngineError> {
-        self.log_op(format!("trans_begin {} {}", args.method, args.time_ms));
+        log_op!(self, "trans_begin {} {}", args.method, args.time_ms);
         let method = match args.method.as_str() {
             "crossfade" => TransMethod::Crossfade,
             "universal" => {
@@ -923,12 +940,12 @@ impl EngineState {
         };
         {
             let mut scene = self.scene.lock_unpoisoned();
-            scene.transition = Some(Transition {
+            scene.transition = Some(Box::new(Transition {
                 method,
                 start: self.clock.now(),
                 duration: Duration::from_millis(args.time_ms),
                 skip: false,
-            });
+            }));
             scene.bump();
         }
         self.wake.send(UserEvent::Redraw);
@@ -936,7 +953,7 @@ impl EngineState {
     }
 
     pub(crate) fn trans_skip(&self) {
-        self.log_op("trans_skip");
+        log_op!(self, "trans_skip");
         {
             let mut scene = self.scene.lock_unpoisoned();
             if let Some(t) = &mut scene.transition {
@@ -973,16 +990,12 @@ impl EngineState {
         let request_id = self
             .audio_shared
             .mark_play_requested(ch_index, start_position_ms);
-        self.log_op(format!(
+        log_op!(
+            self,
             "audio_play {ch} {path} loop={looping} vol={volume} fade={fade_in_ms} start={start_position_ms} paused={start_paused}"
-        ));
+        );
         // ヘッドレス検証用の実行証跡（音を出せない環境で再生回数・タイミングを確認する唯一の手段）
         log::debug!("[audio] play ch={ch_index:?} path={path} loop={looping}");
-        // W5: パスジェイル/ファイル読込はオーディオスレッド側 (`audio::build_source` →
-        // `GameDir::read_bytes`) に一本化した。そのため不正な相対パス（`../` 等）は
-        // ここでは検出できず、オーディオスレッドの `log::error!` として非同期に出る
-        // （以前は `resolve()` をここで呼んで同期的に Err を返していた）。
-        // `docs/implementation-notes.md`「2026-07-12 配布対応 W5」参照。
         let sent = self.audio_tx.send(AudioCmd::Play {
             ch: ch_index,
             rel: path.to_string(),
@@ -1004,7 +1017,7 @@ impl EngineState {
     pub(crate) fn audio_stop(&self, ch: &str, fade_out_ms: u32) -> Result<(), EngineError> {
         let ch_index = ch_of(ch)?;
         let request_id = self.audio_shared.mark_stop_requested(ch_index);
-        self.log_op(format!("audio_stop {ch} fade={fade_out_ms}"));
+        log_op!(self, "audio_stop {ch} fade={fade_out_ms}");
         let _ = self.audio_tx.send(AudioCmd::Stop {
             ch: ch_index,
             fade_out_ms,
@@ -1014,7 +1027,7 @@ impl EngineState {
     }
 
     pub(crate) fn audio_volume(&self, ch: &str, volume: f64) -> Result<(), EngineError> {
-        self.log_op(format!("audio_volume {ch} vol={volume}"));
+        log_op!(self, "audio_volume {ch} vol={volume}");
         let ch = ch_of(ch)?;
         let _ = self.audio_tx.send(AudioCmd::SetVolume {
             ch,
@@ -1040,14 +1053,14 @@ impl EngineState {
     }
 
     pub(crate) fn audio_pause(&self, ch: &str) -> Result<(), EngineError> {
-        self.log_op(format!("audio_pause {ch}"));
+        log_op!(self, "audio_pause {ch}");
         let ch = ch_of(ch)?;
         let _ = self.audio_tx.send(AudioCmd::Pause { ch });
         Ok(())
     }
 
     pub(crate) fn audio_resume(&self, ch: &str) -> Result<(), EngineError> {
-        self.log_op(format!("audio_resume {ch}"));
+        log_op!(self, "audio_resume {ch}");
         let ch = ch_of(ch)?;
         let _ = self.audio_tx.send(AudioCmd::Resume { ch });
         Ok(())
@@ -1061,9 +1074,7 @@ impl EngineState {
         ms: u32,
         then: &str,
     ) -> Result<(), EngineError> {
-        self.log_op(format!(
-            "audio_fade_to {ch} vol={volume} ms={ms} then={then}"
-        ));
+        log_op!(self, "audio_fade_to {ch} vol={volume} ms={ms} then={then}");
         let ch = ch_of(ch)?;
         let then = match then {
             "none" => FadeThen::None,
@@ -1095,22 +1106,18 @@ impl EngineState {
         self.clock.now().duration_since(self.start).as_secs_f64() * 1000.0
     }
 
-    /// `[eval]`/W2〜W6 の各タグが `api.sys.log(...)` 経由で出す実行証跡ログ。多くの
-    /// W2/W4/W6 タグ（bgmopt/pausebgm/button/timeout/tempsave/save/... 等）はレイヤ/オーディオ
-    /// ops を一切呼ばずこのログだけが観測可能な効果なので、タグ振る舞いテストハーネスのために
-    /// `op_log` にも記録する（本番既定 `None` の間は従来通り `log()` を呼ぶだけ）。
     pub(crate) fn sys_log(&self, level: &str, msg: &str) {
-        self.log_op(format!("log {level} {msg}"));
+        log_op!(self, "log {level} {msg}");
         log(level, msg);
     }
 
     pub(crate) fn quit(&self) {
-        self.log_op("quit");
+        log_op!(self, "quit");
         self.wake.send(UserEvent::Quit);
     }
 
     pub(crate) fn set_title(&self, title: String) {
-        self.log_op(format!("set_title {title}"));
+        log_op!(self, "set_title {title}");
         self.wake.send(UserEvent::SetTitle(title));
     }
 
@@ -1124,23 +1131,23 @@ impl EngineState {
     }
 
     pub(crate) fn save_write(&self, slot: &str, json: &str) -> Result<(), EngineError> {
-        self.log_op(format!("save_write {slot}"));
+        log_op!(self, "save_write {slot}");
         savedata::write_slot(&self.config.id, slot, json).map_err(|e| e.to_string())
     }
 
     pub(crate) fn save_read(&self, slot: &str) -> Result<Option<String>, EngineError> {
-        self.log_op(format!("save_read {slot}"));
+        log_op!(self, "save_read {slot}");
         savedata::read_slot(&self.config.id, slot).map_err(|e| e.to_string())
     }
 
     pub(crate) fn save_list(&self) -> Result<Vec<SlotInfo>, EngineError> {
-        self.log_op("save_list");
+        log_op!(self, "save_list");
         savedata::list_slots(&self.config.id).map_err(|e| e.to_string())
     }
 
     /// [erasebookmark] の真の削除（W7）。存在しないスロットは no-op。
     pub(crate) fn save_delete(&self, slot: &str) -> Result<(), EngineError> {
-        self.log_op(format!("save_delete {slot}"));
+        log_op!(self, "save_delete {slot}");
         self.ui_cache.lock_unpoisoned().forget_slot(slot);
         savedata::delete_slot(&self.config.id, slot).map_err(|e| e.to_string())
     }
@@ -1160,7 +1167,7 @@ impl EngineState {
 
     /// 現在のシーンを合成してセーブディレクトリへ PNG 保存（サムネイル/オートテスト用）。
     pub(crate) fn screenshot(&self, slot: &str) -> Result<(), EngineError> {
-        self.log_op(format!("screenshot {slot}"));
+        log_op!(self, "screenshot {slot}");
         let path = savedata::thumb_path(&self.config.id, slot).map_err(|e| e.to_string())?;
         let out = self.compose_current()?;
         save_png(&out, &path).map_err(|e| e.to_string())
@@ -1174,26 +1181,27 @@ impl EngineState {
         } else {
             (w, h)
         };
+        #[cfg(test)]
         if (w, h) == (savedata::THUMB_W, savedata::THUMB_H) {
-            self.log_op("thumb_capture");
+            log_op!(self, "thumb_capture");
         } else {
-            self.log_op(format!("thumb_capture {w}x{h}"));
+            log_op!(self, "thumb_capture {w}x{h}");
         }
         checked_dims(w, h)?;
         let out = self.compose_current()?;
         let thumb = out.resize_area(w, h);
-        *self.pending_thumb.lock_unpoisoned() = Some(thumb);
+        *self.pending_thumb.lock_unpoisoned() = Some(Box::new(thumb));
         Ok(())
     }
 
     /// 直近の `thumb_capture` の結果を `<slot>.png` へ書く。未取得なら今の画面を取ってから書く。
     pub(crate) fn thumb_save(&self, slot: &str) -> Result<(), EngineError> {
-        self.log_op(format!("thumb_save {slot}"));
+        log_op!(self, "thumb_save {slot}");
         if self.pending_thumb.lock_unpoisoned().is_none() {
             self.thumb_capture_sized(0, 0)?;
         }
         let guard = self.pending_thumb.lock_unpoisoned();
-        let Some(thumb) = guard.as_ref() else {
+        let Some(thumb) = guard.as_deref() else {
             return Err("サムネイルの取得に失敗しました".to_string());
         };
         let r = savedata::write_thumb(&self.config.id, slot, thumb).map_err(|e| e.to_string());
@@ -1215,11 +1223,11 @@ impl EngineState {
         w: u32,
         h: u32,
     ) -> Result<(u32, u32), EngineError> {
-        let sized = w != 0 && h != 0;
-        if sized {
-            self.log_op(format!("layer_load_save_thumb {id} {page} {slot} {w}x{h}"));
+        #[cfg(test)]
+        if w != 0 && h != 0 {
+            log_op!(self, "layer_load_save_thumb {id} {page} {slot} {w}x{h}");
         } else {
-            self.log_op(format!("layer_load_save_thumb {id} {page} {slot}"));
+            log_op!(self, "layer_load_save_thumb {id} {page} {slot}");
         }
         let pixmap = load_thumb_cached(&self.ui_cache, &self.config.id, slot, w, h)?;
         let size = (pixmap.width, pixmap.height);
@@ -1233,13 +1241,13 @@ impl EngineState {
     /// セーブ一覧のサムネイルを別スレッドで先に復号してキャッシュへ入れておく（初回にメニューを開くときの
     /// 数十 ms を、タイトル画面などの待ち時間へ逃がす）。表示には影響しない。
     pub(crate) fn prefetch_save_thumbs(&self, w: u32, h: u32) {
-        self.log_op(format!("prefetch_save_thumbs {w}x{h}"));
+        log_op!(self, "prefetch_save_thumbs {w}x{h}");
         self.prefetcher.thumbs(w, h);
     }
 
     /// ギャラリーのサムネイル（ゲーム資産の画像を w x h へ縮小したもの）を別スレッドで先に作っておく。
     pub(crate) fn prefetch_images_scaled(&self, paths: Vec<String>, w: u32, h: u32) {
-        self.log_op(format!("prefetch_images_scaled {} {w}x{h}", paths.len()));
+        log_op!(self, "prefetch_images_scaled {} {w}x{h}", paths.len());
         self.prefetcher.scaled(paths, w, h);
     }
 

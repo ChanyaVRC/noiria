@@ -2,105 +2,46 @@
 //! 使い方:
 //!   noiria-pack --game games/sample --out target/sample.pak [--key <64桁hex>] [--exclude <glob>]... [--no-default-excludes] [--no-project-excludes]
 //!                [--list] [--list-excluded] [--no-webp] [--no-flac]
-//! `--exclude` は glob（`*` `**` `?`。`/` なしはファイル名/ディレクトリ名、`/` ありは相対パス全体に照合）。
-//! 既定でドットファイル/ディレクトリと `Thumbs.db` `desktop.ini` `*~` `*.bak` `*.tmp`、および
-//! `--out` の pak 自身（`--game` 内にある場合）を除外する（`--no-default-excludes` で既定除外を切る）。
-//! `game.json` の `"pack": {"exclude": ["<glob>", ...]}` も除外に加わる（既定 + game.json + `--exclude` の和集合。
-//! `--no-project-excludes` で game.json の指定だけを無視）。`game.json` と `main` のファイルは除外できない（エラー）。
-//! `--list` で pak に入ったエントリの一覧（パス・元サイズ・変換）、`--list-excluded` で除外されたパスと規則を表示する。
-//! `--key` 省略時は `noiria_core::pak::dev_key()`（開発用固定鍵、非秘密）を使う。
-//! `--no-webp` を指定しない限り、`.png` エントリは WebP ロスレスへ変換して元 PNG より
-//! 小さければ差し替える（W8）。`--no-flac` を指定しない限り、`.wav` エントリは
-//! wav-flac (pak codec=2) へ可逆変換して元 WAV より小さければ差し替える（W9）。
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use noiria_tools::pack::{excluded_summary, pack_dir_with, PackOptions};
+use noiria_tools::pack::{pack_dir_with, print_pack_listing, CommonPackCli, PackOptions};
 
 struct Args {
     game: PathBuf,
     out: PathBuf,
     key_hex: Option<String>,
-    exclude: Vec<String>,
-    default_excludes: bool,
-    project_excludes: bool,
-    list: bool,
-    list_excluded: bool,
-    webp: bool,
-    flac: bool,
+    common: CommonPackCli,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut game: Option<PathBuf> = None;
-    let mut out: Option<PathBuf> = None;
+    let mut common = CommonPackCli::default();
     let mut key_hex: Option<String> = None;
-    let mut exclude: Vec<String> = Vec::new();
-    let mut default_excludes = true;
-    let mut project_excludes = true;
-    let mut list = false;
-    let mut list_excluded = false;
-    let mut webp = true;
-    let mut flac = true;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < argv.len() {
-        match argv[i].as_str() {
-            "--game" => {
-                game = Some(argv.get(i + 1).context("--game には値が必要です")?.into());
-                i += 1;
+        if !common.try_consume(&argv, &mut i)? {
+            match argv[i].as_str() {
+                "--key" => {
+                    key_hex = Some(argv.get(i + 1).context("--key には値が必要です")?.clone());
+                    i += 1;
+                }
+                other => bail!("不明な引数です: {other}"),
             }
-            "--out" => {
-                out = Some(argv.get(i + 1).context("--out には値が必要です")?.into());
-                i += 1;
-            }
-            "--key" => {
-                key_hex = Some(argv.get(i + 1).context("--key には値が必要です")?.clone());
-                i += 1;
-            }
-            "--exclude" => {
-                exclude.push(
-                    argv.get(i + 1)
-                        .context("--exclude には値が必要です")?
-                        .clone(),
-                );
-                i += 1;
-            }
-            "--no-default-excludes" => {
-                default_excludes = false;
-            }
-            "--no-project-excludes" => {
-                project_excludes = false;
-            }
-            "--list-excluded" => {
-                list_excluded = true;
-            }
-            "--list" => {
-                list = true;
-            }
-            "--no-webp" => {
-                webp = false;
-            }
-            "--no-flac" => {
-                flac = false;
-            }
-            other => bail!("不明な引数です: {other}"),
         }
         i += 1;
     }
 
     Ok(Args {
-        game: game.context("--game <ゲームディレクトリ> は必須です")?,
-        out: out.context("--out <出力先.pak> は必須です")?,
+        game: common
+            .game
+            .take()
+            .context("--game <ゲームディレクトリ> は必須です")?,
+        out: common.out.take().context("--out <出力先.pak> は必須です")?,
         key_hex,
-        exclude,
-        default_excludes,
-        project_excludes,
-        list,
-        list_excluded,
-        webp,
-        flac,
+        common,
     })
 }
 
@@ -126,10 +67,10 @@ fn main() -> Result<()> {
     };
 
     println!("pack 開始: {}", args.game.display());
-    let mut opts = PackOptions::new(args.webp, args.flac);
-    opts.exclude = args.exclude.clone();
-    opts.default_excludes = args.default_excludes;
-    opts.project_excludes = args.project_excludes;
+    let mut opts = PackOptions::new(args.common.webp, args.common.flac);
+    opts.exclude = args.common.exclude.clone();
+    opts.default_excludes = args.common.default_excludes;
+    opts.project_excludes = args.common.project_excludes;
     opts.skip_paths = vec![args.out.clone()];
     let packed = pack_dir_with(&args.game, &key, &opts)
         .with_context(|| format!("pack に失敗しました: {}", args.game.display()))?;
@@ -163,7 +104,7 @@ fn main() -> Result<()> {
         "webp 変換: {} 件, 削減 {} バイト{}",
         report.webp_converted_count,
         report.webp_bytes_saved,
-        if args.webp {
+        if args.common.webp {
             ""
         } else {
             "（--no-webp 指定のため変換なし）"
@@ -173,28 +114,18 @@ fn main() -> Result<()> {
         "flac 変換: {} 件, 削減 {} バイト{}",
         report.flac_converted_count,
         report.flac_bytes_saved,
-        if args.flac {
+        if args.common.flac {
             ""
         } else {
             "（--no-flac 指定のため変換なし）"
         }
     );
-    if args.list {
-        for e in &packed.entries {
-            println!(
-                "  {}  {} バイト{}",
-                e.path,
-                e.plain_len,
-                e.conversion.map(|c| format!("  [{c}]")).unwrap_or_default()
-            );
-        }
-    }
-    println!("{}", excluded_summary(&packed.excluded));
-    if args.list_excluded {
-        for e in &packed.excluded {
-            println!("  除外: {}", e.describe());
-        }
-    }
+    print_pack_listing(
+        &packed.entries,
+        &packed.excluded,
+        args.common.list,
+        args.common.list_excluded,
+    );
     println!("書き出し完了: {}", args.out.display());
     Ok(())
 }

@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use noiria_core::scene::Scene;
+#[cfg(feature = "engine-v8")]
 use serde::Serialize;
 
 pub(crate) type SharedScene = Arc<Mutex<Scene>>;
@@ -111,8 +112,9 @@ impl WakeSink {
 }
 
 /// スクリプトへ渡す入力イベント。JS へは JSON として渡る。
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "engine-v8", derive(Serialize))]
+#[cfg_attr(feature = "engine-v8", serde(rename_all = "camelCase"))]
 pub(crate) struct InputEvent {
     /// "click" | "move" | "wheel" | "key" | "keyup"（keyup は Control/Shift/Enter/Space のみ）
     pub(crate) kind: &'static str,
@@ -120,13 +122,13 @@ pub(crate) struct InputEvent {
     pub(crate) x: f64,
     pub(crate) y: f64,
     /// click: "left" | "right" | "middle"
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "engine-v8", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) button: Option<&'static str>,
     /// key/keyup: "Enter" | "Escape" | "Control" | "Shift" | " " | 文字。閉じる操作は key:"WindowClose"
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "engine-v8", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) key: Option<String>,
     /// wheel: 上が正
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "engine-v8", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) delta: Option<f64>,
     /// アプリ起動からのミリ秒
     pub(crate) t: f64,

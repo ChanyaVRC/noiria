@@ -81,39 +81,52 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-/// 角丸も枠も影も無いパネル（暗幕・線・バー）の高速経路。全画面の暗幕を毎回 SDF で塗ると
-/// 10ms 前後かかるため、グラデーションの色を行（横グラデは列）ごとに 1 回だけ求めて塗る。
-/// 一般経路と同じ式・同じ丸めなので、結果は画素単位で一致する（テストで固定）。
-fn fill_flat(s: &PanelSpec, out: &mut Pixmap) {
-    let ow = out.width;
-    let color_at = |along: f32| -> [u8; 4] {
-        let t = if s.ramp > 0.0 {
-            smoothstep(0.0, 1.0, along / s.ramp)
-        } else {
-            (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
-        };
-        let fr = lerp(s.top[0] as f32, s.bottom[0] as f32, t);
-        let fg = lerp(s.top[1] as f32, s.bottom[1] as f32, t);
-        let fb = lerp(s.top[2] as f32, s.bottom[2] as f32, t);
-        let fa = lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0;
-        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-        [q(fr * fa), q(fg * fa), q(fb * fa), q(fa * 255.0)]
+fn grad_at(s: &PanelSpec, along: f32) -> (f32, f32, f32, f32) {
+    let t = if s.ramp > 0.0 {
+        smoothstep(0.0, 1.0, along / s.ramp)
+    } else {
+        (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
     };
+    (
+        lerp(s.top[0] as f32, s.bottom[0] as f32, t),
+        lerp(s.top[1] as f32, s.bottom[1] as f32, t),
+        lerp(s.top[2] as f32, s.bottom[2] as f32, t),
+        lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0,
+    )
+}
+
+fn quantize_fill((fr, fg, fb, fa): (f32, f32, f32, f32)) -> [u8; 4] {
+    if fa > 0.0 {
+        [
+            (fr * fa).round().clamp(0.0, 255.0) as u8,
+            (fg * fa).round().clamp(0.0, 255.0) as u8,
+            (fb * fa).round().clamp(0.0, 255.0) as u8,
+            (fa * 255.0).round().clamp(0.0, 255.0) as u8,
+        ]
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
+/// 角丸も枠も影も無いパネル（暗幕・線・バー）の高速経路。
+fn fill_flat(s: &PanelSpec, out: &mut Pixmap) {
+    let ow = out.width as usize;
+    let pad = s.pad as usize;
+    let w = s.w as usize;
+    let pixels = out.data.as_chunks_mut::<4>().0;
     if s.horizontal {
-        let cols: Vec<[u8; 4]> = (0..s.w).map(|x| color_at(x as f32 + 0.5)).collect();
-        for y in 0..s.h {
-            let row = ((s.pad + y) * ow + s.pad) as usize * 4;
-            for (x, c) in cols.iter().enumerate() {
-                out.data[row + x * 4..row + x * 4 + 4].copy_from_slice(c);
-            }
+        let cols: Vec<[u8; 4]> = (0..s.w)
+            .map(|x| quantize_fill(grad_at(s, x as f32 + 0.5)))
+            .collect();
+        for y in 0..s.h as usize {
+            let row = (pad + y) * ow + pad;
+            pixels[row..row + w].copy_from_slice(&cols);
         }
     } else {
-        for y in 0..s.h {
-            let c = color_at(y as f32 + 0.5);
-            let row = ((s.pad + y) * ow + s.pad) as usize * 4;
-            for x in 0..s.w as usize {
-                out.data[row + x * 4..row + x * 4 + 4].copy_from_slice(&c);
-            }
+        for y in 0..s.h as usize {
+            let c = quantize_fill(grad_at(s, y as f32 + 0.5));
+            let row = (pad + y) * ow + pad;
+            pixels[row..row + w].fill(c);
         }
     }
 }
@@ -164,34 +177,10 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
     let min_x = ((cx - reach_x).floor().max(0.0) as u32).min(ow);
     let max_x = ((cx + reach_x).ceil().max(0.0) as u32).min(ow);
 
-    let grad_at = |along: f32| -> (f32, f32, f32, f32) {
-        let t = if s.ramp > 0.0 {
-            smoothstep(0.0, 1.0, along / s.ramp)
-        } else {
-            (along / if s.horizontal { s.w } else { s.h } as f32).clamp(0.0, 1.0)
-        };
-        (
-            lerp(s.top[0] as f32, s.bottom[0] as f32, t),
-            lerp(s.top[1] as f32, s.bottom[1] as f32, t),
-            lerp(s.top[2] as f32, s.bottom[2] as f32, t),
-            lerp(s.top[3] as f32, s.bottom[3] as f32, t) / 255.0,
-        )
-    };
-    let quantize_fill = |(fr, fg, fb, fa): (f32, f32, f32, f32)| -> [u8; 4] {
-        if fa > 0.0 {
-            [
-                (fr * fa).round().clamp(0.0, 255.0) as u8,
-                (fg * fa).round().clamp(0.0, 255.0) as u8,
-                (fb * fa).round().clamp(0.0, 255.0) as u8,
-                (fa * 255.0).round().clamp(0.0, 255.0) as u8,
-            ]
-        } else {
-            [0, 0, 0, 0]
-        }
-    };
-
     let horiz_grad: Vec<(f32, f32, f32, f32)> = if s.horizontal {
-        (0..ow).map(|ox| grad_at(ox as f32 + 0.5 - pad_f)).collect()
+        (0..ow)
+            .map(|ox| grad_at(s, ox as f32 + 0.5 - pad_f))
+            .collect()
     } else {
         Vec::new()
     };
@@ -269,7 +258,7 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
         let row_grad = if s.horizontal {
             (0.0, 0.0, 0.0, 0.0)
         } else {
-            grad_at(py - pad_f)
+            grad_at(s, py - pad_f)
         };
         let row_pixels =
             &mut out.data.as_chunks_mut::<4>().0[(oy * ow) as usize..((oy + 1) * ow) as usize];

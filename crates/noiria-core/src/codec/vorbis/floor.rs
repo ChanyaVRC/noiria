@@ -442,22 +442,23 @@ impl Floor1 {
         })
     }
 
-    /// パケットデコード (7.2.3) + 曲線合成 (7.2.4)。`n` はブロックサイズ (曲線長は n/2)。
-    /// `None` は「このチャンネルは今フレーム未使用 (nonzero フラグ unset)」を意味する。
-    pub fn decode(
+    /// パケットデコード (7.2.3) + 曲線合成 (7.2.4) を行い `floor` へ書き込む。
+    /// `Ok(false)` は「このチャンネルは今フレーム未使用 (nonzero フラグ unset または EOP)」を意味する。
+    pub fn decode_into(
         &self,
         br: &mut BitReader,
         codebooks: &[Codebook],
         n: usize,
-    ) -> Result<Option<Vec<f32>>> {
+        floor: &mut Vec<f32>,
+    ) -> Result<bool> {
         if !br.read_bool() {
-            return Ok(None);
+            return Ok(false);
         }
         let curve_len = n / 2;
         let range = FLOOR1_RANGE[(self.multiplier - 1) as usize];
         let range_bits = ilog(range as i64 - 1);
         let values = self.x_list.len();
-        let mut y = vec![0i32; values];
+        let mut y = [0i32; 65];
         y[0] = br.read(range_bits) as i32;
         y[1] = br.read(range_bits) as i32;
         let mut offset = 2usize;
@@ -484,16 +485,16 @@ impl Floor1 {
             }
             offset += cdim as usize;
             if br.eof {
-                return Ok(None);
+                return Ok(false);
             }
         }
         if br.eof {
-            return Ok(None);
+            return Ok(false);
         }
 
         // step 1: 振幅値の合成 (7.2.4)
-        let mut step2_flag = vec![false; values];
-        let mut final_y = vec![0i32; values];
+        let mut step2_flag = [false; 65];
+        let mut final_y = [0i32; 65];
         step2_flag[0] = true;
         step2_flag[1] = true;
         final_y[0] = y[0].clamp(0, range as i32 - 1);
@@ -540,39 +541,31 @@ impl Floor1 {
         }
 
         // step 2: 曲線合成
-        let mut floor = vec![0f32; curve_len];
+        floor.clear();
+        floor.resize(curve_len, 0.0);
         let to_amp = |v: i32| -> f32 {
             let idx = v.clamp(0, 255) as usize;
             FLOOR1_INVERSE_DB_TABLE[idx]
         };
-        let x_sorted: Vec<i32> = self
-            .sorted_index
-            .iter()
-            .map(|&i| self.x_list[i] as i32)
-            .collect();
-        let y_sorted: Vec<i32> = self.sorted_index.iter().map(|&i| final_y[i]).collect();
-        let step2_sorted: Vec<bool> = self.sorted_index.iter().map(|&i| step2_flag[i]).collect();
 
         let mut hx = 0i32;
-        let mut hy = y_sorted[0] * self.multiplier as i32;
+        let mut hy = final_y[self.sorted_index[0]] * self.multiplier as i32;
         let mut lx = 0i32;
         let mut ly = hy;
-        for i in 1..values {
-            if step2_sorted[i] {
-                hy = y_sorted[i] * self.multiplier as i32;
-                hx = x_sorted[i];
-                render_line(lx, ly, hx, hy, &mut floor, &to_amp);
+        for &idx in &self.sorted_index[1..values] {
+            if step2_flag[idx] {
+                hy = final_y[idx] * self.multiplier as i32;
+                hx = self.x_list[idx] as i32;
+                render_line(lx, ly, hx, hy, floor, &to_amp);
                 lx = hx;
                 ly = hy;
             }
         }
         if hx < curve_len as i32 {
-            render_line(hx, hy, curve_len as i32, hy, &mut floor, &to_amp);
+            render_line(hx, hy, curve_len as i32, hy, floor, &to_amp);
         }
-        // hx > n の場合はそもそも render_line が curve_len 境界内にしか書かないため
-        // 追加の truncate 処理は不要 (Vec は最初から curve_len 長で確保済み)。
 
-        Ok(Some(floor))
+        Ok(true)
     }
 }
 

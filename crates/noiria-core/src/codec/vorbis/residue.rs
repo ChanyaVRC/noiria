@@ -4,6 +4,12 @@ use super::bitreader::BitReader;
 use super::codebook::Codebook;
 use anyhow::{ensure, Result};
 
+#[derive(Default)]
+pub struct ResidueScratch {
+    classifications: Vec<u32>,
+    single: Vec<Vec<f32>>,
+}
+
 pub struct ResidueSetup {
     pub residue_type: u16,
     pub begin: u32,
@@ -74,24 +80,37 @@ impl ResidueSetup {
         })
     }
 
-    /// パケットデコード (8.6.2〜8.6.5)。`ch` 個のベクトル (各長 `n`) を返す。
-    /// `do_not_decode[j]` が true のチャンネルはゼロベクトルのまま返す。
-    pub fn decode(
+    /// パケットデコード (8.6.2〜8.6.5)。`out[..ch]` の各ベクトルを長さ `n` にして結果を書き込む。
+    /// `do_not_decode[j]` が true のチャンネルはゼロベクトルのまま。
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_into(
         &self,
         br: &mut BitReader,
         codebooks: &[Codebook],
         ch: usize,
         n: usize,
         do_not_decode: &[bool],
-    ) -> Result<Vec<Vec<f32>>> {
+        out: &mut [Vec<f32>],
+        scratch: &mut ResidueScratch,
+    ) -> Result<()> {
         match self.residue_type {
-            0 | 1 => self.decode_core(br, codebooks, self.residue_type, ch, n, do_not_decode),
-            2 => self.decode_type2(br, codebooks, ch, n, do_not_decode),
+            0 | 1 => self.decode_core(
+                br,
+                codebooks,
+                self.residue_type,
+                ch,
+                n,
+                do_not_decode,
+                out,
+                &mut scratch.classifications,
+            ),
+            2 => self.decode_type2(br, codebooks, ch, n, do_not_decode, out, scratch),
             t => unreachable!("非対応の residue type: {t}"),
         }
     }
 
     /// residue type 0/1 共通のコアデコード (8.6.2)。`format` は 0 か 1。
+    #[allow(clippy::too_many_arguments)]
     fn decode_core(
         &self,
         br: &mut BitReader,
@@ -100,18 +119,23 @@ impl ResidueSetup {
         ch: usize,
         n: usize,
         do_not_decode: &[bool],
-    ) -> Result<Vec<Vec<f32>>> {
-        let mut out = vec![vec![0f32; n]; ch];
+        out: &mut [Vec<f32>],
+        classifications: &mut Vec<u32>,
+    ) -> Result<()> {
+        for v in &mut out[..ch] {
+            v.clear();
+            v.resize(n, 0.0);
+        }
         let actual_size = n as u32;
         let limit_begin = self.begin.min(actual_size);
         let limit_end = self.end.min(actual_size);
         if limit_end <= limit_begin {
-            return Ok(out);
+            return Ok(());
         }
         let n_to_read = limit_end - limit_begin;
         let partitions_to_read = n_to_read / self.partition_size;
         if partitions_to_read == 0 {
-            return Ok(out);
+            return Ok(());
         }
 
         let classbook = &codebooks[self.classbook as usize];
@@ -121,34 +145,38 @@ impl ResidueSetup {
             "residue classbook の次元が 0 です"
         );
 
-        // classifications[j][partition]
-        let mut classifications = vec![vec![0u32; partitions_to_read as usize]; ch];
+        let parts = partitions_to_read as usize;
+        classifications.clear();
+        classifications.resize(ch * parts, 0);
 
         for pass in 0..8u32 {
             let mut partition_count = 0u32;
             while partition_count < partitions_to_read {
                 if pass == 0 {
-                    for j in 0..ch {
-                        if !do_not_decode[j] {
+                    for (j, &skip) in do_not_decode[..ch].iter().enumerate() {
+                        if !skip {
                             let mut temp = classbook.decode_scalar(br)?;
+                            let row = j * parts;
                             for i in (0..classwords_per_codeword).rev() {
                                 let pc = partition_count + i;
                                 if pc < partitions_to_read {
-                                    classifications[j][pc as usize] = temp % self.classifications;
+                                    classifications[row + pc as usize] =
+                                        temp % self.classifications;
                                 }
                                 temp /= self.classifications;
                             }
                         }
                     }
                     if br.eof {
-                        return Ok(out);
+                        return Ok(());
                     }
                 }
                 let mut i = 0u32;
                 while i < classwords_per_codeword && partition_count < partitions_to_read {
                     for j in 0..ch {
                         if !do_not_decode[j] {
-                            let vqclass = classifications[j][partition_count as usize] as usize;
+                            let vqclass =
+                                classifications[j * parts + partition_count as usize] as usize;
                             if let Some(vqbook) = self.books[vqclass][pass as usize] {
                                 let offset =
                                     (limit_begin + partition_count * self.partition_size) as usize;
@@ -162,7 +190,7 @@ impl ResidueSetup {
                                     self.partition_size as usize,
                                 )?;
                                 if br.eof {
-                                    return Ok(out);
+                                    return Ok(());
                                 }
                             }
                         }
@@ -172,11 +200,12 @@ impl ResidueSetup {
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// residue type 2 (8.6.5): ch 本のベクトルをインターリーブして 1 本の長さ ch*n の
     /// ベクトルとして format 1 decode し、その後デインターリーブする。
+    #[allow(clippy::too_many_arguments)]
     fn decode_type2(
         &self,
         br: &mut BitReader,
@@ -184,22 +213,38 @@ impl ResidueSetup {
         ch: usize,
         n: usize,
         do_not_decode: &[bool],
-    ) -> Result<Vec<Vec<f32>>> {
+        out: &mut [Vec<f32>],
+        scratch: &mut ResidueScratch,
+    ) -> Result<()> {
+        for v in &mut out[..ch] {
+            v.clear();
+            v.resize(n, 0.0);
+        }
         if do_not_decode.iter().all(|&d| d) {
-            return Ok(vec![vec![0f32; n]; ch]);
+            return Ok(());
         }
         let interleaved_len = n * ch;
         let single_flag = [false];
-        let single_vecs = self.decode_core(br, codebooks, 1, 1, interleaved_len, &single_flag)?;
-        let single = &single_vecs[0];
-
-        let mut out = vec![vec![0f32; n]; ch];
+        if scratch.single.is_empty() {
+            scratch.single.push(Vec::new());
+        }
+        self.decode_core(
+            br,
+            codebooks,
+            1,
+            1,
+            interleaved_len,
+            &single_flag,
+            &mut scratch.single,
+            &mut scratch.classifications,
+        )?;
+        let single = &scratch.single[0];
         for i in 0..n {
             for j in 0..ch {
                 out[j][i] = single[i * ch + j];
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 

@@ -26,7 +26,7 @@ use crate::pixmap::Pixmap;
 /// (DEFLATE / wav-flac) のみ展開済みメモリバッファへフォールバックする。
 pub enum AssetReader {
     File { file: fs::File, len: u64 },
-    Pak(OwnedPakEntryReader),
+    Pak(Box<OwnedPakEntryReader>),
     Memory(Cursor<Vec<u8>>),
 }
 
@@ -328,7 +328,7 @@ impl GameDir {
                     let reader = pak
                         .open_entry_reader(&key)
                         .with_context(|| format!("ファイルが読めません: {rel}"))?;
-                    return Ok(AssetReader::Pak(reader));
+                    return Ok(AssetReader::Pak(Box::new(reader)));
                 }
                 let bytes = pak
                     .read(&key)
@@ -367,7 +367,7 @@ impl GameDir {
     /// 画像を読み込みプリマルチプライ済み Pixmap にする。
     pub fn load_image(&self, rel: &str) -> Result<Pixmap> {
         let (w, h, rgba) = self.load_image_rgba(rel)?;
-        Ok(Pixmap::from_rgba_straight(w, h, &rgba))
+        Ok(Pixmap::from_rgba_straight_owned(w, h, rgba))
     }
 
     /// straight RGBA で読み込む。PNG (8bit 非インターレース)・JPEG (ベースライン)・
@@ -468,20 +468,23 @@ fn decode_image_bytes(bytes: &[u8], label: &str) -> Result<(u32, u32, Vec<u8>)> 
 
 /// Pixmap を PNG として保存する（スクリーンショット/サムネイル用）。
 pub fn save_png(pixmap: &Pixmap, path: &Path) -> Result<()> {
-    // premultiplied → straight へ戻す
-    let mut straight = Vec::with_capacity(pixmap.data.len());
-    for px in pixmap.data.as_chunks::<4>().0 {
-        let a = px[3] as u32;
-        // a == 0 は None -> 0 で RGBA 全て 0 になる（従来の a == 0 分岐と同じ）。
-        let unpremultiply = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255) as u8;
-        straight.extend_from_slice(&[
-            unpremultiply(px[0]),
-            unpremultiply(px[1]),
-            unpremultiply(px[2]),
-            px[3],
-        ]);
-    }
-    let png = crate::codec::png::encode(pixmap.width, pixmap.height, &straight);
+    let all_opaque = pixmap.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
+    let png = if all_opaque {
+        crate::codec::png::encode(pixmap.width, pixmap.height, &pixmap.data)
+    } else {
+        let mut straight = Vec::with_capacity(pixmap.data.len());
+        for px in pixmap.data.as_chunks::<4>().0 {
+            let a = px[3] as u32;
+            let unpremultiply = |c: u8| (c as u32 * 255).checked_div(a).unwrap_or(0).min(255) as u8;
+            straight.extend_from_slice(&[
+                unpremultiply(px[0]),
+                unpremultiply(px[1]),
+                unpremultiply(px[2]),
+                px[3],
+            ]);
+        }
+        crate::codec::png::encode(pixmap.width, pixmap.height, &straight)
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

@@ -13,12 +13,10 @@ use crate::script::engine_state::{
 };
 use crate::script::numconv::{to_coord, to_i32, to_time_ms, to_u32, to_u8};
 
-// =====================================================================
-// Value 変換ヘルパ。V8 側の #[serde]/プリミティブ引数変換に相当する。
-// =====================================================================
+const UNDEF: &Value = &Value::Undefined;
 
-pub(super) fn arg(args: &[Value], i: usize) -> Value {
-    args.get(i).cloned().unwrap_or(Value::Undefined)
+pub(super) fn arg(args: &[Value], i: usize) -> &Value {
+    args.get(i).unwrap_or(UNDEF)
 }
 
 pub(super) fn as_string(v: &Value) -> String {
@@ -29,19 +27,10 @@ pub(super) fn as_string(v: &Value) -> String {
     }
 }
 
-pub(super) fn opt_string(v: &Value) -> Option<String> {
-    if v.is_nullish() {
-        None
-    } else {
-        Some(as_string(v))
-    }
-}
-
 pub(super) fn num(v: &Value) -> f64 {
     to_number(v)
 }
 
-/// 整数への変換は両エンジン共通の規則（`numconv`）。
 pub(super) fn as_u8(v: &Value) -> u8 {
     to_u8(num(v))
 }
@@ -62,101 +51,72 @@ pub(super) fn as_bool(v: &Value) -> bool {
     v.to_bool()
 }
 
+fn opt_prop<T>(
+    vm: &mut Vm,
+    obj: &Value,
+    key: &str,
+    f: fn(&Value) -> T,
+) -> Result<Option<T>, Value> {
+    let v = vm.get_prop(obj, key)?;
+    Ok((!v.is_nullish()).then(|| f(&v)))
+}
+
+fn as_f32(v: &Value) -> f32 {
+    num(v) as f32
+}
+
 pub(super) fn rgba_from_value(v: &Value) -> [u8; 4] {
     let items = tsint::vm::array_values(v);
-    let get = |i: usize| items.get(i).cloned().unwrap_or(Value::Number(0.0));
-    [
-        as_u8(&get(0)),
-        as_u8(&get(1)),
-        as_u8(&get(2)),
-        as_u8(&get(3)),
-    ]
+    std::array::from_fn(|i| items.get(i).map_or(0, as_u8))
 }
 
 pub(super) fn layer_props_from_value(vm: &mut Vm, v: &Value) -> Result<LayerProps, Value> {
-    let x = vm.get_prop(v, "x")?;
-    let y = vm.get_prop(v, "y")?;
-    let z = vm.get_prop(v, "z")?;
-    let opacity = vm.get_prop(v, "opacity")?;
-    let visible = vm.get_prop(v, "visible")?;
     Ok(LayerProps {
-        x: if x.is_nullish() {
-            None
-        } else {
-            Some(as_coord(&x))
-        },
-        y: if y.is_nullish() {
-            None
-        } else {
-            Some(as_coord(&y))
-        },
-        z: if z.is_nullish() {
-            None
-        } else {
-            Some(as_i32(&z))
-        },
-        opacity: if opacity.is_nullish() {
-            None
-        } else {
-            Some(as_u8(&opacity))
-        },
-        visible: if visible.is_nullish() {
-            None
-        } else {
-            Some(as_bool(&visible))
-        },
+        x: opt_prop(vm, v, "x", as_coord)?,
+        y: opt_prop(vm, v, "y", as_coord)?,
+        z: opt_prop(vm, v, "z", as_i32)?,
+        opacity: opt_prop(vm, v, "opacity", as_u8)?,
+        visible: opt_prop(vm, v, "visible", as_bool)?,
     })
 }
 
 pub(super) fn text_style_from_value(vm: &mut Vm, v: &Value) -> Result<TextStyle, Value> {
     let mut style = TextStyle::default();
-    let ff = vm.get_prop(v, "fontFamily")?;
-    if !ff.is_nullish() {
-        style.font_family = as_string(&ff);
+    if let Some(ff) = opt_prop(vm, v, "fontFamily", as_string)? {
+        style.font_family = ff;
     }
-    let fs = vm.get_prop(v, "fontSize")?;
-    if !fs.is_nullish() {
-        style.font_size = num(&fs) as f32;
+    if let Some(fs) = opt_prop(vm, v, "fontSize", as_f32)? {
+        style.font_size = fs;
     }
-    let lh = vm.get_prop(v, "lineHeight")?;
-    if !lh.is_nullish() {
-        let line_height = num(&lh) as f32;
-        if !line_height.is_finite() {
+    if let Some(lh) = opt_prop(vm, v, "lineHeight", as_f32)? {
+        if !lh.is_finite() {
             return Err(vm.type_error("lineHeight must be a finite f32"));
         }
-        style.line_height = line_height;
+        style.line_height = lh;
     }
-    let color = vm.get_prop(v, "color")?;
-    if !color.is_nullish() {
-        style.color = rgba_from_value(&color);
+    if let Some(c) = opt_prop(vm, v, "color", rgba_from_value)? {
+        style.color = c;
     }
-    let oc = vm.get_prop(v, "outlineColor")?;
-    if !oc.is_nullish() {
-        style.outline_color = rgba_from_value(&oc);
+    if let Some(oc) = opt_prop(vm, v, "outlineColor", rgba_from_value)? {
+        style.outline_color = oc;
     }
-    let ow = vm.get_prop(v, "outlineWidth")?;
-    if !ow.is_nullish() {
-        style.outline_width = as_u32(&ow);
+    if let Some(ow) = opt_prop(vm, v, "outlineWidth", as_u32)? {
+        style.outline_width = ow;
     }
-    let bw = vm.get_prop(v, "boxW")?;
-    if !bw.is_nullish() {
-        style.box_w = as_u32(&bw);
+    if let Some(bw) = opt_prop(vm, v, "boxW", as_u32)? {
+        style.box_w = bw;
     }
-    let bh = vm.get_prop(v, "boxH")?;
-    if !bh.is_nullish() {
-        style.box_h = as_u32(&bh);
+    if let Some(bh) = opt_prop(vm, v, "boxH", as_u32)? {
+        style.box_h = bh;
     }
-    let mx = vm.get_prop(v, "marginX")?;
-    if !mx.is_nullish() {
-        style.margin_x = as_i32(&mx);
+    if let Some(mx) = opt_prop(vm, v, "marginX", as_i32)? {
+        style.margin_x = mx;
     }
-    let my = vm.get_prop(v, "marginY")?;
-    if !my.is_nullish() {
-        style.margin_y = as_i32(&my);
+    if let Some(my) = opt_prop(vm, v, "marginY", as_i32)? {
+        style.margin_y = my;
     }
-    let align = vm.get_prop(v, "align")?;
-    if !align.is_nullish() {
-        style.align = match as_string(&align).as_str() {
+    if let Some(align) = opt_prop(vm, v, "align", as_string)? {
+        style.align = match align.as_str() {
             "left" => TextAlign::Left,
             "center" => TextAlign::Center,
             "right" => TextAlign::Right,
@@ -174,98 +134,47 @@ pub(super) fn segments_from_value(vm: &mut Vm, v: &Value) -> Result<Vec<TextSegm
     let arr = tsint::vm::array_values(v);
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let text = vm.get_prop(&item, "text")?;
-        let color = vm.get_prop(&item, "color")?;
-        let size = vm.get_prop(&item, "size")?;
-        let bold = vm.get_prop(&item, "bold")?;
-        let edge_color = vm.get_prop(&item, "edgeColor")?;
-        let ruby = vm.get_prop(&item, "ruby")?;
-        let locate = vm.get_prop(&item, "locate")?;
-        let indent = vm.get_prop(&item, "indent")?;
-        let inline_image = vm.get_prop(&item, "inlineImage")?;
-        let font_family = vm.get_prop(&item, "fontFamily")?;
-        let locate = if locate.is_nullish() {
+        let text = as_string(&vm.get_prop(&item, "text")?);
+        let color = opt_prop(vm, &item, "color", rgba_from_value)?;
+        let size = opt_prop(vm, &item, "size", as_f32)?;
+        let bold = opt_prop(vm, &item, "bold", as_bool)?;
+        let edge_color = opt_prop(vm, &item, "edgeColor", rgba_from_value)?;
+        let ruby = opt_prop(vm, &item, "ruby", as_string)?;
+        let locate_v = vm.get_prop(&item, "locate")?;
+        let locate = if locate_v.is_nullish() {
             None
         } else {
-            let x = vm.get_prop(&locate, "x")?;
-            let y = vm.get_prop(&locate, "y")?;
             Some(LocateArgs {
-                x: num(&x) as f32,
-                y: if y.is_nullish() {
-                    None
-                } else {
-                    Some(num(&y) as f32)
-                },
+                x: as_f32(&vm.get_prop(&locate_v, "x")?),
+                y: opt_prop(vm, &locate_v, "y", as_f32)?,
             })
         };
+        let indent = opt_prop(vm, &item, "indent", as_bool)?;
+        let inline_image = opt_prop(vm, &item, "inlineImage", as_string)?;
+        let font_family = opt_prop(vm, &item, "fontFamily", as_string)?;
         out.push(TextSegment {
-            text: as_string(&text),
-            color: if color.is_nullish() {
-                None
-            } else {
-                Some(rgba_from_value(&color))
-            },
-            size: if size.is_nullish() {
-                None
-            } else {
-                Some(num(&size) as f32)
-            },
-            bold: if bold.is_nullish() {
-                None
-            } else {
-                Some(as_bool(&bold))
-            },
-            edge_color: if edge_color.is_nullish() {
-                None
-            } else {
-                Some(rgba_from_value(&edge_color))
-            },
-            ruby: opt_string(&ruby),
+            text,
+            color,
+            size,
+            bold,
+            edge_color,
+            ruby,
             locate,
-            indent: if indent.is_nullish() {
-                None
-            } else {
-                Some(as_bool(&indent))
-            },
-            inline_image: opt_string(&inline_image),
-            font_family: opt_string(&font_family),
+            indent,
+            inline_image,
+            font_family,
         });
     }
     Ok(out)
 }
 
 pub(super) fn move_args_from_value(vm: &mut Vm, v: &Value) -> Result<MoveArgs, Value> {
-    let to_x = vm.get_prop(v, "toX")?;
-    let to_y = vm.get_prop(v, "toY")?;
-    let to_opacity = vm.get_prop(v, "toOpacity")?;
-    let time_ms = vm.get_prop(v, "timeMs")?;
-    let accel = vm.get_prop(v, "accel")?;
     Ok(MoveArgs {
-        to_x: if to_x.is_nullish() {
-            None
-        } else {
-            Some(as_coord(&to_x))
-        },
-        to_y: if to_y.is_nullish() {
-            None
-        } else {
-            Some(as_coord(&to_y))
-        },
-        to_opacity: if to_opacity.is_nullish() {
-            None
-        } else {
-            Some(as_u8(&to_opacity))
-        },
-        time_ms: if time_ms.is_nullish() {
-            0
-        } else {
-            to_time_ms(num(&time_ms))
-        },
-        accel: if accel.is_nullish() {
-            0.0
-        } else {
-            num(&accel) as f32
-        },
+        to_x: opt_prop(vm, v, "toX", as_coord)?,
+        to_y: opt_prop(vm, v, "toY", as_coord)?,
+        to_opacity: opt_prop(vm, v, "toOpacity", as_u8)?,
+        time_ms: opt_prop(vm, v, "timeMs", |v| to_time_ms(num(v)))?.unwrap_or(0),
+        accel: opt_prop(vm, v, "accel", as_f32)?.unwrap_or(0.0),
     })
 }
 
@@ -275,78 +184,57 @@ pub(super) fn blit_clip_from_value(vm: &mut Vm, v: &Value) -> Result<Option<Blit
     if v.is_nullish() {
         return Ok(None);
     }
-    let x = vm.get_prop(v, "x")?;
-    let y = vm.get_prop(v, "y")?;
-    let w = vm.get_prop(v, "w")?;
-    let h = vm.get_prop(v, "h")?;
     Ok(Some(BlitClip {
-        x: as_u32(&x),
-        y: as_u32(&y),
-        w: as_u32(&w),
-        h: as_u32(&h),
+        x: as_u32(&vm.get_prop(v, "x")?),
+        y: as_u32(&vm.get_prop(v, "y")?),
+        w: as_u32(&vm.get_prop(v, "w")?),
+        h: as_u32(&vm.get_prop(v, "h")?),
     }))
 }
 
 pub(super) fn trans_args_from_value(vm: &mut Vm, v: &Value) -> Result<TransArgs, Value> {
-    let method = as_string(&vm.get_prop(v, "method")?);
-    let time_ms = to_time_ms(num(&vm.get_prop(v, "timeMs")?));
-    let rule = opt_string(&vm.get_prop(v, "rule")?);
-    let vague_v = vm.get_prop(v, "vague")?;
-    let vague = if vague_v.is_nullish() {
-        None
-    } else {
-        Some(num(&vague_v) as f32)
-    };
-    let from = opt_string(&vm.get_prop(v, "from")?);
-    let stay = opt_string(&vm.get_prop(v, "stay")?);
     Ok(TransArgs {
-        method,
-        time_ms,
-        rule,
-        vague,
-        from,
-        stay,
+        method: as_string(&vm.get_prop(v, "method")?),
+        time_ms: to_time_ms(num(&vm.get_prop(v, "timeMs")?)),
+        rule: opt_prop(vm, v, "rule", as_string)?,
+        vague: opt_prop(vm, v, "vague", as_f32)?,
+        from: opt_prop(vm, v, "from", as_string)?,
+        stay: opt_prop(vm, v, "stay", as_string)?,
     })
 }
 
 /// `layer_move_path`（W5）の points= 引数: 各要素が `move_args_from_value` と同じ形の配列。
 pub(super) fn move_args_array_from_value(vm: &mut Vm, v: &Value) -> Result<Vec<MoveArgs>, Value> {
     let arr = tsint::vm::array_values(v);
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        out.push(move_args_from_value(vm, &item)?);
-    }
-    Ok(out)
+    arr.iter()
+        .map(|item| move_args_from_value(vm, item))
+        .collect()
 }
 
 /// [image]（W5 拡張）の opts= 引数: `{clip, flipH, flipV, grayscale}`。
 pub(super) fn image_load_opts_from_value(vm: &mut Vm, v: &Value) -> Result<ImageLoadOpts, Value> {
     let clip_v = vm.get_prop(v, "clip")?;
-    let clip = blit_clip_from_value(vm, &clip_v)?;
-    let flip_h = as_bool(&vm.get_prop(v, "flipH")?);
-    let flip_v = as_bool(&vm.get_prop(v, "flipV")?);
-    let grayscale = as_bool(&vm.get_prop(v, "grayscale")?);
     Ok(ImageLoadOpts {
-        clip,
-        flip_h,
-        flip_v,
-        grayscale,
+        clip: blit_clip_from_value(vm, &clip_v)?,
+        flip_h: as_bool(&vm.get_prop(v, "flipH")?),
+        flip_v: as_bool(&vm.get_prop(v, "flipV")?),
+        grayscale: as_bool(&vm.get_prop(v, "grayscale")?),
     })
 }
 
-pub(super) fn obj_from_pairs(pairs: &[(&str, Value)]) -> Value {
+pub(super) fn obj_from_pairs<const N: usize>(pairs: [(&str, Value); N]) -> Value {
     let o = Value::new_plain_object();
     if let Value::Object(rc) = &o {
         let mut b = rc.borrow_mut();
         for (k, v) in pairs {
-            b.props.set_value(Rc::from(*k), v.clone());
+            b.props.set_value(Rc::from(k), v);
         }
     }
     o
 }
 
 pub(super) fn print_result_to_value(r: PrintResult) -> Value {
-    obj_from_pairs(&[
+    obj_from_pairs([
         ("total", Value::Number(r.total as f64)),
         ("added", Value::Number(r.added as f64)),
     ])
@@ -357,7 +245,7 @@ pub(super) fn glyph_rects_to_value(rects: Vec<GlyphRect>) -> Value {
         rects
             .into_iter()
             .map(|g| {
-                obj_from_pairs(&[
+                obj_from_pairs([
                     ("x", Value::Number(g.x as f64)),
                     ("y", Value::Number(g.y as f64)),
                     ("w", Value::Number(g.w as f64)),
@@ -374,43 +262,24 @@ pub(super) fn glyph_rects_to_value(rects: Vec<GlyphRect>) -> Value {
 pub(super) fn slot_list_to_value(list: Vec<SlotInfo>) -> Value {
     Value::new_array(
         list.into_iter()
-            .map(|s| obj_from_pairs(&[("slot", Value::str(s.slot)), ("json", Value::str(s.json))]))
+            .map(|s| obj_from_pairs([("slot", Value::str(s.slot)), ("json", Value::str(s.json))]))
             .collect(),
     )
 }
 
 pub(super) fn input_event_to_value(ev: &InputEvent) -> Value {
-    let obj = obj_from_pairs(&[
+    obj_from_pairs([
         ("kind", Value::str(ev.kind)),
         ("x", Value::Number(ev.x)),
         ("y", Value::Number(ev.y)),
         ("t", Value::Number(ev.t)),
-    ]);
-    if let Value::Object(o) = &obj {
-        let mut b = o.borrow_mut();
-        b.props.set_value(
-            Rc::from("button"),
-            match ev.button {
-                Some(s) => Value::str(s),
-                None => Value::Undefined,
-            },
-        );
-        b.props.set_value(
-            Rc::from("key"),
-            match &ev.key {
-                Some(s) => Value::str(s.clone()),
-                None => Value::Undefined,
-            },
-        );
-        b.props.set_value(
-            Rc::from("delta"),
-            match ev.delta {
-                Some(d) => Value::Number(d),
-                None => Value::Undefined,
-            },
-        );
-    }
-    obj
+        ("button", ev.button.map_or(Value::Undefined, Value::str)),
+        (
+            "key",
+            ev.key.as_deref().map_or(Value::Undefined, Value::str),
+        ),
+        ("delta", ev.delta.map_or(Value::Undefined, Value::Number)),
+    ])
 }
 
 pub(super) fn quit_event_value() -> Value {
@@ -425,8 +294,7 @@ pub(super) fn quit_event_value() -> Value {
     })
 }
 
-/// 未捕捉の Promise reject を大まかに文字列化する（ログ用。V8 版の
-/// `to_display_string` ほど厳密である必要はない）。
+/// 未捕捉の Promise reject を大まかに文字列化する（ログ用）。
 pub(super) fn debug_value(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),

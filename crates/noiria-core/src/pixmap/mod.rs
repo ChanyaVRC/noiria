@@ -81,11 +81,15 @@ impl Pixmap {
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
-                // SAFETY: AVX2 availability was checked above.
-                unsafe { simd::premultiply_rgba_avx2(rgba, &mut data) };
+                // SAFETY: AVX2 availability was checked above; slices are disjoint and equal length.
+                unsafe {
+                    simd::premultiply_rgba_avx2_raw(rgba.as_ptr(), data.as_mut_ptr(), rgba.len())
+                };
             } else {
-                // SAFETY: SSE2 is guaranteed on x86_64.
-                unsafe { simd::premultiply_rgba_sse2(rgba, &mut data) };
+                // SAFETY: SSE2 is guaranteed on x86_64; slices are disjoint and equal length.
+                unsafe {
+                    simd::premultiply_rgba_sse2_raw(rgba.as_ptr(), data.as_mut_ptr(), rgba.len())
+                };
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
@@ -94,6 +98,30 @@ impl Pixmap {
             width,
             height,
             data,
+        }
+    }
+
+    /// 所有するストレートアルファ RGBA8 バッファを in-place でプリマルチプライして包む（追加確保ゼロ）。
+    pub fn from_rgba_straight_owned(width: u32, height: u32, mut rgba: Vec<u8>) -> Self {
+        assert_eq!(rgba.len(), (width as usize) * (height as usize) * 4);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let ptr = rgba.as_mut_ptr();
+            let len = rgba.len();
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: AVX2 availability was checked above; in-place pointer is valid for `len` bytes.
+                unsafe { simd::premultiply_rgba_avx2_raw(ptr, ptr, len) };
+            } else {
+                // SAFETY: SSE2 is guaranteed on x86_64; in-place pointer is valid for `len` bytes.
+                unsafe { simd::premultiply_rgba_sse2_raw(ptr, ptr, len) };
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        premultiply_rgba_in_place_scalar(&mut rgba);
+        Self {
+            width,
+            height,
+            data: rgba,
         }
     }
 
@@ -627,6 +655,19 @@ fn premultiply_rgba_scalar(rgba: &[u8], out: &mut [u8]) {
         dst[1] = div255(px[1] as u32 * a) as u8;
         dst[2] = div255(px[2] as u32 * a) as u8;
         dst[3] = a as u8;
+    }
+}
+
+#[inline]
+fn premultiply_rgba_in_place_scalar(rgba: &mut [u8]) {
+    for px in rgba.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a == 255 {
+            continue;
+        }
+        px[0] = div255(px[0] as u32 * a) as u8;
+        px[1] = div255(px[1] as u32 * a) as u8;
+        px[2] = div255(px[2] as u32 * a) as u8;
     }
 }
 

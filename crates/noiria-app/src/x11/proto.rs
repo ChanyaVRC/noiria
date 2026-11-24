@@ -60,15 +60,48 @@ pub(crate) const EV_EXPOSE: u8 = 12;
 pub(crate) const EV_CONFIGURE_NOTIFY: u8 = 22;
 pub(crate) const EV_CLIENT_MESSAGE: u8 = 33;
 
-fn pad4(buf: &mut Vec<u8>) {
-    while !buf.len().is_multiple_of(4) {
-        buf.push(0);
-    }
-}
+struct ReqBuf(Vec<u8>);
 
-fn set_len_words(req: &mut [u8]) {
-    let words = (req.len() / 4) as u16;
-    req[2..4].copy_from_slice(&words.to_le_bytes());
+impl ReqBuf {
+    fn new(opcode: u8, data: u8, cap: usize) -> Self {
+        let mut v = Vec::with_capacity(cap);
+        v.extend_from_slice(&[opcode, data, 0, 0]);
+        Self(v)
+    }
+
+    fn u8(&mut self, v: u8) -> &mut Self {
+        self.0.push(v);
+        self
+    }
+
+    fn u16(&mut self, v: u16) -> &mut Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    fn i16(&mut self, v: i16) -> &mut Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    fn u32(&mut self, v: u32) -> &mut Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        self.0.extend_from_slice(b);
+        self
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        while !self.0.len().is_multiple_of(4) {
+            self.0.push(0);
+        }
+        let words = (self.0.len() / 4) as u16;
+        self.0[2..4].copy_from_slice(&words.to_le_bytes());
+        self.0
+    }
 }
 
 /// CWBackPixel | CWEventMask の 2 値だけを使う CreateWindow。値リストは
@@ -86,54 +119,39 @@ pub(crate) fn req_create_window(
     back_pixel: u32,
     event_mask: u32,
 ) -> Vec<u8> {
-    let mut req = Vec::with_capacity(40);
-    req.push(OP_CREATE_WINDOW);
-    req.push(depth);
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(&wid.to_le_bytes());
-    req.extend_from_slice(&parent.to_le_bytes());
-    req.extend_from_slice(&x.to_le_bytes());
-    req.extend_from_slice(&y.to_le_bytes());
-    req.extend_from_slice(&w.to_le_bytes());
-    req.extend_from_slice(&h.to_le_bytes());
-    req.extend_from_slice(&0u16.to_le_bytes()); // border-width
-    req.extend_from_slice(&1u16.to_le_bytes()); // class = InputOutput
-    req.extend_from_slice(&visual.to_le_bytes());
     let value_mask: u32 = 0x0000_0002 /* CWBackPixel */ | 0x0000_0800 /* CWEventMask */;
-    req.extend_from_slice(&value_mask.to_le_bytes());
-    req.extend_from_slice(&back_pixel.to_le_bytes());
-    req.extend_from_slice(&event_mask.to_le_bytes());
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_CREATE_WINDOW, depth, 40);
+    r.u32(wid)
+        .u32(parent)
+        .i16(x)
+        .i16(y)
+        .u16(w)
+        .u16(h)
+        .u16(0) // border-width
+        .u16(1) // class = InputOutput
+        .u32(visual)
+        .u32(value_mask)
+        .u32(back_pixel)
+        .u32(event_mask);
+    r.finish()
 }
 
 pub(crate) fn req_map_window(window: u32) -> Vec<u8> {
-    let mut req = vec![OP_MAP_WINDOW, 0, 0, 0];
-    req.extend_from_slice(&window.to_le_bytes());
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_MAP_WINDOW, 0, 8);
+    r.u32(window);
+    r.finish()
 }
 
 pub(crate) fn req_create_gc(cid: u32, drawable: u32) -> Vec<u8> {
-    let mut req = vec![OP_CREATE_GC, 0, 0, 0];
-    req.extend_from_slice(&cid.to_le_bytes());
-    req.extend_from_slice(&drawable.to_le_bytes());
-    req.extend_from_slice(&0u32.to_le_bytes()); // value-mask = 0
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_CREATE_GC, 0, 16);
+    r.u32(cid).u32(drawable).u32(0); // value-mask = 0
+    r.finish()
 }
 
 pub(crate) fn req_intern_atom(name: &str, only_if_exists: bool) -> Vec<u8> {
-    let mut req = Vec::new();
-    req.push(OP_INTERN_ATOM);
-    req.push(u8::from(only_if_exists));
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(name.as_bytes());
-    pad4(&mut req);
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_INTERN_ATOM, u8::from(only_if_exists), 8 + name.len());
+    r.u16(name.len() as u16).u16(0).bytes(name.as_bytes());
+    r.finish()
 }
 
 pub(crate) fn parse_intern_atom_reply(reply: &[u8]) -> Result<u32> {
@@ -156,46 +174,25 @@ pub(crate) fn req_change_property(
 ) -> Vec<u8> {
     let elem_size = (format as usize / 8).max(1);
     let num_elements = (data.len() / elem_size) as u32;
-    let mut req = Vec::with_capacity(24 + data.len());
-    req.push(OP_CHANGE_PROPERTY);
-    req.push(mode);
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(&window.to_le_bytes());
-    req.extend_from_slice(&property.to_le_bytes());
-    req.extend_from_slice(&prop_type.to_le_bytes());
-    req.push(format);
-    req.extend_from_slice(&[0u8; 3]);
-    req.extend_from_slice(&num_elements.to_le_bytes());
-    req.extend_from_slice(data);
-    pad4(&mut req);
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_CHANGE_PROPERTY, mode, 24 + data.len());
+    r.u32(window)
+        .u32(property)
+        .u32(prop_type)
+        .u8(format)
+        .bytes(&[0u8; 3])
+        .u32(num_elements)
+        .bytes(data);
+    r.finish()
 }
 
 /// ICCCM WM_SIZE_HINTS（18 x CARD32 = 72 バイト）。最小サイズだけ指定する（最大は無制限 =
 /// リサイズ・最大化可。他のフィールドは全て 0）。
 pub(crate) fn wm_size_hints_min(min_w: u32, min_h: u32) -> Vec<u8> {
     const P_MIN_SIZE: u32 = 1 << 4;
-    let mut d = Vec::with_capacity(72);
-    let mut push = |v: u32| d.extend_from_slice(&v.to_le_bytes());
-    push(P_MIN_SIZE); // flags
-    push(0); // x (legacy)
-    push(0); // y (legacy)
-    push(0); // width (legacy)
-    push(0); // height (legacy)
-    push(min_w); // min_width
-    push(min_h); // min_height
-    push(0); // max_width
-    push(0); // max_height
-    push(0); // width_inc
-    push(0); // height_inc
-    push(0); // min_aspect_num
-    push(0); // min_aspect_den
-    push(0); // max_aspect_num
-    push(0); // max_aspect_den
-    push(0); // base_width
-    push(0); // base_height
-    push(0); // win_gravity
+    let mut d = vec![0u8; 72];
+    d[0..4].copy_from_slice(&P_MIN_SIZE.to_le_bytes());
+    d[20..24].copy_from_slice(&min_w.to_le_bytes());
+    d[24..28].copy_from_slice(&min_h.to_le_bytes());
     d
 }
 
@@ -209,23 +206,18 @@ pub(crate) fn req_put_image_band(
     depth: u8,
     data: &[u8],
 ) -> Vec<u8> {
-    let mut req = Vec::with_capacity(24 + data.len());
-    req.push(OP_PUT_IMAGE);
-    req.push(2); // ZPixmap
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(&drawable.to_le_bytes());
-    req.extend_from_slice(&gc.to_le_bytes());
-    req.extend_from_slice(&width.to_le_bytes());
-    req.extend_from_slice(&height.to_le_bytes());
-    req.extend_from_slice(&0i16.to_le_bytes()); // dst-x
-    req.extend_from_slice(&dst_y.to_le_bytes());
-    req.push(0); // left-pad
-    req.push(depth);
-    req.extend_from_slice(&0u16.to_le_bytes()); // unused
-    req.extend_from_slice(data);
-    pad4(&mut req);
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_PUT_IMAGE, 2, 24 + data.len());
+    r.u32(drawable)
+        .u32(gc)
+        .u16(width)
+        .u16(height)
+        .i16(0) // dst-x
+        .i16(dst_y)
+        .u8(0) // left-pad
+        .u8(depth)
+        .u16(0) // unused
+        .bytes(data);
+    r.finish()
 }
 
 /// フレーム全体（BGRX u32 列）を `max_request_bytes` に収まるよう帯分割して
@@ -283,17 +275,9 @@ pub(crate) fn req_get_image(
     h: u16,
     plane_mask: u32,
 ) -> Vec<u8> {
-    let mut req = Vec::with_capacity(20);
-    req.push(OP_GET_IMAGE);
-    req.push(2); // ZPixmap
-    req.extend_from_slice(&5u16.to_le_bytes());
-    req.extend_from_slice(&drawable.to_le_bytes());
-    req.extend_from_slice(&x.to_le_bytes());
-    req.extend_from_slice(&y.to_le_bytes());
-    req.extend_from_slice(&w.to_le_bytes());
-    req.extend_from_slice(&h.to_le_bytes());
-    req.extend_from_slice(&plane_mask.to_le_bytes());
-    req
+    let mut r = ReqBuf::new(OP_GET_IMAGE, 2, 20);
+    r.u32(drawable).i16(x).i16(y).u16(w).u16(h).u32(plane_mask);
+    r.finish()
 }
 
 /// GetImage リプライ（32 バイトヘッダ + データ）からピクセルデータ部分を返す。
@@ -321,17 +305,13 @@ pub(crate) fn req_get_property(
     long_offset: u32,
     long_length: u32,
 ) -> Vec<u8> {
-    let mut req = Vec::with_capacity(24);
-    req.push(OP_GET_PROPERTY);
-    req.push(0); // delete = false
-    req.extend_from_slice(&0u16.to_le_bytes());
-    req.extend_from_slice(&window.to_le_bytes());
-    req.extend_from_slice(&property.to_le_bytes());
-    req.extend_from_slice(&prop_type.to_le_bytes());
-    req.extend_from_slice(&long_offset.to_le_bytes());
-    req.extend_from_slice(&long_length.to_le_bytes());
-    set_len_words(&mut req);
-    req
+    let mut r = ReqBuf::new(OP_GET_PROPERTY, 0, 24);
+    r.u32(window)
+        .u32(property)
+        .u32(prop_type)
+        .u32(long_offset)
+        .u32(long_length);
+    r.finish()
 }
 
 /// GetProperty を送って format=32 の値を `u32` 列として読み戻す
@@ -427,14 +407,9 @@ pub(crate) fn req_send_event(
     event_mask: u32,
     event_bytes: &[u8; 32],
 ) -> Vec<u8> {
-    let mut req = Vec::with_capacity(44);
-    req.push(OP_SEND_EVENT);
-    req.push(u8::from(propagate));
-    req.extend_from_slice(&11u16.to_le_bytes());
-    req.extend_from_slice(&destination.to_le_bytes());
-    req.extend_from_slice(&event_mask.to_le_bytes());
-    req.extend_from_slice(event_bytes);
-    req
+    let mut r = ReqBuf::new(OP_SEND_EVENT, u8::from(propagate), 44);
+    r.u32(destination).u32(event_mask).bytes(event_bytes);
+    r.finish()
 }
 
 /// ClientMessage（format=32）のワイヤバイト列を組み立てる。`data` は 5 個の CARD32。
@@ -497,11 +472,11 @@ pub(crate) fn read_packet(r: &mut impl Read) -> Result<Packet> {
         1 => {
             let seq = u16::from_le_bytes([buf[2], buf[3]]);
             let reply_len_words = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-            let mut data = buf.to_vec();
+            let total = 32 + reply_len_words * 4;
+            let mut data = vec![0u8; total];
+            data[..32].copy_from_slice(&buf);
             if reply_len_words > 0 {
-                let mut extra = vec![0u8; reply_len_words * 4];
-                r.read_exact(&mut extra)?;
-                data.extend_from_slice(&extra);
+                r.read_exact(&mut data[32..])?;
             }
             Ok(Packet::Reply { seq, data })
         }

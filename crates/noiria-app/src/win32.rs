@@ -1878,12 +1878,12 @@ mod tests {
     /// 長さ `ms` のクロスフェードを開始する（`is_finished` で完了判定される）。
     fn start_transition(h: &Harness, ms: u64) {
         use noiria_core::transition::{TransMethod, Transition};
-        h.scene.lock().unwrap().transition = Some(Transition {
+        h.scene.lock().unwrap().transition = Some(Box::new(Transition {
             method: TransMethod::Crossfade,
             start: Instant::now(),
             duration: Duration::from_millis(ms),
             skip: false,
-        });
+        }));
     }
 
     /// 指摘 6: タイトルバーのドラッグ等の OS モーダルループ中は外側のループが止まる。`WM_TIMER` でフレーム処理を回さないと

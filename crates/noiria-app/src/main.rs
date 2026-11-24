@@ -344,6 +344,33 @@ fn run() -> anyhow::Result<()> {
     let (audio_tx, audio_rx) = crossbeam_channel::unbounded();
     let audio_shared = Arc::new(AudioShared::default());
 
+    #[allow(clippy::too_many_arguments)]
+    let make_ctx = |proxy: WakeSink,
+                    input_rx: tokio::sync::mpsc::UnboundedReceiver<bridge::InputEvent>,
+                    audio_tx: crossbeam_channel::Sender<AudioCmd>,
+                    audio_shared: Arc<AudioShared>,
+                    game_dir: GameDir,
+                    clock: Clock,
+                    input_sync: bridge::InputSync,
+                    tick_sync: bridge::TickSync,
+                    pending_waits: bridge::PendingWaits| script::EngineCtx {
+        scene: scene.clone(),
+        proxy,
+        input_rx,
+        trans_notify: trans_notify.clone(),
+        audio_tx,
+        audio_shared,
+        game_dir,
+        config: config.clone(),
+        start,
+        clock,
+        input_sync,
+        tick_sync,
+        pending_waits,
+        #[cfg(test)]
+        op_log: None,
+    };
+
     if args.autotest.is_some() || args.autotest_script.is_some() {
         // スクリプトモードの `--autotest <秒>` は仮想時間の上限（無指定なら 1 時間）。
         let duration = args.autotest.unwrap_or(Duration::from_secs(3600));
@@ -356,42 +383,24 @@ fn run() -> anyhow::Result<()> {
             }
             None => None,
         };
-        // ヘッドレス: オーディオスレッドは起動しない（無音）。受信口は捨てる。
         drop(audio_rx);
-        // ヘッドレス専用の仮想クロック。headless::run_headless のフレームループだけが
-        // 進め、スクリプトスレッド（EngineState）はアニメーション開始時刻の記録に
-        // 同じインスタンスを読む（`clock.rs` のドキュメント参照）。
         let clock = Clock::new_virtual(start);
-        // headless 専用のロックステップ同期カウンタ（`bridge::InputSync` 参照）。
-        // headless::run_headless と script スレッドの両方へ同じインスタンスを共有する
-        // （`clock` と同じ配線パターン）。
         let input_sync = bridge::InputSync::new();
-        // tick ドレインバリア用カウンタ（`bridge::TickSync` 参照）。tsint 実行時のみ
-        // headless 側が実際に待つ（`tick_barrier`）。
         let tick_sync = bridge::TickSync::new();
         let tick_barrier = engine.is_tsint();
-        // V8 専用: 仮想 `op_wait` の in-flight カウンタ（`bridge::PendingWaits` 参照）。
-        // headless 側がこれを読んで V8 の tick ドレインバリアの要否を判定する
-        // （`tick_sync`/`clock` と同じ配線パターン）。tsint はこれに触れないため
-        // 常に 0 のまま。
         let pending_waits = bridge::PendingWaits::new();
         let (user_tx, user_rx) = crossbeam_channel::unbounded();
-        let _script_thread = engine.spawn(script::EngineCtx {
-            scene: scene.clone(),
-            proxy: WakeSink::Channel(user_tx),
+        let _script_thread = engine.spawn(make_ctx(
+            WakeSink::Channel(user_tx),
             input_rx,
-            trans_notify: trans_notify.clone(),
             audio_tx,
             audio_shared,
             game_dir,
-            config: config.clone(),
-            start,
-            clock: clock.clone(),
-            input_sync: input_sync.clone(),
-            tick_sync: tick_sync.clone(),
-            pending_waits: pending_waits.clone(),
-            op_log: None,
-        });
+            clock.clone(),
+            input_sync.clone(),
+            tick_sync.clone(),
+            pending_waits.clone(),
+        ));
         return headless::run_headless(headless::HeadlessParams {
             scene,
             input_tx,
@@ -438,26 +447,21 @@ fn run() -> anyhow::Result<()> {
         let hwnd_slot = Arc::new(AtomicIsize::new(0));
         let wake_posted = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let _script_thread = engine.spawn(script::EngineCtx {
-            scene: scene.clone(),
-            proxy: WakeSink::Win32 {
+        let _script_thread = engine.spawn(make_ctx(
+            WakeSink::Win32 {
                 tx: user_tx,
                 hwnd: hwnd_slot.clone(),
                 posted: wake_posted.clone(),
             },
             input_rx,
-            trans_notify: trans_notify.clone(),
-            audio_tx: audio_tx.clone(),
+            audio_tx.clone(),
             audio_shared,
             game_dir,
-            config: config.clone(),
-            start,
-            clock: Clock::Real,
-            input_sync: bridge::InputSync::new(),
-            tick_sync: bridge::TickSync::new(),
-            pending_waits: bridge::PendingWaits::new(),
-            op_log: None,
-        });
+            Clock::Real,
+            bridge::InputSync::new(),
+            bridge::TickSync::new(),
+            bridge::PendingWaits::new(),
+        ));
 
         let mut visible = true;
         if let Some((size, file)) = &args.bench {
@@ -494,22 +498,17 @@ fn run() -> anyhow::Result<()> {
     {
         let (user_tx, user_rx) = crossbeam_channel::unbounded();
 
-        let _script_thread = engine.spawn(script::EngineCtx {
-            scene: scene.clone(),
-            proxy: WakeSink::Channel(user_tx),
+        let _script_thread = engine.spawn(make_ctx(
+            WakeSink::Channel(user_tx),
             input_rx,
-            trans_notify: trans_notify.clone(),
-            audio_tx: audio_tx.clone(),
+            audio_tx.clone(),
             audio_shared,
             game_dir,
-            config: config.clone(),
-            start,
-            clock: Clock::Real,
-            input_sync: bridge::InputSync::new(),
-            tick_sync: bridge::TickSync::new(),
-            pending_waits: bridge::PendingWaits::new(),
-            op_log: None,
-        });
+            Clock::Real,
+            bridge::InputSync::new(),
+            bridge::TickSync::new(),
+            bridge::PendingWaits::new(),
+        ));
 
         x11::run_windowed(WindowedParams {
             title: config.title.clone(),

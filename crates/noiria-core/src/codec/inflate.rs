@@ -112,10 +112,10 @@ const FAST_MASK: u64 = (FAST_SIZE as u64) - 1;
 
 /// カノニカルハフマン表（9bit 直接参照テーブル + 10..=15bit 用フォールバック）。
 struct Huffman {
-    /// 下位 8bit = 符号長 (0 なら未登録/10bit以上)、上位 = シンボル
-    fast: [u32; FAST_SIZE],
+    /// 下位 4bit = 符号長 (0 なら未登録/10bit以上)、上位 12bit = シンボル
+    fast: [u16; FAST_SIZE],
     count: [u16; 16],
-    symbols: Vec<u16>,
+    symbols: Box<[u16]>,
 }
 
 impl Huffman {
@@ -147,17 +147,17 @@ impl Huffman {
         }
 
         // 9bit 以下の符号を LSB ファーストの高速テーブルに展開する。
-        let mut fast = [0u32; FAST_SIZE];
+        let mut fast = [0u16; FAST_SIZE];
         let mut code = 0u32;
         let mut idx = 0usize;
         for len in 1..=FAST_BITS {
             let cnt = count[len as usize] as usize;
             let step = 1usize << len;
             for _ in 0..cnt {
-                let sym = symbols[idx] as u32;
+                let sym = symbols[idx];
                 idx += 1;
                 let rev = ((code as u16).reverse_bits() >> (16 - len)) as usize;
-                let entry = (sym << 8) | len;
+                let entry = (sym << 4) | (len as u16);
                 let mut k = rev;
                 while k < FAST_SIZE {
                     fast[k] = entry;
@@ -171,7 +171,7 @@ impl Huffman {
         Ok(Self {
             fast,
             count,
-            symbols,
+            symbols: symbols.into_boxed_slice(),
         })
     }
 
@@ -181,11 +181,11 @@ impl Huffman {
             br.refill();
         }
         let entry = self.fast[(br.buf & FAST_MASK) as usize];
-        let len = entry & 0xFF;
+        let len = (entry & 0xF) as u32;
         if len != 0 && br.nbits >= len {
             br.buf >>= len;
             br.nbits -= len;
-            return Ok((entry >> 8) as u16);
+            return Ok(entry >> 4);
         }
         self.decode_slow(br)
     }

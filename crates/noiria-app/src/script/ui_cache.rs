@@ -124,37 +124,39 @@ impl<K: Eq + Hash + Clone, V: Clone + ByteSized> ByteLru<K, V> {
 }
 
 pub(crate) type PixmapLru<K> = ByteLru<K, Arc<Pixmap>>;
-pub(crate) type RuleLru = ByteLru<RuleKey, Arc<Vec<u8>>>;
+pub(crate) type RuleLru = ByteLru<SizedPathKey, Arc<Vec<u8>>>;
 
-/// `layer.panel` の数値列（`PanelSpec::from_slice` が読むもの）を鍵にする。
-pub(crate) type PanelKey = Vec<u64>;
+/// `layer.panel` の数値列（`PanelSpec::from_slice` が読む先頭 22 要素）をヒープ確保なしで鍵にする。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct PanelKey {
+    len: u8,
+    bits: [u64; 22],
+}
 
 pub(crate) fn panel_key(spec: &[f64]) -> PanelKey {
-    spec.iter().map(|v| v.to_bits()).collect()
+    let n = spec.len().min(22);
+    let mut bits = [0u64; 22];
+    for (dst, &v) in bits[..n].iter_mut().zip(spec) {
+        *dst = v.to_bits();
+    }
+    PanelKey { len: n as u8, bits }
 }
 
 /// サムネイルの鍵: スロット名・表示寸法（0 = 規定寸法）・ファイルの更新時刻(ns)と長さ。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ThumbKey {
-    pub(crate) slot: String,
-    pub(crate) w: u32,
-    pub(crate) h: u32,
     pub(crate) mtime_ns: u128,
+    pub(crate) slot: Box<str>,
     pub(crate) len: u64,
-}
-
-/// 縮小済み画像（ギャラリーのサムネイル）の鍵: パス・寸法。ゲーム資産は実行中に変わらない。
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ScaledKey {
-    pub(crate) path: String,
     pub(crate) w: u32,
     pub(crate) h: u32,
 }
 
-/// ユニバーサルトランジションのルール輝度プレーン用の鍵: パス・シーン寸法。
+/// 縮小済み画像・ユニバーサルルール画像の共通キャッシュ鍵: パス・寸法。ゲーム資産は実行中に変わらない。
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RuleKey {
-    pub(crate) path: String,
+pub(crate) struct SizedPathKey {
+    pub(crate) path: Box<str>,
     pub(crate) w: u32,
     pub(crate) h: u32,
 }
@@ -164,8 +166,8 @@ pub(crate) const IMAGE_CACHE_MAX_BYTES: usize = 64 << 20;
 pub(crate) struct UiCaches {
     pub(crate) panels: PixmapLru<PanelKey>,
     pub(crate) thumbs: PixmapLru<ThumbKey>,
-    pub(crate) scaled: PixmapLru<ScaledKey>,
-    pub(crate) images: PixmapLru<String>,
+    pub(crate) scaled: PixmapLru<SizedPathKey>,
+    pub(crate) images: PixmapLru<Box<str>>,
     pub(crate) rules: RuleLru,
 }
 
@@ -181,7 +183,7 @@ impl UiCaches {
     }
 
     pub(crate) fn forget_slot(&mut self, slot: &str) {
-        self.thumbs.remove_where(|k| k.slot == slot);
+        self.thumbs.remove_where(|k| &*k.slot == slot);
     }
 
     /// 縮小画像のキャッシュに `w`x`h` の画像が何枚入るか。これを超えて先読みしても古いものを
@@ -198,7 +200,7 @@ impl UiCaches {
 fn thumb_key(game_id: &str, slot: &str, w: u32, h: u32) -> Option<ThumbKey> {
     let meta = std::fs::metadata(savedata::thumb_path(game_id, slot).ok()?).ok()?;
     Some(ThumbKey {
-        slot: slot.to_string(),
+        slot: slot.into(),
         w,
         h,
         mtime_ns: meta
@@ -259,7 +261,7 @@ pub(crate) fn load_image_cached(
     cache
         .lock_unpoisoned()
         .images
-        .insert(path.to_string(), pixmap.clone());
+        .insert(path.into(), pixmap.clone());
     Ok(pixmap)
 }
 
@@ -271,8 +273,8 @@ pub(crate) fn load_scaled_cached(
     w: u32,
     h: u32,
 ) -> Result<Arc<Pixmap>, String> {
-    let key = ScaledKey {
-        path: path.to_string(),
+    let key = SizedPathKey {
+        path: path.into(),
         w,
         h,
     };
@@ -311,8 +313,8 @@ pub(crate) fn load_rule_cached(
     scene_w: u32,
     scene_h: u32,
 ) -> Result<Arc<Vec<u8>>, String> {
-    let key = RuleKey {
-        path: path.to_string(),
+    let key = SizedPathKey {
+        path: path.into(),
         w: scene_w,
         h: scene_h,
     };
@@ -509,7 +511,7 @@ mod tests {
     fn forget_slot_drops_every_size_of_that_slot_only() {
         let mut c = UiCaches::new();
         let key = |slot: &str, w: u32| ThumbKey {
-            slot: slot.to_string(),
+            slot: slot.into(),
             w,
             h: 10,
             mtime_ns: 1,

@@ -455,18 +455,28 @@ fn from_rgba_straight_simd_matches_scalar() {
 
         let got = Pixmap::from_rgba_straight(pixels as u32, 1, &rgba);
         assert_eq!(got.data, want, "public premul pixels={pixels}");
+        let got_owned = Pixmap::from_rgba_straight_owned(pixels as u32, 1, rgba.clone());
+        assert_eq!(got_owned.data, want, "owned premul pixels={pixels}");
 
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
                 let mut got_avx2 = vec![0u8; rgba.len()];
                 // SAFETY: AVX2 was checked above.
-                unsafe { simd::premultiply_rgba_avx2(&rgba, &mut got_avx2) };
+                unsafe {
+                    simd::premultiply_rgba_avx2_raw(
+                        rgba.as_ptr(),
+                        got_avx2.as_mut_ptr(),
+                        rgba.len(),
+                    );
+                }
                 assert_eq!(got_avx2, want, "avx2 premul pixels={pixels}");
             }
             let mut got_sse2 = vec![0u8; rgba.len()];
             // SAFETY: SSE2 is guaranteed on x86_64.
-            unsafe { simd::premultiply_rgba_sse2(&rgba, &mut got_sse2) };
+            unsafe {
+                simd::premultiply_rgba_sse2_raw(rgba.as_ptr(), got_sse2.as_mut_ptr(), rgba.len());
+            }
             assert_eq!(got_sse2, want, "sse2 premul pixels={pixels}");
         }
     }

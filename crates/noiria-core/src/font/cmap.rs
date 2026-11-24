@@ -28,16 +28,12 @@ impl CmapSubtable {
 }
 
 pub(crate) struct Format4Table {
-    /// サブテーブル先頭 (format フィールド位置) からファイル末尾までのバイト列。
-    /// idRangeOffset のポインタ演算がサブテーブルの `length` を超えて
-    /// glyphIdArray を指すような（仕様上あり得る）ケースでも安全に読めるよう、
-    /// ファイル末尾までを保持しておく。
-    bytes: Vec<u8>,
-    seg_count: usize,
-    end_code_off: usize,
-    start_code_off: usize,
-    id_delta_off: usize,
-    id_range_offset_off: usize,
+    bytes: Box<[u8]>,
+    seg_count: u32,
+    end_code_off: u32,
+    start_code_off: u32,
+    id_delta_off: u32,
+    id_range_offset_off: u32,
 }
 
 fn u16_opt(data: &[u8], off: usize) -> Option<u16> {
@@ -48,25 +44,26 @@ fn u16_opt(data: &[u8], off: usize) -> Option<u16> {
 
 impl Format4Table {
     fn end_code(&self, i: usize) -> Option<u16> {
-        u16_opt(&self.bytes, self.end_code_off + i * 2)
+        u16_opt(&self.bytes, self.end_code_off as usize + i * 2)
     }
     fn start_code(&self, i: usize) -> Option<u16> {
-        u16_opt(&self.bytes, self.start_code_off + i * 2)
+        u16_opt(&self.bytes, self.start_code_off as usize + i * 2)
     }
     fn id_delta(&self, i: usize) -> Option<i16> {
-        u16_opt(&self.bytes, self.id_delta_off + i * 2).map(|v| v as i16)
+        u16_opt(&self.bytes, self.id_delta_off as usize + i * 2).map(|v| v as i16)
     }
     fn id_range_offset(&self, i: usize) -> Option<u16> {
-        u16_opt(&self.bytes, self.id_range_offset_off + i * 2)
+        u16_opt(&self.bytes, self.id_range_offset_off as usize + i * 2)
     }
 
     pub fn lookup(&self, cp: u16) -> Option<u16> {
-        if self.seg_count == 0 {
+        let seg_count = self.seg_count as usize;
+        if seg_count == 0 {
             return None;
         }
         // endCode 配列は昇順なので、cp <= endCode[i] となる最小の i を二分探索する。
         let mut lo = 0usize;
-        let mut hi = self.seg_count;
+        let mut hi = seg_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let end = self.end_code(mid)?;
@@ -76,7 +73,7 @@ impl Format4Table {
                 hi = mid;
             }
         }
-        if lo >= self.seg_count {
+        if lo >= seg_count {
             return None;
         }
         let i = lo;
@@ -90,8 +87,7 @@ impl Format4Table {
         let raw_glyph: u16 = if id_range_offset == 0 {
             (cp as i32 + id_delta as i32) as u16
         } else {
-            let addr = self
-                .id_range_offset_off
+            let addr = (self.id_range_offset_off as usize)
                 .checked_add(i * 2)?
                 .checked_add(id_range_offset as usize)?
                 .checked_add(2 * (cp - start) as usize)?;
@@ -112,7 +108,7 @@ impl Format4Table {
 
 pub(crate) struct Format12Table {
     /// (startCharCode, endCharCode, startGlyphID) を startCharCode 昇順に並べたもの
-    groups: Vec<(u32, u32, u32)>,
+    groups: Box<[(u32, u32, u32)]>,
 }
 
 impl Format12Table {
@@ -162,12 +158,12 @@ fn parse_format4(data: &[u8], off: usize) -> Result<Format4Table> {
     r.skip(seg_count * 2)?;
 
     Ok(Format4Table {
-        bytes: data[off..].to_vec(),
-        seg_count,
-        end_code_off: end_code_off - off,
-        start_code_off: start_code_off - off,
-        id_delta_off: id_delta_off - off,
-        id_range_offset_off: id_range_offset_off - off,
+        bytes: data[off..].into(),
+        seg_count: u32::try_from(seg_count)?,
+        end_code_off: u32::try_from(end_code_off - off)?,
+        start_code_off: u32::try_from(start_code_off - off)?,
+        id_delta_off: u32::try_from(id_delta_off - off)?,
+        id_range_offset_off: u32::try_from(id_range_offset_off - off)?,
     })
 }
 
@@ -191,7 +187,9 @@ fn parse_format12(data: &[u8], off: usize) -> Result<Format12Table> {
         groups.push((start, end, start_glyph));
     }
     groups.sort_by_key(|g| g.0);
-    Ok(Format12Table { groups })
+    Ok(Format12Table {
+        groups: groups.into_boxed_slice(),
+    })
 }
 
 fn score_encoding(platform_id: u16, encoding_id: u16, format: u16) -> i32 {
