@@ -467,13 +467,11 @@ impl Scene {
     pub fn settle_finished_tweens(&mut self, now: Instant) {
         let mut changed = false;
         for layer in self.fore.values_mut().chain(self.back.values_mut()) {
-            if layer.crop_tween.as_ref().is_some_and(|t| t.is_finished(now)) {
-                let t = layer.crop_tween.take().unwrap();
+            if let Some(t) = layer.crop_tween.take_if(|t| t.is_finished(now)) {
                 layer.crop_w = Some(t.to);
                 changed = true;
             }
-            while layer.tween.as_ref().is_some_and(|t| t.is_finished(now)) {
-                let t = layer.tween.take().unwrap();
+            while let Some(t) = layer.tween.take_if(|t| t.is_finished(now)) {
                 layer.x = t.to_x;
                 layer.y = t.to_y;
                 layer.opacity = t.to_opacity;

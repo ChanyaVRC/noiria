@@ -100,7 +100,7 @@ fn entry_nonce(entry_id: u64) -> [u8; 12] {
 
 fn key_check_value(key: &[u8; 32]) -> [u8; 8] {
     let ks = crate::crypto::block(key, &[0u8; 12], 0);
-    ks[0..8].try_into().unwrap()
+    [ks[0], ks[1], ks[2], ks[3], ks[4], ks[5], ks[6], ks[7]]
 }
 
 // ---------------------------------------------------------------------
@@ -316,17 +316,24 @@ impl<'a> Cursor<'a> {
         Ok(s)
     }
 
+    fn take_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let slice = self.take(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(slice);
+        Ok(out)
+    }
+
     fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
     fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        Ok(u16::from_le_bytes(self.take_array()?))
     }
     fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(self.take_array()?))
     }
     fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_le_bytes(self.take_array()?))
     }
 }
 
@@ -535,9 +542,11 @@ impl Pak {
             "鍵が違います。この pak を復号できません（key_check 不一致）"
         );
 
-        let index_ofs = u64::from_le_bytes(header[16..24].try_into().unwrap());
-        let index_len = u64::from_le_bytes(header[24..32].try_into().unwrap());
-        let index_plain_len = u64::from_le_bytes(header[32..40].try_into().unwrap());
+        let mut hdr_cur = Cursor::new(&header[16..44]);
+        let index_ofs = hdr_cur.u64()?;
+        let index_len = hdr_cur.u64()?;
+        let index_plain_len = hdr_cur.u64()?;
+        let index_crc32 = hdr_cur.u32()?;
         let index_end = index_ofs
             .checked_add(index_len)
             .context("index の範囲指定が不正です")?;
@@ -565,7 +574,6 @@ impl Pak {
             index_plain.len() as u64 == index_plain_len,
             "index の展開後サイズが一致しません（壊れた pak）"
         );
-        let index_crc32 = u32::from_le_bytes(header[40..44].try_into().unwrap());
         ensure!(
             index_crc32 == 0 || crate::codec::png::crc32(&index_plain) == index_crc32,
             "index の CRC32 が一致しません（壊れた pak）"

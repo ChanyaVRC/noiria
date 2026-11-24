@@ -22,7 +22,7 @@ fn lerp_px(a: u32, b: u32, w: u32) -> u32 {
 /// 出力 1 方向ぶんの標本位置（左の画素, 右の画素, 右の重み 0..=256）を `out` に書き込む。
 fn fill_axis(dst: usize, src: usize, out: &mut Vec<AxisTap>) {
     out.clear();
-    out.reserve(dst.saturating_sub(out.capacity()));
+    out.reserve(dst);
     for d in 0..dst {
         let pos = ((d as f64 + 0.5) * src as f64 / dst as f64 - 0.5).clamp(0.0, (src - 1) as f64);
         let i0 = pos.floor() as usize;

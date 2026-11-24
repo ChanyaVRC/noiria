@@ -12,6 +12,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use crate::bridge::LockExt;
+
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SCRIPT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
@@ -38,11 +40,11 @@ pub fn set_headless(headless: bool) {
 /// （ダイアログをスクリプトスレッドから出すと、閉じかけのウィンドウと競合するため）。
 pub fn record_script_error(msg: String) {
     log::error!("スクリプト実行エラー: {msg}");
-    *SCRIPT_ERROR.lock().unwrap() = Some(msg);
+    *SCRIPT_ERROR.lock_unpoisoned() = Some(msg);
 }
 
 pub fn take_script_error() -> Option<String> {
-    SCRIPT_ERROR.lock().unwrap().take()
+    SCRIPT_ERROR.lock_unpoisoned().take()
 }
 
 /// `catch_unwind` で捕まえた panic ペイロードの文字列化。

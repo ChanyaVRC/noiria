@@ -14,7 +14,7 @@ use tsint::value::Value;
 use tsint::vm::{HostPromise, PumpState};
 use tsint::Interpreter;
 
-use crate::bridge::InputEvent;
+use crate::bridge::{InputEvent, LockExt};
 use crate::script::engine_state::EngineState;
 
 use super::convert::{input_event_to_value, quit_event_value};
@@ -72,12 +72,12 @@ impl Doorbell {
     }
 
     fn ring(&self) {
-        *self.flag.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        *self.flag.lock_unpoisoned() = true;
         self.cv.notify_one();
     }
 
     fn wait(&self, timeout: Duration) {
-        let mut flag = self.flag.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut flag = self.flag.lock_unpoisoned();
         if !*flag {
             flag = self
                 .cv
@@ -121,7 +121,7 @@ impl Intake {
             .spawn(move || {
                 let (shared, bell, stop) = thread_ctx;
                 let Ok(rt) = tokio::runtime::Builder::new_current_thread().build() else {
-                    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
+                    shared.lock_unpoisoned().closed = true;
                     bell.ring();
                     return;
                 };
@@ -130,7 +130,7 @@ impl Intake {
                     loop {
                         tokio::select! {
                             ev = input_rx.recv(), if input_open => {
-                                let mut s = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let mut s = shared.lock_unpoisoned();
                                 match ev {
                                     Some(ev) => s.events.push_back(ev),
                                     None => {
@@ -170,7 +170,7 @@ impl Intake {
                 }
             },
             Intake::Forwarded(f) => {
-                let mut s = f.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut s = f.shared.lock_unpoisoned();
                 let mut p = pending.borrow_mut();
                 p.input_buffer.append(&mut s.events);
                 if s.closed {

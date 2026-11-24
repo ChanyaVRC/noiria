@@ -182,8 +182,14 @@ impl<'a> Lz77State<'a> {
             if d[c + best_len] == d[pos + best_len] && d[c] == d[pos] {
                 let mut l = 1usize;
                 while l + 8 <= limit {
-                    let a = u64::from_le_bytes(d[c + l..c + l + 8].try_into().unwrap());
-                    let b = u64::from_le_bytes(d[pos + l..pos + l + 8].try_into().unwrap());
+                    let s_a = &d[c + l..c + l + 8];
+                    let s_b = &d[pos + l..pos + l + 8];
+                    let a = u64::from_le_bytes([
+                        s_a[0], s_a[1], s_a[2], s_a[3], s_a[4], s_a[5], s_a[6], s_a[7],
+                    ]);
+                    let b = u64::from_le_bytes([
+                        s_b[0], s_b[1], s_b[2], s_b[3], s_b[4], s_b[5], s_b[6], s_b[7],
+                    ]);
                     let diff = a ^ b;
                     if diff != 0 {
                         l += (diff.trailing_zeros() >> 3) as usize;
@@ -627,7 +633,7 @@ fn encode_block(bw: &mut BitWriter, tokens: &[Token], raw: &[u8], is_final: bool
         .rev()
         .find(|&(_, &f)| f > 0)
         .map(|(i, _)| i + 1)
-        .unwrap()
+        .unwrap_or(257)
         .max(257);
     let hdist = dist_freq
         .iter()
@@ -635,7 +641,7 @@ fn encode_block(bw: &mut BitWriter, tokens: &[Token], raw: &[u8], is_final: bool
         .rev()
         .find(|&(_, &f)| f > 0)
         .map(|(i, _)| i + 1)
-        .unwrap()
+        .unwrap_or(1)
         .max(1);
 
     let dyn_lit_lengths = build_lengths(&lit_freq[..hlit], 15);

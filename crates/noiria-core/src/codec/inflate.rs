@@ -29,7 +29,8 @@ impl<'a> BitReader<'a> {
         }
         if self.pos + 8 <= self.data.len() {
             let bytes = (63 - self.nbits) >> 3;
-            let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+            let s = &self.data[self.pos..self.pos + 8];
+            let v = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
             let mask = (1u64 << (bytes * 8)) - 1;
             self.buf |= (v & mask) << self.nbits;
             self.pos += bytes as usize;
@@ -216,8 +217,8 @@ fn fixed_huffman() -> &'static (Huffman, Huffman) {
         ll[144..256].fill(9);
         ll[256..280].fill(7);
         ll[280..288].fill(8);
-        let litlen = Huffman::from_lengths(&ll).unwrap();
-        let dist = Huffman::from_lengths(&[5u8; 30]).unwrap();
+        let litlen = Huffman::from_lengths(&ll).expect("RFC 1951 固定 litlen ハフマン表は常に有効");
+        let dist = Huffman::from_lengths(&[5u8; 30]).expect("RFC 1951 固定 dist ハフマン表は常に有効");
         (litlen, dist)
     })
 }

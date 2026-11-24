@@ -15,11 +15,13 @@ use std::sync::Mutex;
 
 use log::{LevelFilter, Log, Metadata, Record};
 
+use crate::bridge::LockExt;
+
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// 現在ログの書き込み先（致命エラーダイアログで案内する）。
 pub fn log_path() -> Option<PathBuf> {
-    LOG_PATH.lock().unwrap().clone()
+    LOG_PATH.lock_unpoisoned().clone()
 }
 
 pub struct FileLogger {
@@ -29,7 +31,7 @@ pub struct FileLogger {
 
 fn open_append(path: &std::path::Path) -> Option<File> {
     let f = OpenOptions::new().create(true).append(true).open(path).ok()?;
-    *LOG_PATH.lock().unwrap() = Some(path.to_path_buf());
+    *LOG_PATH.lock_unpoisoned() = Some(path.to_path_buf());
     Some(f)
 }
 
@@ -57,7 +59,7 @@ impl FileLogger {
             return;
         }
         if let Some(f) = open_append(&dir.join("noiria.log")) {
-            *self.file.lock().unwrap() = Some(f);
+            *self.file.lock_unpoisoned() = Some(f);
         }
     }
 }
@@ -83,7 +85,7 @@ impl Log for FileLogger {
             record.target(),
             record.args()
         );
-        let mut guard = self.file.lock().unwrap();
+        let mut guard = self.file.lock_unpoisoned();
         match guard.as_mut() {
             Some(f) => {
                 let _ = f.write_all(line.as_bytes());
@@ -97,7 +99,7 @@ impl Log for FileLogger {
     }
 
     fn flush(&self) {
-        if let Some(f) = self.file.lock().unwrap().as_mut() {
+        if let Some(f) = self.file.lock_unpoisoned().as_mut() {
             let _ = f.flush();
         }
     }

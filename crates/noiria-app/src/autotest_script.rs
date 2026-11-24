@@ -120,7 +120,9 @@ fn parse_cmds(c: &mut Cursor, nested: bool, out: &mut Vec<Step>) -> Result<()> {
                 return Ok(());
             }
             Some(_) => {
-                let cmd = c.next().unwrap();
+                let Some(cmd) = c.next() else {
+                    unreachable!("peeked Some token");
+                };
                 match cmd.as_str() {
                     "wait" => {
                         let ms = c.num("wait", "ms")?;

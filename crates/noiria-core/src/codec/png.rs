@@ -45,7 +45,7 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     let mut idat_buf: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
-        let len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let ctype = &data[pos + 4..pos + 8];
         let body_start = pos + 8;
         ensure!(
@@ -60,8 +60,8 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
             b"IHDR" => {
                 ensure!(len == 13, "IHDR 長が不正");
                 let h = Ihdr {
-                    width: u32::from_be_bytes(body[0..4].try_into().unwrap()),
-                    height: u32::from_be_bytes(body[4..8].try_into().unwrap()),
+                    width: u32::from_be_bytes([body[0], body[1], body[2], body[3]]),
+                    height: u32::from_be_bytes([body[4], body[5], body[6], body[7]]),
                     bit_depth: body[8],
                     color_type: body[9],
                     interlace: body[12],

@@ -226,16 +226,19 @@ impl InputSync {
 /// order + channel 同期の推移的合成）。V8 はこのバリアを `PendingWaits` が 0
 /// より大きい（in-flight な仮想 `op_wait` がある）ときだけ使う（0 のとき無条件に
 /// 張ると、誰も起こしてくれないアイドル tick で毎回 `ACK_TIMEOUT` に到達する）。
-#[derive(Clone, Default)]
-pub struct TickSync {
-    requested: Arc<AtomicU64>,
-    completed: Arc<AtomicU64>,
-    wake_seq: Arc<AtomicU64>,
-    req_notify: Arc<(Mutex<()>, Condvar)>,
-    done_notify: Arc<(Mutex<()>, Condvar)>,
-    v8: Arc<Mutex<V8TickState>>,
-    deferred_count: Arc<AtomicI64>,
+#[derive(Default)]
+struct TickSyncInner {
+    requested: AtomicU64,
+    completed: AtomicU64,
+    wake_seq: AtomicU64,
+    req_notify: (Mutex<()>, Condvar),
+    done_notify: (Mutex<()>, Condvar),
+    v8: Mutex<V8TickState>,
+    deferred_count: AtomicI64,
 }
+
+#[derive(Clone, Default)]
+pub struct TickSync(Arc<TickSyncInner>);
 
 #[derive(Default)]
 struct V8TickState {
@@ -246,15 +249,7 @@ struct V8TickState {
 
 impl TickSync {
     pub fn new() -> Self {
-        Self {
-            requested: Arc::new(AtomicU64::new(0)),
-            completed: Arc::new(AtomicU64::new(0)),
-            wake_seq: Arc::new(AtomicU64::new(0)),
-            req_notify: Arc::new((Mutex::new(()), Condvar::new())),
-            done_notify: Arc::new((Mutex::new(()), Condvar::new())),
-            v8: Arc::new(Mutex::new(V8TickState::default())),
-            deferred_count: Arc::new(AtomicI64::new(0)),
-        }
+        Self(Arc::new(TickSyncInner::default()))
     }
 
     /// headless 側（tsint）: 新しい要求世代を返す（呼び出し側はこの値を
@@ -262,39 +257,39 @@ impl TickSync {
     /// **後**に呼ぶ（型のドキュメント参照。呼び出し順は `headless.rs` を参照し、
     /// 変更しないこと）。V8 は [`request_for`][Self::request_for] を使う。
     pub fn request(&self) -> u64 {
-        let gen = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
-        let _g = self.req_notify.0.lock_unpoisoned();
-        self.req_notify.1.notify_all();
+        let gen = self.0.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        let _g = self.0.req_notify.0.lock_unpoisoned();
+        self.0.req_notify.1.notify_all();
         gen
     }
 
     /// headless 側: 入力送信やトランジション完了などで tsint の待機ループを即座に起こす。
     pub fn notify_script(&self) {
-        self.wake_seq.fetch_add(1, Ordering::SeqCst);
-        let _g = self.req_notify.0.lock_unpoisoned();
-        self.req_notify.1.notify_all();
+        self.0.wake_seq.fetch_add(1, Ordering::SeqCst);
+        let _g = self.0.req_notify.0.lock_unpoisoned();
+        self.0.req_notify.1.notify_all();
     }
 
     /// tsint 側: `notify_script` の現在世代を読む。
     pub fn wake_generation(&self) -> u64 {
-        self.wake_seq.load(Ordering::SeqCst)
+        self.0.wake_seq.load(Ordering::SeqCst)
     }
 
     /// tsint 側（ヘッドレス `Intake::Direct` 用）: 新しい tick 要求または `notify_script` が
     /// 届くまで Condvar で待機する（従来の `thread::sleep(1ms)` ポーリングによる遅延を排除）。
     pub fn wait_for_request_or_wake(&self, seen_req: u64, seen_wake: u64, timeout: Duration) {
-        if self.requested.load(Ordering::SeqCst) > seen_req
-            || self.wake_seq.load(Ordering::SeqCst) > seen_wake
+        if self.0.requested.load(Ordering::SeqCst) > seen_req
+            || self.0.wake_seq.load(Ordering::SeqCst) > seen_wake
         {
             return;
         }
-        let guard = self.req_notify.0.lock_unpoisoned();
-        if self.requested.load(Ordering::SeqCst) > seen_req
-            || self.wake_seq.load(Ordering::SeqCst) > seen_wake
+        let guard = self.0.req_notify.0.lock_unpoisoned();
+        if self.0.requested.load(Ordering::SeqCst) > seen_req
+            || self.0.wake_seq.load(Ordering::SeqCst) > seen_wake
         {
             return;
         }
-        let _ = self.req_notify.1.wait_timeout(guard, timeout);
+        let _ = self.0.req_notify.1.wait_timeout(guard, timeout);
     }
 
     /// headless 側（V8 専用）: `Clock::advance()` の**前**に呼ぶ。`expected_reactors`
@@ -306,13 +301,13 @@ impl TickSync {
     /// `poll_event_loop` の Pending 検出だけでは正しく検出できないことは実測で確認
     /// 済み。`docs/implementation-notes.md`「2026-07-13 V8 完全決定論化」参照）。
     pub fn request_for(&self, expected_reactors: i64) -> u64 {
-        let mut state = self.v8.lock().unwrap();
-        let generation = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut state = self.0.v8.lock_unpoisoned();
+        let generation = self.0.requested.fetch_add(1, Ordering::SeqCst) + 1;
         state.generation = generation;
         state.remaining = expected_reactors.max(1);
         // タイムアウトで次世代へ進んだ場合、旧世代の保留反応を新しい残数へ適用しない。
         state.deferred = 0;
-        self.deferred_count.store(0, Ordering::SeqCst);
+        self.0.deferred_count.store(0, Ordering::SeqCst);
         generation
     }
 
@@ -320,7 +315,7 @@ impl TickSync {
     /// を読むことで対応する `Clock::advance()` を確実に観測する（型のドキュメント
     /// 参照）。
     pub fn requested_generation(&self) -> u64 {
-        self.requested.load(Ordering::SeqCst)
+        self.0.requested.load(Ordering::SeqCst)
     }
 
     /// スクリプトスレッド側（tsint の `drive()` のみ）: 指定した要求世代までの
@@ -329,10 +324,10 @@ impl TickSync {
     /// 「全 `op_wait` が反応し終わるまで待つ」保証が壊れるため、V8 からは
     /// 呼ばないこと）。
     pub fn mark_complete(&self, gen: u64) {
-        let prev = self.completed.fetch_max(gen, Ordering::SeqCst);
+        let prev = self.0.completed.fetch_max(gen, Ordering::SeqCst);
         if gen > prev {
-            let _g = self.done_notify.0.lock_unpoisoned();
-            self.done_notify.1.notify_all();
+            let _g = self.0.done_notify.0.lock_unpoisoned();
+            self.0.done_notify.1.notify_all();
         }
     }
 
@@ -345,7 +340,7 @@ impl TickSync {
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
     pub fn react(&self, gen: u64) {
         let complete = {
-            let mut state = self.v8.lock().unwrap();
+            let mut state = self.0.v8.lock_unpoisoned();
             if state.generation != gen {
                 return;
             }
@@ -362,26 +357,28 @@ impl TickSync {
     /// `poll_event_loop` がマイクロタスクを drain するまで反応を保留する。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
     pub fn defer_react(&self, gen: u64) {
-        let mut state = self.v8.lock().unwrap();
+        let mut state = self.0.v8.lock_unpoisoned();
         if state.generation != gen {
             return;
         }
         state.deferred += 1;
-        self.deferred_count.store(state.deferred, Ordering::SeqCst);
+        self.0
+            .deferred_count
+            .store(state.deferred, Ordering::SeqCst);
     }
 
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
     pub fn has_deferred_reactors(&self) -> bool {
-        self.deferred_count.load(Ordering::SeqCst) > 0
+        self.0.deferred_count.load(Ordering::SeqCst) > 0
     }
 
     /// V8 のイベントループが静止した後、期限到達 waiter の保留反応をまとめて適用する。
     #[cfg_attr(not(feature = "engine-v8"), allow(dead_code))]
     pub fn flush_deferred(&self) {
         let complete_generation = {
-            let mut state = self.v8.lock().unwrap();
+            let mut state = self.0.v8.lock_unpoisoned();
             let count = std::mem::take(&mut state.deferred);
-            self.deferred_count.store(0, Ordering::SeqCst);
+            self.0.deferred_count.store(0, Ordering::SeqCst);
             state.remaining -= count;
             (count > 0 && state.remaining <= 0).then_some(state.generation)
         };
@@ -392,7 +389,7 @@ impl TickSync {
 
     /// headless 側: 完了世代を読む。
     pub fn completed_generation(&self) -> u64 {
-        self.completed.load(Ordering::SeqCst)
+        self.0.completed.load(Ordering::SeqCst)
     }
 
     /// headless 側: `completed_generation() >= target_gen` になるまで `timeout` 上限で Condvar 待機する。
@@ -401,7 +398,7 @@ impl TickSync {
             return true;
         }
         let deadline = Instant::now() + timeout;
-        let mut guard = self.done_notify.0.lock_unpoisoned();
+        let mut guard = self.0.done_notify.0.lock_unpoisoned();
         while self.completed_generation() < target_gen {
             let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
@@ -410,6 +407,7 @@ impl TickSync {
                 return false;
             }
             let (g, _) = self
+                .0
                 .done_notify
                 .1
                 .wait_timeout(guard, rem)

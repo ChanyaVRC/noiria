@@ -157,7 +157,8 @@ fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32> {
         *pos + 4 <= data.len(),
         "wav-flac ヘッダが壊れています（範囲外読み取り）"
     );
-    let v = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    let b = &data[*pos..*pos + 4];
+    let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     *pos += 4;
     Ok(v)
 }

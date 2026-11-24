@@ -190,14 +190,14 @@ pub(super) fn next_video_pixmap(
 ) -> anyhow::Result<Option<Arc<Pixmap>>> {
     // Arc::get_mut は Scene や ComposeBufs のキャッシュが参照を手放した後にだけ Some を返すので、
     // Arc::ptr_eq ベースの差分検出と衝突せずバッファを再利用できる。
-    let mut reusable = recycle
+    let reusable = recycle
         .iter_mut()
         .position(|p| Arc::get_mut(p).is_some())
         .map(|i| recycle.swap_remove(i));
-    if let Some(ref mut arc) = reusable {
-        if let Some(pm) = Arc::get_mut(arc) {
+    if let Some(mut arc) = reusable {
+        if let Some(pm) = Arc::get_mut(&mut arc) {
             if !source.next_frame_into(&mut pm.data)? {
-                recycle.push(reusable.unwrap());
+                recycle.push(arc);
                 return Ok(None);
             }
             let (w, h) = (source.width(), source.height());
@@ -205,7 +205,7 @@ pub(super) fn next_video_pixmap(
             debug_assert!(pm.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
             pm.width = w;
             pm.height = h;
-            return Ok(reusable);
+            return Ok(Some(arc));
         }
     }
     let mut rgba = Vec::new();
@@ -420,8 +420,7 @@ pub(super) fn playback_loop(job: PlaybackJob) {
                 };
                 if discard_pending {
                     false
-                } else {
-                    let pixmap = pending_pixmap.as_ref().unwrap();
+                } else if let Some(pixmap) = pending_pixmap.as_ref() {
                     if let Some(layer) = sc.layer_mut(Page::Fore, id) {
                         layer.pixmap = Some(pixmap.clone());
                     }
@@ -444,6 +443,8 @@ pub(super) fn playback_loop(job: PlaybackJob) {
                         events.signal(VideoEventKind::Period);
                     }
                     true
+                } else {
+                    false
                 }
             }
         };
