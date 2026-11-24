@@ -5,7 +5,7 @@
 use anyhow::{bail, ensure, Context, Result};
 
 use super::deflate::zlib_compress;
-use super::inflate::zlib_decompress_limited;
+use super::inflate::zlib_decompress_limited_with_capacity;
 
 /// デコードを受け付ける最大画素数（8192x8192。RGBA で 256MB）。IHDR の 32bit 幅・高さが申告する
 /// だけで巨大な確保をさせない。
@@ -41,7 +41,8 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     let mut ihdr: Option<Ihdr> = None;
     let mut palette: Vec<[u8; 3]> = Vec::new();
     let mut trns: Vec<u8> = Vec::new();
-    let mut idat: Vec<u8> = Vec::new();
+    let mut first_idat: Option<&[u8]> = None;
+    let mut idat_buf: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
         let len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
@@ -74,11 +75,27 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
                 palette = body.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect();
             }
             b"tRNS" => trns = body.to_vec(),
-            b"IDAT" => idat.extend_from_slice(body),
+            b"IDAT" => {
+                if !idat_buf.is_empty() {
+                    idat_buf.extend_from_slice(body);
+                } else if let Some(prev_chunk) = first_idat {
+                    idat_buf.reserve(prev_chunk.len() + body.len());
+                    idat_buf.extend_from_slice(prev_chunk);
+                    idat_buf.extend_from_slice(body);
+                } else {
+                    first_idat = Some(body);
+                }
+            }
             b"IEND" => break,
             _ => {} // 補助チャンクは無視
         }
     }
+
+    let idat: &[u8] = if !idat_buf.is_empty() {
+        &idat_buf
+    } else {
+        first_idat.unwrap_or(&[])
+    };
 
     let ihdr = ihdr.context("IHDR がありません")?;
     ensure!(ihdr.interlace == 0, "インターレース PNG は非対応です");
@@ -107,8 +124,12 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     );
     let stride = w * channels;
     let expected = h * (stride + 1);
-    let raw = zlib_decompress_limited(&idat, expected.saturating_add(IDAT_SLACK))
-        .context("IDAT の展開に失敗")?;
+    let raw = zlib_decompress_limited_with_capacity(
+        idat,
+        expected.saturating_add(IDAT_SLACK),
+        expected,
+    )
+    .context("IDAT の展開に失敗")?;
     ensure!(
         raw.len() >= expected,
         "画像データが不足しています (期待 {} 実際 {})",
@@ -116,104 +137,68 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
         raw.len()
     );
 
-    // フィルタ解除
+    // フィルタ解除（直前行のコピー確保なし: split_at_mut で in-place 参照）
     let mut lines: Vec<u8> = vec![0; h * stride];
+    let zero_row = vec![0u8; stride];
     for y in 0..h {
         let src = &raw[y * (stride + 1)..(y + 1) * (stride + 1)];
         let filter = src[0];
         let row = &src[1..];
-        // 直前行のコピー（借用回避のため先に取り出す）
-        let prev: Vec<u8> = if y > 0 {
-            lines[(y - 1) * stride..y * stride].to_vec()
+        let (prev, dst): (&[u8], &mut [u8]) = if y == 0 {
+            (&zero_row, &mut lines[..stride])
         } else {
-            vec![0; stride]
+            let (before, after) = lines.split_at_mut(y * stride);
+            (&before[(y - 1) * stride..], &mut after[..stride])
         };
-        let dst = &mut lines[y * stride..(y + 1) * stride];
-        match filter {
-            0 => dst.copy_from_slice(row),
-            1 => {
-                // Sub
-                for i in 0..stride {
-                    let left = if i >= channels { dst[i - channels] } else { 0 };
-                    dst[i] = row[i].wrapping_add(left);
-                }
-            }
-            2 => {
-                // Up
-                for i in 0..stride {
-                    dst[i] = row[i].wrapping_add(prev[i]);
-                }
-            }
-            3 => {
-                // Average
-                for i in 0..stride {
-                    let left = if i >= channels {
-                        dst[i - channels] as u16
-                    } else {
-                        0
-                    };
-                    dst[i] = row[i].wrapping_add(((left + prev[i] as u16) / 2) as u8);
-                }
-            }
-            4 => {
-                // Paeth
-                for i in 0..stride {
-                    let a = if i >= channels {
-                        dst[i - channels] as i16
-                    } else {
-                        0
-                    };
-                    let b = prev[i] as i16;
-                    let c = if i >= channels {
-                        prev[i - channels] as i16
-                    } else {
-                        0
-                    };
-                    let p = a + b - c;
-                    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
-                    let pred = if pa <= pb && pa <= pc {
-                        a
-                    } else if pb <= pc {
-                        b
-                    } else {
-                        c
-                    } as u8;
-                    dst[i] = row[i].wrapping_add(pred);
-                }
-            }
-            f => bail!("非対応のフィルタタイプ: {f}"),
-        }
+        unfilter_row(filter, row, prev, channels, dst)?;
     }
 
     // RGBA へ変換
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    match ihdr.color_type {
+    let rgba = match ihdr.color_type {
         0 => {
-            for &g in &lines {
-                rgba.extend_from_slice(&[g, g, g, 255]);
+            let mut out = vec![0u8; w * h * 4];
+            for (dst, &g) in out.as_chunks_mut::<4>().0.iter_mut().zip(&lines) {
+                *dst = [g, g, g, 255];
             }
+            out
         }
         2 => {
-            for px in lines.as_chunks::<3>().0 {
-                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            let mut out = vec![0u8; w * h * 4];
+            for (dst, px) in out
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(lines.as_chunks::<3>().0)
+            {
+                *dst = [px[0], px[1], px[2], 255];
             }
+            out
         }
         3 => {
             ensure!(!palette.is_empty(), "パレットがありません");
-            for &idx in &lines {
+            let mut out = vec![0u8; w * h * 4];
+            for (dst, &idx) in out.as_chunks_mut::<4>().0.iter_mut().zip(&lines) {
                 let c = palette.get(idx as usize).context("パレット添字が範囲外")?;
                 let a = trns.get(idx as usize).copied().unwrap_or(255);
-                rgba.extend_from_slice(&[c[0], c[1], c[2], a]);
+                *dst = [c[0], c[1], c[2], a];
             }
+            out
         }
         4 => {
-            for px in lines.as_chunks::<2>().0 {
-                rgba.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
+            let mut out = vec![0u8; w * h * 4];
+            for (dst, px) in out
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(lines.as_chunks::<2>().0)
+            {
+                *dst = [px[0], px[0], px[0], px[1]];
             }
+            out
         }
-        6 => rgba = lines,
+        6 => lines,
         _ => unreachable!(),
-    }
+    };
 
     Ok(DecodedPng {
         width: ihdr.width,
@@ -222,74 +207,122 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
     })
 }
 
-/// 1 行に 5 種類のフィルタ (None/Sub/Up/Average/Paeth) を適用する。
-fn apply_filter(filter: u8, row: &[u8], prev: &[u8], channels: usize, out: &mut [u8]) {
+#[inline(always)]
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let a = a as i16;
+    let b = b as i16;
+    let c = c as i16;
+    let pa = (b - c).abs();
+    let pb = (a - c).abs();
+    let pc = (a + b - 2 * c).abs();
+    if pa <= pb && pa <= pc {
+        a as u8
+    } else if pb <= pc {
+        b as u8
+    } else {
+        c as u8
+    }
+}
+
+fn unfilter_row(filter: u8, row: &[u8], prev: &[u8], channels: usize, dst: &mut [u8]) -> Result<()> {
+    let stride = row.len();
     match filter {
-        0 => out.copy_from_slice(row),
+        0 => dst.copy_from_slice(row),
         1 => {
-            // Sub
-            for i in 0..row.len() {
-                let left = if i >= channels { row[i - channels] } else { 0 };
-                out[i] = row[i].wrapping_sub(left);
+            dst[..channels].copy_from_slice(&row[..channels]);
+            for i in channels..stride {
+                dst[i] = row[i].wrapping_add(dst[i - channels]);
             }
         }
         2 => {
-            // Up
-            for i in 0..row.len() {
-                out[i] = row[i].wrapping_sub(prev[i]);
+            for ((d, &r), &p) in dst.iter_mut().zip(row).zip(prev) {
+                *d = r.wrapping_add(p);
             }
         }
         3 => {
-            // Average
-            for i in 0..row.len() {
-                let left = if i >= channels {
-                    row[i - channels] as u16
-                } else {
-                    0
-                };
-                out[i] = row[i].wrapping_sub(((left + prev[i] as u16) / 2) as u8);
+            for i in 0..channels {
+                dst[i] = row[i].wrapping_add(prev[i] >> 1);
+            }
+            for i in channels..stride {
+                let avg = ((dst[i - channels] as u16 + prev[i] as u16) >> 1) as u8;
+                dst[i] = row[i].wrapping_add(avg);
             }
         }
         4 => {
-            // Paeth
-            for i in 0..row.len() {
-                let a = if i >= channels {
-                    row[i - channels] as i16
-                } else {
-                    0
-                };
-                let b = prev[i] as i16;
-                let c = if i >= channels {
-                    prev[i - channels] as i16
-                } else {
-                    0
-                };
-                let p = a + b - c;
-                let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
-                let pred = if pa <= pb && pa <= pc {
-                    a
-                } else if pb <= pc {
-                    b
-                } else {
-                    c
-                } as u8;
-                out[i] = row[i].wrapping_sub(pred);
+            for i in 0..channels {
+                dst[i] = row[i].wrapping_add(prev[i]);
+            }
+            for i in channels..stride {
+                dst[i] = row[i].wrapping_add(paeth(dst[i - channels], prev[i], prev[i - channels]));
+            }
+        }
+        f => bail!("非対応のフィルタタイプ: {f}"),
+    }
+    Ok(())
+}
+
+/// 1 行に 5 種類のフィルタ (None/Sub/Up/Average/Paeth) を適用しつつ MSAD コストも同時に計算する。
+fn apply_filter_and_msad(filter: u8, row: &[u8], prev: &[u8], channels: usize, out: &mut [u8]) -> u64 {
+    #[inline(always)]
+    fn cost_byte(b: u8) -> u64 {
+        (b as i8).unsigned_abs() as u64
+    }
+    let stride = row.len();
+    let mut sum = 0u64;
+    match filter {
+        0 => {
+            out.copy_from_slice(row);
+            for &b in row {
+                sum += cost_byte(b);
+            }
+        }
+        1 => {
+            for i in 0..channels {
+                let v = row[i];
+                out[i] = v;
+                sum += cost_byte(v);
+            }
+            for i in channels..stride {
+                let v = row[i].wrapping_sub(row[i - channels]);
+                out[i] = v;
+                sum += cost_byte(v);
+            }
+        }
+        2 => {
+            for ((o, &r), &p) in out.iter_mut().zip(row).zip(prev) {
+                let v = r.wrapping_sub(p);
+                *o = v;
+                sum += cost_byte(v);
+            }
+        }
+        3 => {
+            for i in 0..channels {
+                let v = row[i].wrapping_sub(prev[i] >> 1);
+                out[i] = v;
+                sum += cost_byte(v);
+            }
+            for i in channels..stride {
+                let avg = ((row[i - channels] as u16 + prev[i] as u16) >> 1) as u8;
+                let v = row[i].wrapping_sub(avg);
+                out[i] = v;
+                sum += cost_byte(v);
+            }
+        }
+        4 => {
+            for i in 0..channels {
+                let v = row[i].wrapping_sub(prev[i]);
+                out[i] = v;
+                sum += cost_byte(v);
+            }
+            for i in channels..stride {
+                let v = row[i].wrapping_sub(paeth(row[i - channels], prev[i], prev[i - channels]));
+                out[i] = v;
+                sum += cost_byte(v);
             }
         }
         _ => unreachable!(),
     }
-}
-
-/// MSAD (絶対値和最小) ヒューリスティクスでフィルタ後バイト列のコストを見積もる。
-/// フィルタ後バイトを符号付き差分とみなし (128 以上は 256 を引く)、絶対値の総和を取る。
-fn msad(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .map(|&b| {
-            let v = b as i32;
-            (if v < 128 { v } else { 256 - v }) as u64
-        })
-        .sum()
+    sum
 }
 
 /// straight RGBA8 から PNG の IDAT 生データ（フィルタタイプバイト + フィルタ後
@@ -298,14 +331,14 @@ fn build_filtered_raw(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     const CHANNELS: usize = 4;
     let stride = width as usize * CHANNELS;
     let mut raw = Vec::with_capacity(height as usize * (stride + 1));
-    let mut prev = vec![0u8; stride];
+    let zero_row = vec![0u8; stride];
+    let mut prev: &[u8] = &zero_row;
     let mut candidates: Vec<Vec<u8>> = (0..5).map(|_| vec![0u8; stride]).collect();
     for row in rgba.chunks_exact(stride) {
         let mut best = 0usize;
         let mut best_cost = u64::MAX;
         for (f, cand) in candidates.iter_mut().enumerate() {
-            apply_filter(f as u8, row, &prev, CHANNELS, cand);
-            let cost = msad(cand);
+            let cost = apply_filter_and_msad(f as u8, row, prev, CHANNELS, cand);
             if cost < best_cost {
                 best_cost = cost;
                 best = f;
@@ -313,7 +346,7 @@ fn build_filtered_raw(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         }
         raw.push(best as u8);
         raw.extend_from_slice(&candidates[best]);
-        prev.copy_from_slice(row);
+        prev = row;
     }
     raw
 }
@@ -346,10 +379,8 @@ fn write_chunk(out: &mut Vec<u8>, ctype: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     out.extend_from_slice(ctype);
     out.extend_from_slice(data);
-    let mut crc_input = Vec::with_capacity(4 + data.len());
-    crc_input.extend_from_slice(ctype);
-    crc_input.extend_from_slice(data);
-    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    let crc = crc32_update(crc32_update(0xFFFF_FFFF, ctype), data) ^ 0xFFFF_FFFF;
+    out.extend_from_slice(&crc.to_be_bytes());
 }
 
 /// zlib (RFC1950) ラッパで包んだ無圧縮 (stored ブロック) DEFLATE ストリームを作る。
@@ -377,23 +408,58 @@ fn zlib_compress_stored(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// slice-by-4 用 CRC32 テーブル (ITU-T V.42 反転多項式 0xEDB88320)。
+const CRC32_TABLES: [[u32; 256]; 4] = {
+    let mut t = [[0u32; 256]; 4];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut j = 1usize;
+    while j < 4 {
+        let mut i = 0usize;
+        while i < 256 {
+            let prev = t[j - 1][i];
+            t[j][i] = (prev >> 8) ^ t[0][(prev & 0xFF) as usize];
+            i += 1;
+        }
+        j += 1;
+    }
+    t
+};
+
+fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
+    let (chunks, rem) = data.as_chunks::<4>();
+    for &b in chunks {
+        crc ^= u32::from_le_bytes(b);
+        crc = CRC32_TABLES[3][(crc & 0xFF) as usize]
+            ^ CRC32_TABLES[2][((crc >> 8) & 0xFF) as usize]
+            ^ CRC32_TABLES[1][((crc >> 16) & 0xFF) as usize]
+            ^ CRC32_TABLES[0][(crc >> 24) as usize];
+    }
+    for &byte in rem {
+        crc = (crc >> 8) ^ CRC32_TABLES[0][((crc ^ byte as u32) & 0xFF) as usize];
+    }
+    crc
+}
+
 /// PNG チャンクの CRC32 (ITU-T V.42 多項式、反転版 0xEDB88320)。
 /// Ogg で使う CRC32 (`ogg.rs`) とは多項式が異なるため共用しない。
 /// W6: `pak.rs` の NPK1 エントリ整合性チェックが同じ多項式 (zip/PNG 系) を必要とするため
 /// `pub(crate)` にしてここから再利用している（テスト済みの実装を重複させないため）。
 pub(crate) fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc ^ 0xFFFF_FFFF
+    crc32_update(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF
 }
 
 #[cfg(test)]

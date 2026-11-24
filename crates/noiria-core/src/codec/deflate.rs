@@ -32,9 +32,66 @@ const CLEN_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
+const LENGTH_LUT: [u8; 259] = {
+    let mut t = [0u8; 259];
+    let mut i = 0usize;
+    while i < 29 {
+        let start = LENGTH_BASE[i] as usize;
+        let end = if i + 1 < 29 {
+            LENGTH_BASE[i + 1] as usize
+        } else {
+            259
+        };
+        let mut l = start;
+        while l < end {
+            t[l] = i as u8;
+            l += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+const DIST_LUT_LOW: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0usize;
+    while i < 16 {
+        let start = DIST_BASE[i] as usize - 1;
+        let end = DIST_BASE[i + 1] as usize - 1;
+        let mut d = start;
+        while d < end {
+            t[d] = i as u8;
+            d += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+const DIST_LUT_HIGH: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 16usize;
+    while i < 30 {
+        let start = (DIST_BASE[i] as usize - 1) >> 7;
+        let end = if i + 1 < 30 {
+            (DIST_BASE[i + 1] as usize - 1) >> 7
+        } else {
+            256
+        };
+        let mut d = start;
+        while d < end {
+            t[d] = i as u8;
+            d += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
 /// 長さ (3..=258) から (シンボル, 追加ビット数, 追加ビット値) を求める。
+#[inline(always)]
 fn length_code(len: usize) -> (u16, u8, u16) {
-    let i = LENGTH_BASE.partition_point(|&b| (b as usize) <= len) - 1;
+    let i = LENGTH_LUT[len] as usize;
     (
         257 + i as u16,
         LENGTH_EXTRA[i],
@@ -43,8 +100,14 @@ fn length_code(len: usize) -> (u16, u8, u16) {
 }
 
 /// 距離 (1..=32768) から (シンボル, 追加ビット数, 追加ビット値) を求める。
+#[inline(always)]
 fn dist_code(dist: usize) -> (u16, u8, u16) {
-    let i = DIST_BASE.partition_point(|&b| (b as usize) <= dist) - 1;
+    let d = dist - 1;
+    let i = if d < 256 {
+        DIST_LUT_LOW[d] as usize
+    } else {
+        DIST_LUT_HIGH[d >> 7] as usize
+    };
     (
         i as u16,
         DIST_EXTRA[i],
@@ -136,9 +199,20 @@ impl<'a> Lz77State<'a> {
             }
             // best_len 位置のバイトが一致しない候補は現在の最良を更新できないので
             // 全比較を省略する（zlib longest_match と同じ枝刈り）。
-            if self.data[c + best_len] == self.data[pos + best_len] {
-                let mut l = 0;
-                while l < limit && self.data[c + l] == self.data[pos + l] {
+            let d = self.data;
+            if d[c + best_len] == d[pos + best_len] && d[c] == d[pos] {
+                let mut l = 1usize;
+                while l + 8 <= limit {
+                    let a = u64::from_le_bytes(d[c + l..c + l + 8].try_into().unwrap());
+                    let b = u64::from_le_bytes(d[pos + l..pos + l + 8].try_into().unwrap());
+                    let diff = a ^ b;
+                    if diff != 0 {
+                        l += (diff.trailing_zeros() >> 3) as usize;
+                        break;
+                    }
+                    l += 8;
+                }
+                while l < limit && d[c + l] == d[pos + l] {
                     l += 1;
                 }
                 if l > best_len {
@@ -228,7 +302,7 @@ fn lz77_encode(data: &[u8]) -> Vec<Token> {
 
 struct BitWriter {
     out: Vec<u8>,
-    cur: u32,
+    cur: u64,
     nbits: u32,
 }
 
@@ -241,44 +315,41 @@ impl BitWriter {
         }
     }
 
-    /// LSB ファーストで n ビット書く（n <= 24）。DEFLATE の「符号以外」の
-    /// データ要素（extra bits・LEN/HLIT 等）はこの並びになる。
+    /// LSB ファーストで n ビット書く（n <= 32）。DEFLATE の「符号以外」の
+    /// データ要素（extra bits・LEN/HLIT 等）および反転済みハフマン符号はこの並びになる。
+    #[inline(always)]
     fn write_bits(&mut self, val: u32, n: u32) {
-        debug_assert!(n <= 24);
+        debug_assert!(n <= 32);
         if n == 0 {
             return;
         }
-        let mask = if n == 32 { u32::MAX } else { (1u32 << n) - 1 };
-        self.cur |= (val & mask) << self.nbits;
+        self.cur |= (val as u64) << self.nbits;
         self.nbits += n;
+        if self.nbits >= 32 {
+            self.out.extend_from_slice(&(self.cur as u32).to_le_bytes());
+            self.cur >>= 32;
+            self.nbits -= 32;
+        }
+    }
+
+    #[inline(always)]
+    fn write_bit(&mut self, b: u32) {
+        self.write_bits(b, 1);
+    }
+
+    /// 事前にビット反転済みのハフマン符号を書き込む。
+    #[inline(always)]
+    fn write_huffman_code(&mut self, rev_code: u16, len: u8) {
+        self.write_bits(rev_code as u32, len as u32);
+    }
+
+    /// 次のバイト境界へ 0 パディングする（stored ブロック用）。
+    fn align(&mut self) {
         while self.nbits >= 8 {
             self.out.push((self.cur & 0xFF) as u8);
             self.cur >>= 8;
             self.nbits -= 8;
         }
-    }
-
-    fn write_bit(&mut self, b: u32) {
-        self.write_bits(b, 1);
-    }
-
-    /// ハフマン符号は MSB ファーストで詰める (RFC1951 3.1.1) ので、符号語の
-    /// ビット順を反転させてから LSB ファーストで書く。
-    fn write_huffman_code(&mut self, code: u16, len: u8) {
-        if len == 0 {
-            return;
-        }
-        let mut c = code as u32;
-        let mut r = 0u32;
-        for _ in 0..len {
-            r = (r << 1) | (c & 1);
-            c >>= 1;
-        }
-        self.write_bits(r, len as u32);
-    }
-
-    /// 次のバイト境界へ 0 パディングする（stored ブロック用）。
-    fn align(&mut self) {
         if self.nbits > 0 {
             self.out.push((self.cur & 0xFF) as u8);
             self.cur = 0;
@@ -289,6 +360,11 @@ impl BitWriter {
     fn write_raw_byte(&mut self, b: u8) {
         debug_assert_eq!(self.nbits, 0);
         self.out.push(b);
+    }
+
+    fn write_raw_slice(&mut self, bytes: &[u8]) {
+        debug_assert_eq!(self.nbits, 0);
+        self.out.extend_from_slice(bytes);
     }
 
     fn finish(mut self) -> Vec<u8> {
@@ -327,73 +403,80 @@ fn build_lengths(freqs: &[u64], max_length: u8) -> Vec<u8> {
     let m = active.len();
     let max_len = max_length as usize;
 
-    #[derive(Clone)]
+    #[derive(Clone, Copy)]
     struct Pkg {
         weight: u64,
-        leaves: Vec<u32>, // active 内のインデックス集合（下位レベルの package を再帰的に展開したもの）
+        /// 0..m は葉 (active 内インデックス)、m.. は nodes 内の合成ノード
+        node: u32,
     }
 
-    // レベル1 = 各 leaf 単体（weight 昇順）。
     let leaves: Vec<Pkg> = (0..m)
         .map(|i| Pkg {
             weight: freqs[active[i]],
-            leaves: vec![i as u32],
+            node: i as u32,
         })
         .collect();
 
+    let mut nodes: Vec<(u32, u32)> = Vec::with_capacity(m * max_len);
     let mut list = leaves.clone();
+    let mut packaged = Vec::with_capacity(m);
+    let mut merged = Vec::with_capacity(2 * m);
     for _level in 2..=max_len {
-        // package: 隣接 2 件ずつ合成する（件数が奇数なら最後の 1 件は今回捨てる）。
         let usable = list.len() - (list.len() % 2);
-        let mut packaged: Vec<Pkg> = Vec::with_capacity(usable / 2);
+        packaged.clear();
         let mut i = 0;
         while i < usable {
-            let mut merged_leaves = list[i].leaves.clone();
-            merged_leaves.extend_from_slice(&list[i + 1].leaves);
+            let node_id = (m + nodes.len()) as u32;
+            nodes.push((list[i].node, list[i + 1].node));
             packaged.push(Pkg {
                 weight: list[i].weight + list[i + 1].weight,
-                leaves: merged_leaves,
+                node: node_id,
             });
             i += 2;
         }
-        // merge: packaged と leaves (フレッシュな leaf 単体) を weight 昇順に安定マージする。
-        let mut merged = Vec::with_capacity(packaged.len() + leaves.len());
+        merged.clear();
         let (mut pi, mut li) = (0usize, 0usize);
         while pi < packaged.len() && li < leaves.len() {
             if packaged[pi].weight <= leaves[li].weight {
-                merged.push(packaged[pi].clone());
+                merged.push(packaged[pi]);
                 pi += 1;
             } else {
-                merged.push(leaves[li].clone());
+                merged.push(leaves[li]);
                 li += 1;
             }
         }
         merged.extend_from_slice(&packaged[pi..]);
         merged.extend_from_slice(&leaves[li..]);
-        list = merged;
+        std::mem::swap(&mut list, &mut merged);
     }
 
-    // 最終レベルの重み最小 (2m-2) 件を選ぶ。各 leaf が選ばれた package に
-    // 含まれる回数がそのまま符号長になる（coin-collector の定理）。
+    // 最終レベルの重み最小 (2m-2) 件を選び、DAG を逆順に伝播して各葉の出現回数を集計する。
     let take = (2 * m - 2).min(list.len());
     debug_assert_eq!(
         take,
         2 * m - 2,
         "max_length が小さすぎて package-merge が完了できない"
     );
-    let mut count = vec![0u8; m];
+    let mut refs = vec![0u32; m + nodes.len()];
     for pkg in &list[..take] {
-        for &leaf in &pkg.leaves {
-            count[leaf as usize] += 1;
+        refs[pkg.node as usize] += 1;
+    }
+    for i in (0..nodes.len()).rev() {
+        let r = refs[m + i];
+        if r > 0 {
+            let (a, b) = nodes[i];
+            refs[a as usize] += r;
+            refs[b as usize] += r;
         }
     }
     for (i, &sym) in active.iter().enumerate() {
-        lengths[sym] = count[i];
+        lengths[sym] = refs[i] as u8;
     }
     lengths
 }
 
-/// 符号長配列から canonical Huffman の符号語を求める (RFC1951 3.2.2)。
+/// 符号長配列から canonical Huffman のビット反転済み符号語を求める (RFC1951 3.2.2)。
+/// 送信時に LSB ファーストの `write_bits` へそのまま渡せる形にしておく。
 fn build_codes(lengths: &[u8]) -> Vec<u16> {
     let mut bl_count = [0u32; 16];
     for &l in lengths {
@@ -410,8 +493,9 @@ fn build_codes(lengths: &[u8]) -> Vec<u16> {
     let mut codes = vec![0u16; lengths.len()];
     for (sym, &l) in lengths.iter().enumerate() {
         if l > 0 {
-            codes[sym] = next_code[l as usize] as u16;
+            let c = next_code[l as usize] as u16;
             next_code[l as usize] += 1;
+            codes[sym] = c.reverse_bits() >> (16 - l);
         }
     }
     codes
@@ -501,9 +585,7 @@ fn emit_stored_blocks(bw: &mut BitWriter, raw: &[u8], is_final: bool) {
         let nlen = !len;
         bw.write_raw_byte((nlen & 0xFF) as u8);
         bw.write_raw_byte((nlen >> 8) as u8);
-        for &b in chunk {
-            bw.write_raw_byte(b);
-        }
+        bw.write_raw_slice(chunk);
     }
 }
 

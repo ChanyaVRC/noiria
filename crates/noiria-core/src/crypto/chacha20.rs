@@ -6,58 +6,105 @@
 
 const CONSTANTS: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]; // "expand 32-byte k"
 
-/// RFC 8439 3.1 のクォーターラウンド。
-fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] ^= s[a];
-    s[d] = s[d].rotate_left(16);
+#[inline(always)]
+fn add4(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    [
+        a[0].wrapping_add(b[0]),
+        a[1].wrapping_add(b[1]),
+        a[2].wrapping_add(b[2]),
+        a[3].wrapping_add(b[3]),
+    ]
+}
 
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] ^= s[c];
-    s[b] = s[b].rotate_left(12);
+#[inline(always)]
+fn xor_rot4(a: [u32; 4], b: [u32; 4], r: u32) -> [u32; 4] {
+    [
+        (a[0] ^ b[0]).rotate_left(r),
+        (a[1] ^ b[1]).rotate_left(r),
+        (a[2] ^ b[2]).rotate_left(r),
+        (a[3] ^ b[3]).rotate_left(r),
+    ]
+}
 
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] ^= s[a];
-    s[d] = s[d].rotate_left(8);
+#[inline(always)]
+fn quarter_round_rows(r0: &mut [u32; 4], r1: &mut [u32; 4], r2: &mut [u32; 4], r3: &mut [u32; 4]) {
+    *r0 = add4(*r0, *r1);
+    *r3 = xor_rot4(*r3, *r0, 16);
+    *r2 = add4(*r2, *r3);
+    *r1 = xor_rot4(*r1, *r2, 12);
+    *r0 = add4(*r0, *r1);
+    *r3 = xor_rot4(*r3, *r0, 8);
+    *r2 = add4(*r2, *r3);
+    *r1 = xor_rot4(*r1, *r2, 7);
+}
 
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] ^= s[c];
-    s[b] = s[b].rotate_left(7);
+#[inline(always)]
+fn init_base(key: &[u8; 32], nonce: &[u8; 12]) -> [[u32; 4]; 4] {
+    [
+        CONSTANTS,
+        [
+            u32::from_le_bytes(key[0..4].try_into().unwrap()),
+            u32::from_le_bytes(key[4..8].try_into().unwrap()),
+            u32::from_le_bytes(key[8..12].try_into().unwrap()),
+            u32::from_le_bytes(key[12..16].try_into().unwrap()),
+        ],
+        [
+            u32::from_le_bytes(key[16..20].try_into().unwrap()),
+            u32::from_le_bytes(key[20..24].try_into().unwrap()),
+            u32::from_le_bytes(key[24..28].try_into().unwrap()),
+            u32::from_le_bytes(key[28..32].try_into().unwrap()),
+        ],
+        [
+            0,
+            u32::from_le_bytes(nonce[0..4].try_into().unwrap()),
+            u32::from_le_bytes(nonce[4..8].try_into().unwrap()),
+            u32::from_le_bytes(nonce[8..12].try_into().unwrap()),
+        ],
+    ]
+}
+
+#[inline(always)]
+fn block_rows(base: &[[u32; 4]; 4], counter: u32) -> [[u32; 4]; 4] {
+    let i0 = base[0];
+    let i1 = base[1];
+    let i2 = base[2];
+    let i3 = [counter, base[3][1], base[3][2], base[3][3]];
+    let (mut r0, mut r1, mut r2, mut r3) = (i0, i1, i2, i3);
+    for _ in 0..10 {
+        quarter_round_rows(&mut r0, &mut r1, &mut r2, &mut r3);
+        r1 = [r1[1], r1[2], r1[3], r1[0]];
+        r2 = [r2[2], r2[3], r2[0], r2[1]];
+        r3 = [r3[3], r3[0], r3[1], r3[2]];
+        quarter_round_rows(&mut r0, &mut r1, &mut r2, &mut r3);
+        r1 = [r1[3], r1[0], r1[1], r1[2]];
+        r2 = [r2[2], r2[3], r2[0], r2[1]];
+        r3 = [r3[1], r3[2], r3[3], r3[0]];
+    }
+    [
+        add4(r0, i0),
+        add4(r1, i1),
+        add4(r2, i2),
+        add4(r3, i3),
+    ]
+}
+
+#[inline(always)]
+fn rows_to_bytes(rows: &[[u32; 4]; 4]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, &w) in row.iter().enumerate() {
+            let p = (r * 4 + c) * 4;
+            out[p..p + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    out
 }
 
 /// ChaCha20 ブロック関数 (RFC 8439 2.3)。1 ブロック = 64 バイトのキーストリームを生成する。
 /// `key_check`（pak ヘッダの鍵検証値）が counter=0・nonce 全ゼロで直接呼ぶため公開している。
 pub fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> [u8; 64] {
-    let mut state = [0u32; 16];
-    state[0..4].copy_from_slice(&CONSTANTS);
-    for i in 0..8 {
-        state[4 + i] = u32::from_le_bytes(key[i * 4..i * 4 + 4].try_into().unwrap());
-    }
-    state[12] = counter;
-    for i in 0..3 {
-        state[13 + i] = u32::from_le_bytes(nonce[i * 4..i * 4 + 4].try_into().unwrap());
-    }
-    let initial = state;
-
-    for _ in 0..10 {
-        // 列ラウンド
-        quarter_round(&mut state, 0, 4, 8, 12);
-        quarter_round(&mut state, 1, 5, 9, 13);
-        quarter_round(&mut state, 2, 6, 10, 14);
-        quarter_round(&mut state, 3, 7, 11, 15);
-        // 対角ラウンド
-        quarter_round(&mut state, 0, 5, 10, 15);
-        quarter_round(&mut state, 1, 6, 11, 12);
-        quarter_round(&mut state, 2, 7, 8, 13);
-        quarter_round(&mut state, 3, 4, 9, 14);
-    }
-
-    let mut out = [0u8; 64];
-    for i in 0..16 {
-        let word = state[i].wrapping_add(initial[i]);
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    out
+    let base = init_base(key, nonce);
+    rows_to_bytes(&block_rows(&base, counter))
 }
 
 /// `data` を、ストリーム上のバイトオフセット `byte_offset` から始まる区間とみなして
@@ -73,19 +120,39 @@ pub fn apply_keystream(key: &[u8; 32], nonce: &[u8; 12], byte_offset: u64, data:
     if data.is_empty() {
         return;
     }
+    let base = init_base(key, nonce);
     let mut counter = (byte_offset / 64) as u32;
-    let mut intra = (byte_offset % 64) as usize;
+    let intra = (byte_offset % 64) as usize;
     let mut pos = 0usize;
-    while pos < data.len() {
-        let ks = block(key, nonce, counter);
-        let avail = 64 - intra;
-        let take = avail.min(data.len() - pos);
+
+    if intra != 0 {
+        let ks = rows_to_bytes(&block_rows(&base, counter));
+        let take = (64 - intra).min(data.len());
         for i in 0..take {
-            data[pos + i] ^= ks[intra + i];
+            data[i] ^= ks[intra + i];
         }
         pos += take;
         counter = counter.wrapping_add(1);
-        intra = 0;
+    }
+
+    let (chunks, rest) = data[pos..].as_chunks_mut::<64>();
+    for chunk in chunks {
+        let rows = block_rows(&base, counter);
+        for (r, row) in rows.iter().enumerate() {
+            for (c, &ks_w) in row.iter().enumerate() {
+                let p = (r * 4 + c) * 4;
+                let w = u32::from_le_bytes(chunk[p..p + 4].try_into().unwrap()) ^ ks_w;
+                chunk[p..p + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        counter = counter.wrapping_add(1);
+    }
+
+    if !rest.is_empty() {
+        let ks = rows_to_bytes(&block_rows(&base, counter));
+        for (d, &k) in rest.iter_mut().zip(&ks) {
+            *d ^= k;
+        }
     }
 }
 

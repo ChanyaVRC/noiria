@@ -1,13 +1,15 @@
 //! zlib (RFC1950) / DEFLATE (RFC1951) の自作デコーダ。
 //! 外部非依存化ロードマップの一歩目。PNG デコーダ (png.rs) が使う。
 
+use std::sync::OnceLock;
+
 use anyhow::{bail, ensure, Result};
 
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    bit: u32,
-    cur: u32,
+    buf: u64,
+    nbits: u32,
 }
 
 impl<'a> BitReader<'a> {
@@ -15,42 +17,73 @@ impl<'a> BitReader<'a> {
         Self {
             data,
             pos: 0,
-            bit: 0,
-            cur: 0,
+            buf: 0,
+            nbits: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn refill(&mut self) {
+        if self.nbits >= 56 {
+            return;
+        }
+        if self.pos + 8 <= self.data.len() {
+            let bytes = (63 - self.nbits) >> 3;
+            let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+            let mask = (1u64 << (bytes * 8)) - 1;
+            self.buf |= (v & mask) << self.nbits;
+            self.pos += bytes as usize;
+            self.nbits += bytes * 8;
+        } else {
+            while self.nbits <= 56 && self.pos < self.data.len() {
+                self.buf |= (self.data[self.pos] as u64) << self.nbits;
+                self.pos += 1;
+                self.nbits += 8;
+            }
         }
     }
 
     /// LSB ファーストで 1 ビット読む。
+    #[inline(always)]
     fn bit(&mut self) -> Result<u32> {
-        if self.bit == 0 {
-            ensure!(
-                self.pos < self.data.len(),
-                "DEFLATE ストリームが途中で終わっています"
-            );
-            self.cur = self.data[self.pos] as u32;
-            self.pos += 1;
-            self.bit = 8;
+        if self.nbits == 0 {
+            self.refill();
+            ensure!(self.nbits > 0, "DEFLATE ストリームが途中で終わっています");
         }
-        let b = self.cur & 1;
-        self.cur >>= 1;
-        self.bit -= 1;
+        let b = (self.buf & 1) as u32;
+        self.buf >>= 1;
+        self.nbits -= 1;
         Ok(b)
     }
 
+    #[inline(always)]
     fn bits(&mut self, n: u32) -> Result<u32> {
-        let mut v = 0u32;
-        for i in 0..n {
-            v |= self.bit()? << i;
+        if n == 0 {
+            return Ok(0);
         }
+        if self.nbits < n {
+            self.refill();
+            ensure!(self.nbits >= n, "DEFLATE ストリームが途中で終わっています");
+        }
+        let v = (self.buf & ((1u64 << n) - 1)) as u32;
+        self.buf >>= n;
+        self.nbits -= n;
         Ok(v)
     }
 
-    /// 次のバイト境界へ移動（stored ブロック用）。
+    /// 次のバイト境界へ移動し、バッファ済みバイトを `pos` へ戻す（stored ブロック用）。
     fn align(&mut self) {
-        self.bit = 0;
+        let drop = self.nbits & 7;
+        self.buf >>= drop;
+        self.nbits -= drop;
+        let rewind = (self.nbits >> 3) as usize;
+        self.pos -= rewind;
+        self.buf = 0;
+        self.nbits = 0;
     }
 
     fn read_u16le(&mut self) -> Result<u16> {
+        debug_assert_eq!(self.nbits, 0);
         ensure!(
             self.pos + 2 <= self.data.len(),
             "DEFLATE ストリームが途中で終わっています"
@@ -61,6 +94,7 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8]> {
+        debug_assert_eq!(self.nbits, 0);
         ensure!(
             self.pos + len <= self.data.len(),
             "DEFLATE ストリームが途中で終わっています"
@@ -71,8 +105,14 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// カノニカルハフマン表（puff.c 方式: 符号長ごとの個数 + シンボル列）。
+const FAST_BITS: u32 = 9;
+const FAST_SIZE: usize = 1 << FAST_BITS;
+const FAST_MASK: u64 = (FAST_SIZE as u64) - 1;
+
+/// カノニカルハフマン表（9bit 直接参照テーブル + 10..=15bit 用フォールバック）。
 struct Huffman {
+    /// 下位 8bit = 符号長 (0 なら未登録/10bit以上)、上位 = シンボル
+    fast: [u32; FAST_SIZE],
     count: [u16; 16],
     symbols: Vec<u16>,
 }
@@ -104,10 +144,53 @@ impl Huffman {
                 offs[l as usize] += 1;
             }
         }
-        Ok(Self { count, symbols })
+
+        // 9bit 以下の符号を LSB ファーストの高速テーブルに展開する。
+        let mut fast = [0u32; FAST_SIZE];
+        let mut code = 0u32;
+        let mut idx = 0usize;
+        for len in 1..=FAST_BITS {
+            let cnt = count[len as usize] as usize;
+            let step = 1usize << len;
+            for _ in 0..cnt {
+                let sym = symbols[idx] as u32;
+                idx += 1;
+                let rev = ((code as u16).reverse_bits() >> (16 - len)) as usize;
+                let entry = (sym << 8) | len;
+                let mut k = rev;
+                while k < FAST_SIZE {
+                    fast[k] = entry;
+                    k += step;
+                }
+                code += 1;
+            }
+            code <<= 1;
+        }
+
+        Ok(Self {
+            fast,
+            count,
+            symbols,
+        })
     }
 
+    #[inline(always)]
     fn decode(&self, br: &mut BitReader) -> Result<u16> {
+        if br.nbits < 15 {
+            br.refill();
+        }
+        let entry = self.fast[(br.buf & FAST_MASK) as usize];
+        let len = entry & 0xFF;
+        if len != 0 && br.nbits >= len {
+            br.buf >>= len;
+            br.nbits -= len;
+            return Ok((entry >> 8) as u16);
+        }
+        self.decode_slow(br)
+    }
+
+    #[cold]
+    fn decode_slow(&self, br: &mut BitReader) -> Result<u16> {
         let mut code = 0i32;
         let mut first = 0i32;
         let mut index = 0i32;
@@ -123,6 +206,20 @@ impl Huffman {
         }
         bail!("不正なハフマン符号");
     }
+}
+
+fn fixed_huffman() -> &'static (Huffman, Huffman) {
+    static FIXED: OnceLock<(Huffman, Huffman)> = OnceLock::new();
+    FIXED.get_or_init(|| {
+        let mut ll = [0u8; 288];
+        ll[0..144].fill(8);
+        ll[144..256].fill(9);
+        ll[256..280].fill(7);
+        ll[280..288].fill(8);
+        let litlen = Huffman::from_lengths(&ll).unwrap();
+        let dist = Huffman::from_lengths(&[5u8; 30]).unwrap();
+        (litlen, dist)
+    })
 }
 
 const LENGTH_BASE: [u16; 29] = [
@@ -171,9 +268,20 @@ fn inflate_block(
                     "展開後サイズが上限 {max_out} を超えます"
                 );
                 let start = out.len() - d;
-                for k in 0..len {
-                    let b = out[start + k];
-                    out.push(b);
+                if d >= len {
+                    out.extend_from_within(start..start + len);
+                } else if d == 1 {
+                    let b = out[start];
+                    out.resize(out.len() + len, b);
+                } else {
+                    let mut remaining = len;
+                    let mut copy_len = d;
+                    while remaining > 0 {
+                        let step = copy_len.min(remaining);
+                        out.extend_from_within(start..start + step);
+                        remaining -= step;
+                        copy_len += step;
+                    }
                 }
             }
             _ => bail!("不正なリテラル/長さシンボル: {sym}"),
@@ -189,8 +297,20 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
 /// 展開後サイズが `max_out` バイトを超えたら `Err` にする [`inflate`]（1032:1 に達する
 /// DEFLATE 爆弾で巨大確保させない）。期待サイズが分かる呼び出し側（PNG の IDAT、pak エントリ）が使う。
 pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
+    let hint = data.len().saturating_mul(3).min(max_out).min(4 << 20);
+    inflate_limited_with_capacity(data, max_out, hint)
+}
+
+pub(crate) fn inflate_limited_with_capacity(
+    data: &[u8],
+    max_out: usize,
+    capacity_hint: usize,
+) -> Result<Vec<u8>> {
     let mut br = BitReader::new(data);
-    let mut out = Vec::new();
+    let safe_cap = capacity_hint
+        .min(data.len().saturating_mul(16).max(4096))
+        .min(max_out);
+    let mut out = Vec::with_capacity(safe_cap);
     loop {
         let bfinal = br.bit()?;
         let btype = br.bits(2)?;
@@ -209,14 +329,8 @@ pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
             }
             1 => {
                 // 固定ハフマン
-                let mut ll = [0u8; 288];
-                ll[0..144].fill(8);
-                ll[144..256].fill(9);
-                ll[256..280].fill(7);
-                ll[280..288].fill(8);
-                let litlen = Huffman::from_lengths(&ll)?;
-                let dist = Huffman::from_lengths(&[5u8; 30])?;
-                inflate_block(&mut br, &mut out, max_out, &litlen, &dist)?;
+                let (litlen, dist) = fixed_huffman();
+                inflate_block(&mut br, &mut out, max_out, litlen, dist)?;
             }
             2 => {
                 // 動的ハフマン
@@ -228,9 +342,10 @@ pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
                     clen[CLEN_ORDER[i]] = br.bits(3)? as u8;
                 }
                 let cl_huff = Huffman::from_lengths(&clen)?;
-                let mut lengths = vec![0u8; hlit + hdist];
+                let mut lengths = [0u8; 286 + 32];
+                let total_lens = hlit + hdist;
                 let mut i = 0;
-                while i < hlit + hdist {
+                while i < total_lens {
                     let sym = cl_huff.decode(&mut br)?;
                     match sym {
                         0..=15 => {
@@ -241,11 +356,9 @@ pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
                             ensure!(i > 0, "repeat の先頭に前符号がありません");
                             let prev = lengths[i - 1];
                             let n = 3 + br.bits(2)? as usize;
-                            for _ in 0..n {
-                                ensure!(i < lengths.len(), "符号長の繰り返しが範囲外");
-                                lengths[i] = prev;
-                                i += 1;
-                            }
+                            ensure!(i + n <= total_lens, "符号長の繰り返しが範囲外");
+                            lengths[i..i + n].fill(prev);
+                            i += n;
                         }
                         17 => {
                             let n = 3 + br.bits(3)? as usize;
@@ -258,10 +371,10 @@ pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
                         _ => bail!("不正な符号長シンボル"),
                     }
                 }
-                ensure!(i == hlit + hdist, "符号長テーブルが範囲を超過");
+                ensure!(i == total_lens, "符号長テーブルが範囲を超過");
                 ensure!(lengths[256] != 0, "終端シンボルの符号がありません");
                 let litlen = Huffman::from_lengths(&lengths[..hlit])?;
-                let dist = Huffman::from_lengths(&lengths[hlit..])?;
+                let dist = Huffman::from_lengths(&lengths[hlit..total_lens])?;
                 inflate_block(&mut br, &mut out, max_out, &litlen, &dist)?;
             }
             _ => bail!("不正なブロックタイプ"),
@@ -276,7 +389,14 @@ pub fn adler32(data: &[u8]) -> u32 {
     let mut a: u32 = 1;
     let mut b: u32 = 0;
     for chunk in data.chunks(5552) {
-        for &x in chunk {
+        let (blocks, rem) = chunk.as_chunks::<16>();
+        for blk in blocks {
+            for &x in blk {
+                a += x as u32;
+                b += a;
+            }
+        }
+        for &x in rem {
             a += x as u32;
             b += a;
         }
@@ -293,6 +413,15 @@ pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>> {
 
 /// 展開後サイズが `max_out` バイトを超えたら `Err` にする [`zlib_decompress`]。
 pub fn zlib_decompress_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
+    let hint = data.len().saturating_mul(3).min(max_out).min(4 << 20);
+    zlib_decompress_limited_with_capacity(data, max_out, hint)
+}
+
+pub(crate) fn zlib_decompress_limited_with_capacity(
+    data: &[u8],
+    max_out: usize,
+    capacity_hint: usize,
+) -> Result<Vec<u8>> {
     ensure!(data.len() >= 6, "zlib ストリームが短すぎます");
     let cmf = data[0];
     let flg = data[1];
@@ -303,7 +432,7 @@ pub fn zlib_decompress_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
     );
     ensure!(flg & 0x20 == 0, "プリセット辞書は非対応");
     let body = &data[2..data.len() - 4];
-    let out = inflate_limited(body, max_out)?;
+    let out = inflate_limited_with_capacity(body, max_out, capacity_hint)?;
     let expected = u32::from_be_bytes([
         data[data.len() - 4],
         data[data.len() - 3],
