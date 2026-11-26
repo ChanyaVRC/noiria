@@ -65,6 +65,9 @@ pub enum TextAlign {
     Right,
 }
 
+/// `TextStyle::outline_width` の上限（px）。異常に大きな値によるグリフ単位の過大確保を防ぐ。
+pub const MAX_OUTLINE_WIDTH: u32 = 64;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TextStyle {
@@ -728,7 +731,7 @@ impl TextEngine {
                 // 同じ式のまま辻褄が合うように left=pad, top=height-pad を逆算しておく
                 // （Pass3 のコードは変更しない）。未キャッシュのパスは幅 0 で無視する。
                 if let Some(pixmap) = self.image_cache.get(img_path) {
-                    let pad = style.outline_width as i32;
+                    let pad = style.outline_width.min(MAX_OUTLINE_WIDTH) as i32;
                     let adv = pixmap.width as f32;
                     let top = pixmap.height as i32 - pad;
                     resolved.push(Resolved {
@@ -775,7 +778,7 @@ impl TextEngine {
                     seg_size,
                     fill,
                     seg_edge_color,
-                    style.outline_width,
+                    style.outline_width.min(MAX_OUTLINE_WIDTH),
                     seg_bold,
                 );
 
@@ -819,7 +822,7 @@ impl TextEngine {
             alignment_offsets(&line_chars, &placements, style.box_w as f32, style.align);
 
         // --- パス 3: 最終座標を確定し、box_h を超える行は切り捨てる。
-        let pad = style.outline_width as i32;
+        let pad = style.outline_width.min(MAX_OUTLINE_WIDTH) as i32;
         let mut glyphs = Vec::new();
         for (r, place) in resolved.into_iter().zip(placements) {
             let Some(pixmap) = r.pixmap else { continue };

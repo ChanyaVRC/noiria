@@ -131,12 +131,27 @@ pub fn parse_page(data: &[u8]) -> Result<(Page<'_>, usize)> {
 /// ファイル全体から、最初に現れる論理ストリーム（先頭ページの serial）のパケット列を
 /// 再構築する。戻り値は (serial, パケット列, 最終ページの granule_position)。
 pub fn extract_first_stream_packets(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i64)> {
+    let (serial, packets, last_granule, _) = extract_first_stream_packets_inner(data)?;
+    Ok((serial, packets, last_granule))
+}
+
+/// [`extract_first_stream_packets`] の EOS granule 付き版。EOS ページが存在した場合のみ
+/// `Some(eos_granule)` を返す（EOS の無い途中切れストリームでは `None`）。
+pub(crate) fn extract_first_stream_packets_with_eos(
+    data: &[u8],
+) -> Result<(u32, Vec<Vec<u8>>, Option<i64>)> {
+    let (serial, packets, last_granule, saw_eos) = extract_first_stream_packets_inner(data)?;
+    Ok((serial, packets, saw_eos.then_some(last_granule)))
+}
+
+fn extract_first_stream_packets_inner(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i64, bool)> {
     let mut pos = 0usize;
     let mut target_serial: Option<u32> = None;
     let mut packets: Vec<Vec<u8>> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut have_pending = false;
     let mut last_granule = 0i64;
+    let mut saw_eos = false;
 
     while pos < data.len() {
         let (page, consumed) = parse_page(&data[pos..])?;
@@ -183,6 +198,7 @@ pub fn extract_first_stream_packets(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i
 
         if page.eos() {
             last_granule = page.granule_position;
+            saw_eos = true;
             break;
         }
         last_granule = page.granule_position;
@@ -193,7 +209,14 @@ pub fn extract_first_stream_packets(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i
     }
 
     let serial = target_serial.context("Ogg ページが見つかりません")?;
-    Ok((serial, packets, last_granule))
+    Ok((serial, packets, last_granule, saw_eos))
+}
+
+/// パケット本体と、そのパケットを完結させたページの granule / EOS 情報。
+pub struct OggPacket {
+    pub data: Vec<u8>,
+    pub granule_position: i64,
+    pub eos: bool,
 }
 
 /// `OggPacketReader::seek_to_bookmark` で戻るための位置情報。
@@ -201,6 +224,8 @@ pub fn extract_first_stream_packets(data: &[u8]) -> Result<(u32, Vec<Vec<u8>>, i
 pub struct OggBookmark {
     pub(crate) byte_offset: u64,
     packets_to_skip: usize,
+    /// ストリーム先頭からの絶対パケット数（`seek_to_bookmark` で `packets_yielded` を復元する）。
+    packets_yielded: usize,
     target_serial: Option<u32>,
     eos_reached: bool,
 }
@@ -343,6 +368,11 @@ impl<R: Read> OggPacketReader<R> {
 
     /// 次のパケットを返す。ストリーム終端 (EOS / EOF) に達したら `Ok(None)`。
     pub fn next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+        Ok(self.next_packet_with_info()?.map(|p| p.data))
+    }
+
+    /// 次のパケットを、完結ページの granule_position / EOS フラグ付きで返す。
+    pub fn next_packet_with_info(&mut self) -> Result<Option<OggPacket>> {
         loop {
             while self.seg_idx < self.seg_count {
                 let seg = self.page_buf[27 + self.seg_idx] as usize;
@@ -354,7 +384,11 @@ impl<R: Read> OggPacketReader<R> {
                 if seg < 255 {
                     self.have_pending = false;
                     self.packets_yielded += 1;
-                    return Ok(Some(std::mem::take(&mut self.pending)));
+                    return Ok(Some(OggPacket {
+                        data: std::mem::take(&mut self.pending),
+                        granule_position: self.last_granule,
+                        eos: self.page_eos,
+                    }));
                 }
             }
 
@@ -363,7 +397,11 @@ impl<R: Read> OggPacketReader<R> {
                 if self.have_pending && !self.pending.is_empty() {
                     self.have_pending = false;
                     self.packets_yielded += 1;
-                    return Ok(Some(std::mem::take(&mut self.pending)));
+                    return Ok(Some(OggPacket {
+                        data: std::mem::take(&mut self.pending),
+                        granule_position: self.last_granule,
+                        eos: self.page_eos,
+                    }));
                 }
                 return Ok(None);
             }
@@ -373,7 +411,11 @@ impl<R: Read> OggPacketReader<R> {
                 if self.have_pending && !self.pending.is_empty() {
                     self.have_pending = false;
                     self.packets_yielded += 1;
-                    return Ok(Some(std::mem::take(&mut self.pending)));
+                    return Ok(Some(OggPacket {
+                        data: std::mem::take(&mut self.pending),
+                        granule_position: self.last_granule,
+                        eos: self.page_eos,
+                    }));
                 }
                 return Ok(None);
             }
@@ -390,6 +432,7 @@ impl<R: Read + Seek> OggPacketReader<R> {
             Ok(OggBookmark {
                 byte_offset: self.reader.stream_position()?,
                 packets_to_skip: 0,
+                packets_yielded: self.packets_yielded,
                 target_serial: self.target_serial,
                 eos_reached: self.page_eos || self.eos_reached,
             })
@@ -397,6 +440,7 @@ impl<R: Read + Seek> OggPacketReader<R> {
             Ok(OggBookmark {
                 byte_offset: 0,
                 packets_to_skip: self.packets_yielded,
+                packets_yielded: 0,
                 target_serial: None,
                 eos_reached: false,
             })
@@ -413,7 +457,8 @@ impl<R: Read + Seek> OggPacketReader<R> {
         self.eos_reached = bm.eos_reached;
         self.pending.clear();
         self.have_pending = false;
-        self.packets_yielded = 0;
+        self.packets_yielded = bm.packets_yielded;
+        self.last_granule = 0;
         for _ in 0..bm.packets_to_skip {
             let _ = self.next_packet()?;
         }
@@ -613,6 +658,48 @@ mod tests {
             got_real.push(p);
         }
         assert_eq!(got_real, expected_real);
+    }
+
+    #[test]
+    fn mid_page_bookmark_after_page_boundary_seek_preserves_position() {
+        let mut stream = Vec::new();
+        // Page 0: single packet "p0" (page boundary after reading p0)
+        stream.extend(build_page(0x02, 0, 42, 0, &[2], b"p0"));
+        // Page 1: three packets "p1", "p2", "p3" on one page
+        let mut body1 = Vec::new();
+        body1.extend_from_slice(b"p1");
+        body1.extend_from_slice(b"p2");
+        body1.extend_from_slice(b"p3");
+        stream.extend(build_page(0x04, 100, 42, 1, &[2, 2, 2], &body1));
+
+        let mut r = OggPacketReader::new(std::io::Cursor::new(&stream));
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p0");
+        let page_bm = r.bookmark().unwrap();
+        assert!(page_bm.byte_offset() > 0);
+
+        // Read to end, then seek back to the page-boundary bookmark.
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p1");
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p2");
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p3");
+        assert!(r.next_packet().unwrap().is_none());
+
+        r.seek_to_bookmark(&page_bm).unwrap();
+        // Read p1 (now mid-page on page 1) and take a fallback bookmark.
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p1");
+        let mid_bm = r.bookmark().unwrap();
+        assert_eq!(mid_bm.byte_offset(), 0);
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p2");
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p3");
+        assert!(r.next_packet().unwrap().is_none());
+
+        // Seeking to the mid-page bookmark must resume at p2 (not p1!).
+        r.seek_to_bookmark(&mid_bm).unwrap();
+        let pkt2 = r.next_packet_with_info().unwrap().unwrap();
+        assert_eq!(pkt2.data, b"p2");
+        assert!(pkt2.eos);
+        assert_eq!(pkt2.granule_position, 100);
+        assert_eq!(r.next_packet().unwrap().unwrap(), b"p3");
+        assert!(r.next_packet().unwrap().is_none());
     }
     // --- 破壊 fuzz（R1）: Ogg/Vorbis ---
 

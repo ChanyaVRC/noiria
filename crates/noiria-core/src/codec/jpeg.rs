@@ -114,7 +114,12 @@ struct Huffman {
 }
 
 impl Huffman {
-    fn new(counts: &[u8; 16], values: Vec<u8>) -> Self {
+    fn new(counts: &[u8; 16], values: Vec<u8>) -> Result<Self> {
+        let mut left = 1i32;
+        for &c in counts {
+            left = (left << 1) - c as i32;
+            ensure!(left >= 0, "DHT の符号割当が過剰です");
+        }
         let mut fast = [0u16; FAST_SIZE];
         let mut mincode = [0i32; 17];
         let mut maxcode = [-1i32; 17];
@@ -141,13 +146,13 @@ impl Huffman {
             maxcode[len] = code - 1;
             code <<= 1;
         }
-        Self {
+        Ok(Self {
             fast,
             mincode,
             maxcode,
             valptr,
             values,
-        }
+        })
     }
 
     #[inline(always)]
@@ -356,7 +361,7 @@ pub fn decode_into(data: &[u8], rgba: &mut Vec<u8>) -> Result<(u32, u32)> {
                     let total: usize = counts.iter().map(|&c| c as usize).sum();
                     ensure!(p + 17 + total <= seg.len(), "DHT が短すぎます");
                     let values = seg[p + 17..p + 17 + total].to_vec();
-                    let table = Huffman::new(&counts, values);
+                    let table = Huffman::new(&counts, values)?;
                     if class == 0 {
                         dc_tables[id] = Some(table);
                     } else {
@@ -887,5 +892,15 @@ mod tests {
         // 輝度 1x1、クロマ 2x2（仕様上は合法）。輝度プレーンを px / py で直接引くと範囲外になる。
         let odd = decode(&flat_jpeg([0x11, 0x22, 0x22])).unwrap();
         assert_eq!(odd.rgba.len(), 16 * 16 * 4);
+    }
+
+    #[test]
+    fn overallocated_dht_is_error_not_panic() {
+        // 278-byte payload: SOI + DHT declaring 255 1-bit codes + 255 symbol values.
+        let mut payload = vec![0xFF, 0xD8, 0xFF, 0xC4, 0x01, 0x12, 0x00, 0xFF];
+        payload.extend_from_slice(&[0u8; 15]);
+        payload.extend_from_slice(&[0u8; 255]);
+        assert_eq!(payload.len(), 278);
+        assert!(decode(&payload).is_err());
     }
 }

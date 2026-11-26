@@ -5,7 +5,7 @@ use deno_core::{op2, OpState};
 use deno_error::JsErrorBox;
 
 use crate::script::engine_state::{BlitClip, EngineState, ImageLoadOpts, LayerProps, MoveArgs};
-use crate::script::numconv::{to_i32, to_time_ms, to_u32, to_u8};
+use crate::script::numconv::{to_coord, to_i32, to_time_ms, to_u32, to_u8};
 use crate::script::util::err;
 
 #[op2(fast)]
@@ -326,7 +326,7 @@ pub(crate) fn op_layer_blit_image(
 ) -> Result<(), JsErrorBox> {
     state
         .borrow::<EngineState>()
-        .layer_blit_image(to_u32(id), page, &path, to_i32(dx), to_i32(dy), clip)
+        .layer_blit_image(to_u32(id), page, &path, to_coord(dx), to_coord(dy), clip)
         .map_err(err)
 }
 
@@ -335,7 +335,7 @@ pub(crate) fn op_layer_blit_image(
 pub(crate) fn op_quake(state: &mut OpState, ax: f64, ay: f64, ms: f64) {
     state
         .borrow::<EngineState>()
-        .quake(to_i32(ax), to_i32(ay), to_u32(ms));
+        .quake(to_coord(ax), to_coord(ay), to_u32(ms));
 }
 
 /// [stopquake]（W5）: 画面揺れを即座に停止する。

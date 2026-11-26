@@ -23,8 +23,26 @@ fn override_dir() -> Option<PathBuf> {
     })
 }
 
-/// %APPDATA%\Noiria\<game_id>\save\（`--save-dir` / 環境変数 `NOIRIA_SAVE_DIR` 指定時はそのディレクトリ）
+/// `game.json` の `id`（セーブディレクトリ名）の最大長（バイト）。
+pub const MAX_GAME_ID_LEN: usize = 128;
+
+/// `game.json` の `id` を検証する。パストラバーサル（`..`・区切り文字・制御文字等）を防ぐ。
+pub fn validate_game_id(game_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !game_id.is_empty()
+            && game_id.len() <= MAX_GAME_ID_LEN
+            && game_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "不正なゲーム ID: {game_id:?}（1..={MAX_GAME_ID_LEN} 文字の英数字・'_'・'-' のみ使用できます）"
+    );
+    Ok(())
+}
+
+/// `<ProjectDirs::data_dir()>/save/`（Windows は `%APPDATA%\Noiria\<game_id>\data\save\`、
+/// `--save-dir` / 環境変数 `NOIRIA_SAVE_DIR` 指定時はそのディレクトリ）
 pub fn save_dir(game_id: &str) -> Result<PathBuf> {
+    validate_game_id(game_id)?;
     if let Some(dir) = override_dir() {
         fs::create_dir_all(&dir)?;
         return Ok(dir);
@@ -251,6 +269,30 @@ mod tests {
         assert!(write_slot(TEST_ID, "a/b", "{}").is_err());
         assert!(write_slot(TEST_ID, "a\\b", "{}").is_err());
         assert!(read_slot(TEST_ID, "..").is_err());
+    }
+
+    #[test]
+    fn rejects_bad_game_ids() {
+        let too_long = "a".repeat(MAX_GAME_ID_LEN + 1);
+        for bad in [
+            "",
+            "..",
+            ".",
+            "../../evil",
+            r"..\..\evil",
+            "a/b",
+            r"a\b",
+            "C:evil",
+            "bad\0id",
+            "bad\nid",
+            "space id",
+            too_long.as_str(),
+        ] {
+            assert!(validate_game_id(bad).is_err(), "{bad:?}");
+            assert!(save_dir(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_game_id("noiria-demo_01").is_ok());
+        assert!(validate_game_id(&"a".repeat(MAX_GAME_ID_LEN)).is_ok());
     }
 
     /// [erasebookmark]（W7）が使う真の削除。存在しないスロットの削除は no-op で、

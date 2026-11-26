@@ -132,12 +132,21 @@ fn fill_flat(s: &PanelSpec, out: &mut Pixmap) {
 }
 
 /// パネルを描いた Pixmap を返す。w/h が 0 なら空（pad のみ）の Pixmap。
-pub fn render_panel(s: &PanelSpec) -> Pixmap {
-    let ow = s.w + s.pad * 2;
-    let oh = s.h + s.pad * 2;
-    let mut out = Pixmap::new(ow, oh);
+/// 出力寸法 `(w + 2*pad) x (h + 2*pad)` が [`crate::pixmap::checked_dims`] の上限を超える場合は `Err`。
+pub fn render_panel(s: &PanelSpec) -> Result<Pixmap, String> {
+    let pad2 = s
+        .pad
+        .checked_mul(2)
+        .ok_or_else(|| "パネルの余白が大きすぎます".to_string())?;
+    let ow =
+        s.w.checked_add(pad2)
+            .ok_or_else(|| "パネルの幅が大きすぎます".to_string())?;
+    let oh =
+        s.h.checked_add(pad2)
+            .ok_or_else(|| "パネルの高さが大きすぎます".to_string())?;
+    let mut out = Pixmap::try_new(ow, oh)?;
     if s.w == 0 || s.h == 0 {
-        return out;
+        return Ok(out);
     }
     let hx = s.w as f32 / 2.0;
     let hy = s.h as f32 / 2.0;
@@ -148,7 +157,7 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
     let has_shadow = s.shadow_blur > 0.0 && s.shadow_alpha > 0.0 && s.pad > 0;
     if r <= 0.0 && !has_border && !has_shadow {
         fill_flat(s, &mut out);
-        return out;
+        return Ok(out);
     }
 
     // 内側フラット領域（cov==1, inner==1, ring==0, sa==0 が確実に成立する矩形）:
@@ -301,7 +310,7 @@ pub fn render_panel(s: &PanelSpec) -> Pixmap {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -333,7 +342,7 @@ mod tests {
 
     #[test]
     fn solid_rect_fills_exactly() {
-        let p = render_panel(&spec(8, 6));
+        let p = render_panel(&spec(8, 6)).unwrap();
         assert_eq!((p.width, p.height), (8, 6));
         for y in 0..6 {
             for x in 0..8 {
@@ -347,7 +356,7 @@ mod tests {
         let mut s = spec(4, 100);
         s.top = [255, 255, 255, 0];
         s.bottom = [255, 255, 255, 255];
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert!(px(&p, 1, 0)[3] < 6, "上端はほぼ透明");
         assert!(px(&p, 1, 99)[3] > 249, "下端はほぼ不透明");
         let mid = px(&p, 1, 50);
@@ -365,7 +374,7 @@ mod tests {
         s.top = [255, 255, 255, 0];
         s.bottom = [255, 255, 255, 200];
         s.ramp = 40.0;
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert!(px(&p, 1, 0)[3] < 3);
         assert_eq!(px(&p, 1, 40)[3], 200, "ramp の終わりで bottom に達する");
         assert_eq!(px(&p, 1, 99)[3], 200, "以降は単色");
@@ -379,7 +388,7 @@ mod tests {
         s.top = [0, 0, 0, 255];
         s.bottom = [255, 255, 255, 255];
         s.horizontal = true;
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert!(px(&p, 2, 1)[0] < 10);
         assert!(px(&p, 97, 1)[0] > 245);
     }
@@ -388,7 +397,7 @@ mod tests {
     fn rounded_corners_are_transparent_and_antialiased() {
         let mut s = spec(40, 40);
         s.radius = 16.0;
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert_eq!(px(&p, 0, 0)[3], 0, "角は抜ける");
         assert_eq!(px(&p, 20, 20), [200, 100, 50, 255]);
         // 角の円弧付近には 0 < a < 255 の画素がある
@@ -410,7 +419,7 @@ mod tests {
         s.border = [255, 255, 255, 255];
         s.border_w = 2.0;
         s.radius = 6.0;
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert_eq!(px(&p, 15, 0), [255, 255, 255, 255], "上辺は枠線");
         assert_eq!(px(&p, 0, 15), [255, 255, 255, 255], "左辺は枠線");
         assert_eq!(px(&p, 15, 15), [200, 100, 50, 255], "中は塗り");
@@ -423,7 +432,7 @@ mod tests {
         s.shadow_blur = 12.0;
         s.shadow_alpha = 0.6;
         s.shadow_dy = 4.0;
-        let p = render_panel(&s);
+        let p = render_panel(&s).unwrap();
         assert_eq!((p.width, p.height), (52, 52));
         // 本体の内側は塗りのまま（影が透けて色が変わらない）
         assert_eq!(px(&p, 26, 26), [200, 100, 50, 255]);
@@ -458,14 +467,14 @@ mod tests {
             variants.push(s);
         }
         for s in variants {
-            let fast = render_panel(&s);
+            let fast = render_panel(&s).unwrap();
             // 角丸の半径をほぼ 0 にして一般経路を強制する（半径が 0 のときだけ高速経路に入る）
             let mut g = PanelSpec {
                 radius: 1e-7,
                 ..s.clone()
             };
             g.border_w = 0.0;
-            let slow = render_panel(&g);
+            let slow = render_panel(&g).unwrap();
             assert_eq!((fast.width, fast.height), (slow.width, slow.height));
             assert_eq!(
                 fast.data, slow.data,
@@ -621,7 +630,23 @@ mod tests {
             },
         ];
         for (idx, s) in cases.iter().enumerate() {
-            assert_eq!(render_panel(s).data, render_naive(s).data, "case {idx}");
+            assert_eq!(
+                render_panel(s).unwrap().data,
+                render_naive(s).data,
+                "case {idx}"
+            );
         }
+    }
+
+    #[test]
+    fn oversized_panel_dims_return_err_without_allocating() {
+        let mut s = spec(4096, 4096);
+        s.pad = 4096; // 12288x12288x4 (~604 MiB) > MAX_BYTES (256 MiB)
+        let r = crate::test_support::with_alloc_limit(1 << 20, || render_panel(&s));
+        assert!(r.is_err());
+
+        let mut overflow = spec(u32::MAX, 10);
+        overflow.pad = u32::MAX;
+        assert!(render_panel(&overflow).is_err());
     }
 }

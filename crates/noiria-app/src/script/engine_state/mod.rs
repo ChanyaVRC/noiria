@@ -21,7 +21,7 @@ use noiria_core::scene::{
     natural_spline_segments, CropTween, Layer, LayerKind, Page, Scene, TextContent, TextReveal,
     Tween, Waypoint,
 };
-use noiria_core::text::{GlyphRect, TextSegment, TextStyle};
+use noiria_core::text::{GlyphRect, TextSegment, TextStyle, MAX_OUTLINE_WIDTH};
 use noiria_core::transition::{TransMethod, Transition};
 use tokio::sync::Notify;
 
@@ -393,7 +393,7 @@ impl EngineState {
         let p = match cached {
             Some(p) => p,
             None => {
-                let p = Arc::new(noiria_core::uiraster::render_panel(&spec));
+                let p = Arc::new(noiria_core::uiraster::render_panel(&spec)?);
                 self.ui_cache
                     .lock_unpoisoned()
                     .panels
@@ -761,7 +761,8 @@ impl EngineState {
 
     // ---- テキスト ----
 
-    pub(crate) fn text_style(&mut self, id: u32, style: TextStyle) {
+    pub(crate) fn text_style(&mut self, id: u32, mut style: TextStyle) {
+        style.outline_width = style.outline_width.min(MAX_OUTLINE_WIDTH);
         log_op!(
             self,
             "text_style {id} align={:?} line_height={} font_family={}",

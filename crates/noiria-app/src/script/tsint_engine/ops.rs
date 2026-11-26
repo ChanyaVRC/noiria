@@ -32,6 +32,9 @@ impl<'a> Args<'a> {
     fn i32(self, i: usize) -> i32 {
         as_i32(self.val(i))
     }
+    fn coord(self, i: usize) -> i32 {
+        as_coord(self.val(i))
+    }
     fn u8(self, i: usize) -> u8 {
         as_u8(self.val(i))
     }
@@ -272,11 +275,11 @@ const ES_OPS: &[(&str, usize, EsFn)] = &[
     }),
     ("op_layer_blit_image", 6, |es, vm, a| {
         let clip = blit_clip_from_value(vm, a.val(5))?;
-        let r = es.layer_blit_image(a.u32(0), &a.str(1), &a.str(2), a.i32(3), a.i32(4), clip);
+        let r = es.layer_blit_image(a.u32(0), &a.str(1), &a.str(2), a.coord(3), a.coord(4), clip);
         unit(vm, r)
     }),
     ("op_quake", 3, |es, _, a| {
-        es.quake(a.i32(0), a.i32(1), a.u32(2));
+        es.quake(a.coord(0), a.coord(1), a.u32(2));
         ok_undef()
     }),
     ("op_quake_stop", 0, |es, _, _| {

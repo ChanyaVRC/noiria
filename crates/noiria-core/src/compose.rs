@@ -100,7 +100,7 @@ fn ensure_surface(buf: &mut Pixmap, w: u32, h: u32) {
 /// ページ内容が時刻依存（リベール進行中/quake 中）かどうか。
 /// 時刻依存ならページ合成をキャッシュできない。
 fn pages_time_dependent(scene: &Scene, now: Instant) -> bool {
-    if scene.quake.is_some() {
+    if scene.is_quake_active(now) {
         return true;
     }
     scene.fore.values().chain(scene.back.values()).any(|l| {
@@ -167,10 +167,11 @@ fn quake_offset(scene: &Scene, now: Instant) -> (i32, i32) {
     let Some(&(ax, ay, start, ms)) = scene.quake.as_deref() else {
         return (0, 0);
     };
-    let elapsed = now.duration_since(start).as_millis() as u32;
-    if elapsed >= ms {
+    let elapsed_ms = now.duration_since(start).as_millis();
+    if elapsed_ms >= ms as u128 {
         return (0, 0);
     }
+    let elapsed = elapsed_ms as u32;
     // 減衰付きの擬似ランダム揺れ（決定的）
     let t = elapsed as f32 / 1000.0;
     let decay = 1.0 - (elapsed as f32 / ms as f32);
@@ -536,5 +537,53 @@ mod tests {
         let p = px(&out, 0, 0);
         assert!((p[0] as i32 - 128).abs() <= 2);
         assert!((p[2] as i32 - 127).abs() <= 2);
+    }
+
+    #[test]
+    fn expired_quake_allows_transition_page_caching() {
+        let mut scene = Scene::new(4, 4);
+        let id = scene.alloc_layer(LayerKind::Image);
+        {
+            let l = scene.layer_mut(Page::Fore, id).unwrap();
+            l.pixmap = Some(solid(4, 4, [255, 0, 0, 255]));
+            l.visible = true;
+        }
+        {
+            let l = scene.layer_mut(Page::Back, id).unwrap();
+            l.pixmap = Some(solid(4, 4, [0, 0, 255, 255]));
+            l.visible = true;
+        }
+        let start = Instant::now();
+        scene.quake = Some(Box::new((8, 8, start, 100)));
+        scene.transition = Some(Box::new(Transition {
+            method: TransMethod::Crossfade,
+            start,
+            duration: Duration::from_millis(500),
+            skip: false,
+        }));
+
+        let mut bufs = ComposeBufs::new(4, 4);
+        let mut out = Pixmap::new(4, 4);
+
+        // While quake is active, page synthesis cannot be cached.
+        let during_quake = start + Duration::from_millis(50);
+        assert!(pages_time_dependent(&scene, during_quake));
+        compose_frame(&scene, during_quake, &mut bufs, &mut out);
+        assert_eq!(bufs.cached_revision, None);
+
+        // Once quake expires (even before settle_finished_tweens clears it), caching resumes.
+        let after_quake = start + Duration::from_millis(200);
+        assert!(!pages_time_dependent(&scene, after_quake));
+        compose_frame(&scene, after_quake, &mut bufs, &mut out);
+        assert_eq!(bufs.cached_revision, Some(scene.revision));
+
+        // Second frame during the same transition reuses cached_revision.
+        compose_frame(
+            &scene,
+            start + Duration::from_millis(250),
+            &mut bufs,
+            &mut out,
+        );
+        assert_eq!(bufs.cached_revision, Some(scene.revision));
     }
 }

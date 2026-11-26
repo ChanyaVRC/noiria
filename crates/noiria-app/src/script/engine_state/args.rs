@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 #[cfg(feature = "engine-v8")]
-use noiria_core::text::{LocateArgs, TextAlign};
+use noiria_core::text::{LocateArgs, TextAlign, MAX_OUTLINE_WIDTH};
 use noiria_core::text::{TextEngine, TextSegment, TextStyle};
 #[cfg(feature = "engine-v8")]
 use serde::{Deserialize, Serialize};
@@ -146,7 +146,7 @@ impl TextStyleArgs {
             s.outline_color = rgba_u8(v);
         }
         if let Some(v) = self.outline_width {
-            s.outline_width = v;
+            s.outline_width = v.min(MAX_OUTLINE_WIDTH);
         }
         if let Some(v) = self.box_w {
             s.box_w = v;

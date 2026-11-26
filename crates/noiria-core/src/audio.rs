@@ -435,6 +435,7 @@ pub struct StreamingVorbisSource<R> {
     frame_upper_bound: Option<u64>,
     pcm_buf: Vec<f32>,
     pcm_pos: usize,
+    decoded_frames: u64,
     ended: bool,
     has_any_samples: bool,
 }
@@ -468,6 +469,7 @@ impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
             frame_upper_bound,
             pcm_buf: Vec::new(),
             pcm_pos: 0,
+            decoded_frames: 0,
             ended: false,
             has_any_samples: false,
         };
@@ -478,12 +480,26 @@ impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
         Ok(src)
     }
 
+    fn apply_eos_granule_trim(&mut self, eos: bool, granule: i64) {
+        let ch = self.decoder.channels().max(1) as usize;
+        let frames = (self.pcm_buf.len() / ch) as u64;
+        if eos && granule > 0 {
+            let avail = (granule as u64).saturating_sub(self.decoded_frames);
+            if frames > avail {
+                self.pcm_buf.truncate(avail as usize * ch);
+            }
+        }
+        self.decoded_frames += (self.pcm_buf.len() / ch) as u64;
+    }
+
     fn prime_first_pcm(&mut self) -> Result<()> {
         loop {
-            match self.ogg.next_packet()? {
+            match self.ogg.next_packet_with_info()? {
                 Some(pkt) => {
                     self.pcm_buf.clear();
-                    self.decoder.decode_packet_into(&pkt, &mut self.pcm_buf)?;
+                    self.decoder
+                        .decode_packet_into(&pkt.data, &mut self.pcm_buf)?;
+                    self.apply_eos_granule_trim(pkt.eos, pkt.granule_position);
                     if !self.pcm_buf.is_empty() {
                         self.pcm_pos = 0;
                         return Ok(());
@@ -502,11 +518,15 @@ impl<R: Read + Seek + Send> StreamingVorbisSource<R> {
             return false;
         }
         loop {
-            match self.ogg.next_packet() {
+            match self.ogg.next_packet_with_info() {
                 Ok(Some(pkt)) => {
                     self.pcm_buf.clear();
-                    match self.decoder.decode_packet_into(&pkt, &mut self.pcm_buf) {
+                    match self
+                        .decoder
+                        .decode_packet_into(&pkt.data, &mut self.pcm_buf)
+                    {
                         Ok(()) => {
+                            self.apply_eos_granule_trim(pkt.eos, pkt.granule_position);
                             if !self.pcm_buf.is_empty() {
                                 self.pcm_pos = 0;
                                 return true;
@@ -594,6 +614,7 @@ impl<R: Read + Seek + Send> PcmSource for StreamingVorbisSource<R> {
         self.decoder.reset();
         self.pcm_buf.clear();
         self.pcm_pos = 0;
+        self.decoded_frames = 0;
         self.ended = false;
         true
     }
@@ -763,10 +784,11 @@ fn run(
     let (mixer_tx, mixer_rx) = crossbeam_channel::bounded::<Arc<Mutex<Mixer>>>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_render = stop.clone();
+    let shared_render = shared.clone();
 
     let render_thread = std::thread::Builder::new()
         .name("noiria-audio-render".into())
-        .spawn(move || run_render_thread(open, init_tx, mixer_rx, stop_render, cfg))
+        .spawn(move || run_render_thread(open, init_tx, mixer_rx, stop_render, shared_render, cfg))
         .expect("オーディオ描画スレッドの起動に失敗");
 
     let Ok((channels, sample_rate, has_device)) = init_rx.recv() else {
@@ -815,11 +837,25 @@ fn make_fill(
     })
 }
 
+fn lock_mixer(mixer: &Mutex<Mixer>) -> std::sync::MutexGuard<'_, Mixer> {
+    mixer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn mix_locked(mixer: &Mutex<Mixer>, buf: &mut [f32]) {
-    if let Ok(mut m) = mixer.lock() {
-        m.mix_into(buf);
-    } else {
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lock_mixer(mixer).mix_into(buf);
+    }));
+    if res.is_err() {
+        log::error!(
+            "オーディオミキサ内でパニックが発生しました（全チャンネルを停止して続行します）"
+        );
         buf.fill(0.0);
+        let mut m = lock_mixer(mixer);
+        for ch in 0..NUM_SLOTS {
+            m.stop(ch, 0);
+        }
     }
 }
 
@@ -908,6 +944,34 @@ fn run_null_sink(
     }
 }
 
+struct RenderExitGuard {
+    stop: Arc<AtomicBool>,
+    shared: Arc<AudioShared>,
+    mixer: Option<Arc<Mutex<Mixer>>>,
+}
+
+impl Drop for RenderExitGuard {
+    fn drop(&mut self) {
+        if !self.stop.load(Ordering::Relaxed) {
+            log::error!(
+                "オーディオ描画スレッドが予期せず終了しました（全チャンネルの再生状態を解除します）"
+            );
+            if let Some(mixer) = &self.mixer {
+                let mut m = lock_mixer(mixer);
+                for ch in 0..NUM_SLOTS {
+                    m.stop(ch, 0);
+                }
+                sync_shared(&self.shared, &m);
+            } else {
+                for ch in 0..NUM_SLOTS {
+                    self.shared.set_playing(ch, false);
+                    self.shared.set_fading(ch, false);
+                }
+            }
+        }
+    }
+}
+
 /// 出力デバイスの open + 再生ループ。出力が失敗・消失したら null シンクでミキサを
 /// 消費しつつ、バックオフ付きで既定デバイスを開き直す（`stop` まで終わらない）。
 /// 最初に開けるかどうかにかかわらず、先頭で `(channels, rate, デバイスあり)` を
@@ -917,8 +981,14 @@ fn run_render_thread(
     init_tx: crossbeam_channel::Sender<(u16, u32, bool)>,
     mixer_rx: Receiver<Arc<Mutex<Mixer>>>,
     stop: Arc<AtomicBool>,
+    shared: Arc<AudioShared>,
     cfg: RenderConfig,
 ) {
+    let mut exit_guard = RenderExitGuard {
+        stop: stop.clone(),
+        shared,
+        mixer: None,
+    };
     let mut device = match open() {
         Ok(d) => Some(d),
         Err(e) => {
@@ -936,6 +1006,7 @@ fn run_render_thread(
         return;
     }
     let Ok(mixer) = mixer_rx.recv() else { return };
+    exit_guard.mixer = Some(mixer.clone());
 
     let mut backoff = cfg.initial_backoff;
     while !stop.load(Ordering::Relaxed) {
@@ -1079,11 +1150,10 @@ impl CommandProcessor {
                 request_id,
             } => {
                 self.pending[ch] = None;
-                if let Ok(mut m) = self.mixer.lock() {
-                    m.stop(ch, fade_out_ms);
-                    self.shared
-                        .acknowledge_stop_requested(ch, request_id, m.is_playing(ch));
-                }
+                let mut m = lock_mixer(&self.mixer);
+                m.stop(ch, fade_out_ms);
+                self.shared
+                    .acknowledge_stop_requested(ch, request_id, m.is_playing(ch));
             }
             AudioCmd::SetVolume { ch, .. }
             | AudioCmd::Pause { ch }
@@ -1091,8 +1161,8 @@ impl CommandProcessor {
             | AudioCmd::FadeTo { ch, .. } => {
                 if let Some(pending) = &mut self.pending[ch] {
                     pending.deferred.push(cmd);
-                } else if let Ok(mut m) = self.mixer.lock() {
-                    apply_channel_cmd(&mut m, cmd);
+                } else {
+                    apply_channel_cmd(&mut lock_mixer(&self.mixer), cmd);
                 }
             }
             AudioCmd::Quit => unreachable!(),
@@ -1150,11 +1220,7 @@ impl CommandProcessor {
         let Some(pending) = self.pending[ch].take() else {
             return;
         };
-        let Ok(mut m) = self.mixer.lock() else {
-            self.shared
-                .acknowledge_play_requested(ch, pending.request_id, 0);
-            return;
-        };
+        let mut m = lock_mixer(&self.mixer);
         match done.result {
             Ok((prepared, effective_looping)) => {
                 m.play_prepared(
@@ -1186,9 +1252,7 @@ impl CommandProcessor {
     }
 
     fn sync(&self) {
-        if let Ok(m) = self.mixer.lock() {
-            sync_shared(&self.shared, &m);
-        }
+        sync_shared(&self.shared, &lock_mixer(&self.mixer));
     }
 
     /// デコード待ちの要求が無くなるまで待つ（テスト用）。
@@ -1603,8 +1667,9 @@ mod tests {
             let (mixer_tx, mixer_rx) = crossbeam_channel::bounded(1);
             let stop = Arc::new(AtomicBool::new(false));
             let stop2 = stop.clone();
+            let shared = Arc::new(AudioShared::default());
             let thread = std::thread::spawn(move || {
-                run_render_thread(open, init_tx, mixer_rx, stop2, TEST_CFG)
+                run_render_thread(open, init_tx, mixer_rx, stop2, shared, TEST_CFG)
             });
             let (ch, rate, has_device) = init_rx.recv().unwrap();
             let mixer = Arc::new(Mutex::new(Mixer::new(ch, rate)));
@@ -2441,5 +2506,212 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn build_ogg_page(
+        header_type: u8,
+        granule: i64,
+        serial: u32,
+        seq: u32,
+        segments: &[u8],
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"OggS");
+        v.push(0);
+        v.push(header_type);
+        v.extend_from_slice(&granule.to_le_bytes());
+        v.extend_from_slice(&serial.to_le_bytes());
+        v.extend_from_slice(&seq.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(segments.len() as u8);
+        v.extend_from_slice(segments);
+        v.extend_from_slice(body);
+        let mut reg = 0u32;
+        for &b in &v {
+            reg ^= (b as u32) << 24;
+            for _ in 0..8 {
+                if reg & 0x8000_0000 != 0 {
+                    reg = (reg << 1) ^ 0x04c1_1db7;
+                } else {
+                    reg <<= 1;
+                }
+            }
+        }
+        v[22..26].copy_from_slice(&reg.to_le_bytes());
+        v
+    }
+
+    fn build_ogg_with_eos_granule(packets: &[Vec<u8>], serial: u32, eos_granule: i64) -> Vec<u8> {
+        let lacing = |p: &[u8]| -> Vec<u8> {
+            let mut v = vec![255u8; p.len() / 255];
+            v.push((p.len() % 255) as u8);
+            v
+        };
+        let mut out = Vec::new();
+        for (seq, p) in packets[..3].iter().enumerate() {
+            let flag = if seq == 0 { 0x02 } else { 0 };
+            out.extend(build_ogg_page(flag, 0, serial, seq as u32, &lacing(p), p));
+        }
+        let audio = &packets[3..];
+        let split = audio.len() / 2;
+        let (mut segs1, mut body1) = (Vec::new(), Vec::new());
+        for p in &audio[..split] {
+            segs1.extend(lacing(p));
+            body1.extend_from_slice(p);
+        }
+        out.extend(build_ogg_page(0x00, -1, serial, 3, &segs1, &body1));
+        let (mut segs2, mut body2) = (Vec::new(), Vec::new());
+        for p in &audio[split..] {
+            segs2.extend(lacing(p));
+            body2.extend_from_slice(p);
+        }
+        out.extend(build_ogg_page(0x04, eos_granule, serial, 4, &segs2, &body2));
+        out
+    }
+
+    #[test]
+    fn vorbis_eos_granule_trims_trailing_samples_and_wraps_cleanly_on_loop() {
+        let path = vectors_dir().join("mono2_abashed_en.ogg");
+        if !path.exists() {
+            return;
+        }
+        let full = std::fs::read(&path).unwrap();
+        let (serial, all_packets, _) =
+            crate::codec::ogg::extract_first_stream_packets(&full).unwrap();
+        let subset = &all_packets[..13]; // 3 headers + 10 audio packets
+
+        let raw = crate::codec::vorbis::decode_packets(subset).unwrap();
+        let ch = raw.channels as usize;
+        let raw_frames = raw.samples.len() / ch;
+        assert!(raw_frames > 200);
+        let trim_frames = raw_frames - 137;
+
+        let trimmed_ogg = build_ogg_with_eos_granule(subset, serial, trim_frames as i64);
+        let decoded = crate::codec::vorbis::decode(&trimmed_ogg).unwrap();
+        assert_eq!(decoded.samples.len(), trim_frames * ch);
+        assert_eq!(decoded.samples, raw.samples[..trim_frames * ch]);
+
+        let mut src = StreamingVorbisSource::new(std::io::Cursor::new(&trimmed_ogg)).unwrap();
+        let pass1 = drain_source(&mut src, &[13, 256, 77]);
+        assert_eq!(pass1.len(), trim_frames * ch);
+        assert_eq!(
+            pass1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            decoded
+                .samples
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>()
+        );
+
+        // Rewind resets decoded_frames and wraps seamlessly at the exact trimmed length.
+        assert!(src.rewind());
+        let pass2 = drain_source(&mut src, &[64, 512]);
+        assert_eq!(pass2.len(), trim_frames * ch);
+        assert_eq!(
+            pass2.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            pass1.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+
+        // Synthetic streams with granule <= 0 skip trimming.
+        for no_trim in [0i64, -1] {
+            let synthetic = build_ogg_with_eos_granule(subset, serial, no_trim);
+            let dec = crate::codec::vorbis::decode(&synthetic).unwrap();
+            assert_eq!(dec.samples.len(), raw.samples.len());
+            let mut s = StreamingVorbisSource::new(std::io::Cursor::new(&synthetic)).unwrap();
+            assert_eq!(drain_source(&mut s, &[512]).len(), raw.samples.len());
+        }
+    }
+
+    #[test]
+    fn poisoned_mixer_mutex_still_syncs_and_clears_playing_state() {
+        let mixer = Arc::new(Mutex::new(Mixer::new(1, 1000)));
+        let shared = Arc::new(AudioShared::default());
+        {
+            let mut m = mixer.lock().unwrap();
+            m.play(CH_BGM, finite_sound(100, 1000, 0.5), false, 1.0, 0);
+            sync_shared(&shared, &m);
+        }
+        assert!(shared.is_playing(CH_BGM));
+
+        // Poison the mixer mutex from another thread while holding it.
+        let mixer_poison = mixer.clone();
+        let _ = std::thread::spawn(move || {
+            let mut guard = mixer_poison.lock().unwrap();
+            guard.stop(CH_BGM, 0);
+            panic!("simulated mixer panic");
+        })
+        .join();
+        assert!(mixer.is_poisoned());
+
+        let processor = CommandProcessor::new(
+            mixer.clone(),
+            shared.clone(),
+            1,
+            1000,
+            GameDir::for_test(std::env::temp_dir()),
+            Arc::new(|_, _, _, _, _| bail!("unused")),
+        );
+        processor.sync();
+        assert!(
+            !shared.is_playing(CH_BGM),
+            "毒化後も sync が shared.playing を更新して解除すること"
+        );
+
+        // mix_locked also recovers without panicking.
+        let mut buf = [1.0f32; 8];
+        mix_locked(&mixer, &mut buf);
+        assert_eq!(buf, [0.0; 8]);
+    }
+
+    #[test]
+    fn unexpected_render_thread_panic_clears_shared_playing_flags() {
+        struct PanicDevice;
+        impl OutputDevice for PanicDevice {
+            fn channels(&self) -> u16 {
+                1
+            }
+            fn sample_rate(&self) -> u32 {
+                1000
+            }
+            fn run(
+                self: Box<Self>,
+                _stop: &AtomicBool,
+                _fill: &mut dyn FnMut(&mut [f32]),
+            ) -> Result<()> {
+                panic!("simulated render thread panic");
+            }
+        }
+
+        let (init_tx, init_rx) = crossbeam_channel::bounded(1);
+        let (mixer_tx, mixer_rx) = crossbeam_channel::bounded(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(AudioShared::default());
+        let shared_render = shared.clone();
+        let stop_render = stop.clone();
+        let thread = std::thread::spawn(move || {
+            run_render_thread(
+                Box::new(|| Ok(Box::new(PanicDevice) as Box<dyn OutputDevice>)),
+                init_tx,
+                mixer_rx,
+                stop_render,
+                shared_render,
+                TEST_CFG,
+            );
+        });
+        let (ch, rate, _) = init_rx.recv().unwrap();
+        let mixer = Arc::new(Mutex::new(Mixer::new(ch, rate)));
+        {
+            let mut m = mixer.lock().unwrap();
+            m.play(CH_VOICE, finite_sound(1000, rate, 0.5), false, 1.0, 0);
+            sync_shared(&shared, &m);
+        }
+        assert!(shared.is_playing(CH_VOICE));
+        mixer_tx.send(mixer).unwrap();
+        assert!(thread.join().is_err());
+        assert!(
+            !shared.is_playing(CH_VOICE),
+            "render スレッド異常終了時に playing が解除されること"
+        );
     }
 }

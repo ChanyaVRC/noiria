@@ -1878,3 +1878,96 @@ fn layer_load_image_evicts_lru_when_images_cache_exceeds_capacity() {
     drop(cache);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn looping_zero_frame_video_terminates_instead_of_busy_spinning() {
+    struct EmptyVideo {
+        seeks: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl noiria_core::codec::video::VideoSource for EmptyVideo {
+        fn width(&self) -> u32 {
+            1
+        }
+        fn height(&self) -> u32 {
+            1
+        }
+        fn fps(&self) -> f32 {
+            30.0
+        }
+        fn next_frame(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn rewind(&mut self) -> anyhow::Result<()> {
+            self.seek_frame(0)
+        }
+        fn seek_frame(&mut self, _index: usize) -> anyhow::Result<()> {
+            self.seeks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let dir = temp_game_dir("video-zero-frame-loop-test");
+    let mut es = make_engine_state(&dir);
+    let id = es.layer_new("image").unwrap();
+    let seeks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    es.spawn_video_playback(
+        id,
+        Box::new(EmptyVideo {
+            seeks: seeks.clone(),
+        }),
+        true,
+        0,
+        Arc::new(Mutex::new(PlaybackControl::default())),
+        Arc::new(Mutex::new(VideoEvents::default())),
+    );
+    wait_until(Duration::from_secs(2), || !es.video_is_playing());
+    assert_eq!(seeks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn layer_panel_rejects_oversized_dims_and_text_style_clamps_outline_width() {
+    let dir = temp_game_dir("bounds-guards-test");
+    let mut es = make_engine_state(&dir);
+    let id = es.layer_new("image").unwrap();
+
+    // w=4096, h=4096, pad=4096 -> 12288x12288x4 > MAX_BYTES: must return Err.
+    let mut spec = vec![0.0f64; 22];
+    spec[0] = 4096.0;
+    spec[1] = 4096.0;
+    spec[19] = 4096.0;
+    assert!(es.layer_panel(id, "fore", &spec).is_err());
+
+    let text_id = es.layer_new("text").unwrap();
+    let style = noiria_core::text::TextStyle {
+        outline_width: 999_999,
+        ..Default::default()
+    };
+    es.text_style(text_id, style);
+    assert_eq!(
+        es.texts.layers[&text_id].style.outline_width,
+        noiria_core::text::MAX_OUTLINE_WIDTH
+    );
+
+    // layer_blit_image with extreme clip.y and dx/dy must not panic.
+    let mut img = Pixmap::new(4, 4);
+    img.fill([100, 150, 200, 255]);
+    save_png(&img, &dir.join("dot.png")).unwrap();
+    es.layer_fill(id, "fore", 4, 4, 0, 0, 0, 255).unwrap();
+    es.layer_blit_image(
+        id,
+        "fore",
+        "dot.png",
+        i32::MAX,
+        i32::MAX,
+        Some(BlitClip {
+            x: 0,
+            y: u32::MAX,
+            w: 4,
+            h: 4,
+        }),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}

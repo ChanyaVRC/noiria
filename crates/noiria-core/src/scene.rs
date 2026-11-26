@@ -431,16 +431,20 @@ impl Scene {
         self.bump();
     }
 
+    /// 現在画面揺れ (quake) が継続中か。
+    pub fn is_quake_active(&self, now: Instant) -> bool {
+        self.quake
+            .as_deref()
+            .is_some_and(|&(_, _, start, ms)| now.duration_since(start).as_millis() < ms as u128)
+    }
+
     /// 現在アニメーション（トランジション/リベール/quake/move）が進行中か。
     pub fn is_animating(&self, now: Instant) -> bool {
         if self.transition.is_some() {
             return true;
         }
-        if let Some(q) = self.quake.as_deref() {
-            let (_, _, start, ms) = *q;
-            if now.duration_since(start).as_millis() < ms as u128 {
-                return true;
-            }
+        if self.is_quake_active(now) {
+            return true;
         }
         if self.fore.values().any(|l| {
             l.tween.as_ref().is_some_and(|t| !t.is_finished(now))
@@ -453,12 +457,17 @@ impl Scene {
     }
 
     /// 完了した tween を基本値 (x/y/opacity) へ確定して外す。レンダラが毎周期呼ぶ。
+    /// 期限切れの `quake` もここで掃除する。
     /// [move path=]（W5）: 区間が完了しても `tween_queue` に次の区間が残っていれば、
     /// そこで確定した値を新しい区間の from としてそのまま次の tween を開始する
     /// （区間をまたいでも継ぎ目なく繋がる）。単区間の [move]（`tween_queue` が常に空）は
     /// 従来と完全に同じ「確定して外すだけ」の挙動になる。
     pub fn settle_finished_tweens(&mut self, now: Instant) {
         let mut changed = false;
+        if self.quake.is_some() && !self.is_quake_active(now) {
+            self.quake = None;
+            changed = true;
+        }
         for layer in self.fore.values_mut().chain(self.back.values_mut()) {
             if let Some(t) = layer.crop_tween.take_if(|t| t.is_finished(now)) {
                 layer.crop_w = Some(t.to);
@@ -716,6 +725,15 @@ mod tests {
         scene.quake = Some(Box::new((5, 5, now, 300)));
         assert!(scene.is_animating(now));
         assert!(!scene.is_animating(now + Duration::from_millis(400)));
+
+        let rev_before = scene.revision;
+        scene.settle_finished_tweens(now + Duration::from_millis(100));
+        assert!(scene.quake.is_some());
+        assert_eq!(scene.revision, rev_before);
+
+        scene.settle_finished_tweens(now + Duration::from_millis(300));
+        assert!(scene.quake.is_none());
+        assert!(scene.revision > rev_before);
     }
 
     fn tween(accel: f32) -> Tween {

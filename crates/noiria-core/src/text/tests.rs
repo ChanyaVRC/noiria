@@ -1120,3 +1120,21 @@ fn fast_rasterize_glyph_matches_naive_reference_pixel_for_pixel() {
         }
     }
 }
+
+#[test]
+fn rasterize_glyph_clamps_huge_outline_width() {
+    let mask = [255u8; 4]; // 2x2
+    let clamped = rasterize_glyph(
+        2,
+        2,
+        &mask,
+        [255; 4],
+        [0, 0, 0, 255],
+        MAX_OUTLINE_WIDTH,
+        false,
+    );
+    let huge = rasterize_glyph(2, 2, &mask, [255; 4], [0, 0, 0, 255], u32::MAX, false);
+    assert_eq!(huge.width, 2 + MAX_OUTLINE_WIDTH * 2);
+    assert_eq!(huge.height, 2 + MAX_OUTLINE_WIDTH * 2);
+    assert_eq!(huge.data, clamped.data);
+}
