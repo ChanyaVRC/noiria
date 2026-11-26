@@ -266,13 +266,13 @@ fn main() {
         ramp: 192.0,
     };
     bench_n("render_panel choice 720x64 (shadow)", 2, 20, || {
-        black_box(render_panel(black_box(&choice_panel)));
+        black_box(render_panel(black_box(&choice_panel)).unwrap());
     });
     bench_n("render_panel dialog 640x320 (shadow)", 2, 10, || {
-        black_box(render_panel(black_box(&dialog_panel)));
+        black_box(render_panel(black_box(&dialog_panel)).unwrap());
     });
     bench_n("render_panel band 1920x480 (flat)", 2, 30, || {
-        black_box(render_panel(black_box(&band_panel)));
+        black_box(render_panel(black_box(&band_panel)).unwrap());
     });
 
     println!("\n=== Font Registry & Text Engine ===");

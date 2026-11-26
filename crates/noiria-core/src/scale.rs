@@ -4,6 +4,7 @@
 //! 1920x1080 へ 1 フレーム約 1〜2ms。画素の位置は中心合わせ（`(dx + 0.5) * sw / dw - 0.5`）。
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 const MAX_THREADS: usize = 16;
@@ -372,16 +373,23 @@ struct Shared {
     state: Mutex<DispatchState>,
     work_ready: Condvar,
     work_done: Condvar,
+    dead: AtomicBool,
 }
 
-struct FinishGuard<'a>(&'a Shared);
+struct FinishGuard<'a> {
+    shared: &'a Shared,
+    completed: bool,
+}
 
 impl Drop for FinishGuard<'_> {
     fn drop(&mut self) {
-        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.completed {
+            self.shared.dead.store(true, Ordering::Release);
+        }
+        let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         st.remaining -= 1;
         if st.remaining == 0 {
-            self.0.work_done.notify_one();
+            self.shared.work_done.notify_one();
         }
     }
 }
@@ -415,10 +423,13 @@ fn worker_loop(id: usize, mut last_epoch: u64, shared: Arc<Shared>) {
             }
         };
         if let Some(job) = job {
-            // Drop guard instead of catch_unwind: dist builds use panic="abort", and in
-            // unwind builds this still guarantees `remaining` is decremented so callers
-            // cannot deadlock.
-            let _finish = FinishGuard(&shared);
+            // Drop guard instead of catch_unwind: zero fast-path overhead, decrements
+            // `remaining` for the in-flight dispatch, and marks the pool dead so future
+            // calls fall back to single-threaded scaling instead of waiting on a dead worker.
+            let mut finish = FinishGuard {
+                shared: &shared,
+                completed: false,
+            };
             let y_start = (id + 1) * job.band;
             let y_end = ((id + 2) * job.band).min(job.dh);
             let rows = y_end - y_start;
@@ -435,6 +446,7 @@ fn worker_loop(id: usize, mut last_epoch: u64, shared: Arc<Shared>) {
                 )
             };
             scale_rows(src, job.sw, xs, ys, y_start, dst);
+            finish.completed = true;
         }
     }
 }
@@ -458,6 +470,7 @@ impl PoolCaller {
                 }),
                 work_ready: Condvar::new(),
                 work_done: Condvar::new(),
+                dead: AtomicBool::new(false),
             }),
         }
     }
@@ -494,7 +507,11 @@ impl PoolCaller {
         (dw, dh): (usize, usize),
         threads: usize,
     ) {
-        let wanted_threads = threads.clamp(1, MAX_THREADS).min(dh);
+        let wanted_threads = if self.shared.dead.load(Ordering::Acquire) {
+            1
+        } else {
+            threads.clamp(1, MAX_THREADS).min(dh)
+        };
         if wanted_threads > 1 {
             self.ensure_workers(wanted_threads - 1);
         }
@@ -728,6 +745,34 @@ mod tests {
             h.join().unwrap();
         }
         assert!(pool().lock().unwrap().spawned < MAX_THREADS);
+    }
+
+    #[test]
+    fn dead_worker_marks_pool_and_falls_back_to_single_threaded_without_deadlock() {
+        let mut caller = PoolCaller::new();
+        caller.spawned = 3; // pretend 3 workers were spawned (none actually running)
+        caller.shared.state.lock().unwrap().remaining = 1;
+        let shared = Arc::clone(&caller.shared);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _finish = FinishGuard {
+                shared: &shared,
+                completed: false,
+            };
+            panic!("simulated worker panic");
+        }));
+        assert!(caller.shared.dead.load(Ordering::Acquire));
+        assert_eq!(caller.shared.state.lock().unwrap().remaining, 0);
+
+        let (sw, sh, dw, dh) = (8usize, 6usize, 12usize, 10usize);
+        let src: Vec<u32> = (0..sw * sh)
+            .map(|i| pack(i as u32 * 5, 100, 50, 255))
+            .collect();
+        let mut want = vec![0u32; dw * dh];
+        scale_bilinear(&src, sw, sh, &mut want, dw, dh, 1);
+
+        let mut got = vec![0u32; dw * dh];
+        caller.scale(&src, (sw, sh), &mut got, (dw, dh), 4);
+        assert_eq!(got, want);
     }
 
     /// `cargo test --release -p noiria-core scale_cost -- --ignored --nocapture`: 拡大先ごとの所要時間（ms）。

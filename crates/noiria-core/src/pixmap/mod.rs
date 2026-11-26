@@ -226,8 +226,8 @@ impl Pixmap {
 
         let x0 = x.max(0);
         let y0 = y.max(0);
-        let x1 = (x + src_w).min(dst_w);
-        let y1 = (y + src_h).min(dst_h);
+        let x1 = x.saturating_add(src_w).min(dst_w);
+        let y1 = y.saturating_add(src_h).min(dst_h);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -375,7 +375,9 @@ impl Pixmap {
             return out;
         }
         for row in 0..h {
-            let sy = y + row;
+            let Some(sy) = y.checked_add(row) else {
+                break;
+            };
             if sy >= self.height {
                 break;
             }

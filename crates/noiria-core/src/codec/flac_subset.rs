@@ -291,11 +291,13 @@ fn unzigzag(zz: u64) -> i64 {
     ((zz >> 1) as i64) ^ -((zz & 1) as i64)
 }
 
-/// MSB-first ビットリーダー。
+/// MSB-first ビットリーダー（64bit バッファ一括補充 + `leading_zeros` による unary 復号）。
 struct BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
-    bit_pos: u32, // 0..8、次に読む bit のインデックス（MSB=0）
+    /// 上位 `nbits` ビットに未読ビットを MSB 詰めで保持する。下位 `64 - nbits` ビットは常に 0。
+    buf: u64,
+    nbits: u32,
 }
 
 impl<'a> BitReader<'a> {
@@ -303,47 +305,89 @@ impl<'a> BitReader<'a> {
         Self {
             data,
             byte_pos: 0,
-            bit_pos: 0,
+            buf: 0,
+            nbits: 0,
         }
     }
 
-    fn read_bit(&mut self) -> Result<u64> {
-        ensure!(
-            self.byte_pos < self.data.len(),
-            "wav-flac ビットストリームの範囲外読み取りです（壊れたデータの可能性）"
-        );
-        let byte = self.data[self.byte_pos];
-        let bit = (byte >> (7 - self.bit_pos)) & 1;
-        self.bit_pos += 1;
-        if self.bit_pos == 8 {
-            self.bit_pos = 0;
-            self.byte_pos += 1;
+    #[inline(always)]
+    fn refill(&mut self) {
+        if self.nbits >= 56 {
+            return;
         }
-        Ok(bit as u64)
+        if self.byte_pos + 8 <= self.data.len() {
+            let bytes = (63 - self.nbits) >> 3;
+            let bits = bytes * 8;
+            let s = &self.data[self.byte_pos..self.byte_pos + 8];
+            let v = u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+            let masked = v & (!0u64 << (64 - bits));
+            self.buf |= masked >> self.nbits;
+            self.byte_pos += bytes as usize;
+            self.nbits += bits;
+        } else {
+            while self.nbits <= 56 && self.byte_pos < self.data.len() {
+                self.buf |= (self.data[self.byte_pos] as u64) << (56 - self.nbits);
+                self.byte_pos += 1;
+                self.nbits += 8;
+            }
+        }
     }
 
+    #[inline(always)]
     fn read_bits(&mut self, n: u32) -> Result<u64> {
-        let mut v = 0u64;
-        for _ in 0..n {
-            v = (v << 1) | self.read_bit()?;
+        debug_assert!(n <= 56);
+        if n == 0 {
+            return Ok(0);
         }
+        if self.nbits < n {
+            self.refill();
+            ensure!(
+                self.nbits >= n,
+                "wav-flac ビットストリームの範囲外読み取りです（壊れたデータの可能性）"
+            );
+        }
+        let v = self.buf >> (64 - n);
+        self.buf <<= n;
+        self.nbits -= n;
         Ok(v)
     }
 
+    #[inline(always)]
     fn read_unary(&mut self) -> Result<u64> {
         let mut q = 0u64;
         loop {
-            if self.read_bit()? == 1 {
+            if self.buf != 0 {
+                // 下位 `64 - nbits` ビットは常に 0 なので、先頭 1 ビットは必ず有効範囲内にある。
+                let lz = self.buf.leading_zeros();
+                q += lz as u64;
+                ensure!(
+                    q < 1_000_000_000,
+                    "wav-flac の unary 符号が異常に長すぎます（壊れたデータの可能性）"
+                );
+                let consume = lz + 1;
+                if consume == 64 {
+                    self.buf = 0;
+                } else {
+                    self.buf <<= consume;
+                }
+                self.nbits -= consume;
                 return Ok(q);
             }
-            q += 1;
+            q += self.nbits as u64;
+            self.nbits = 0;
             ensure!(
                 q < 1_000_000_000,
                 "wav-flac の unary 符号が異常に長すぎます（壊れたデータの可能性）"
             );
+            self.refill();
+            ensure!(
+                self.nbits > 0,
+                "wav-flac ビットストリームの範囲外読み取りです（壊れたデータの可能性）"
+            );
         }
     }
 
+    #[inline(always)]
     fn read_rice(&mut self, k: u32) -> Result<u64> {
         let q = self.read_unary()?;
         let r = if k > 0 { self.read_bits(k)? } else { 0 };
@@ -612,5 +656,52 @@ mod tests {
             let _ = decode_wav(d);
             let _ = decode_wav_limited(d, 1 << 20);
         });
+    }
+
+    #[test]
+    fn bit_reader_handles_widths_0_to_32_large_unary_and_eos() {
+        let mut w = BitWriterForTest::new();
+        let expected: Vec<(u32, u64)> = (0..=32)
+            .map(|bits| {
+                let mask = if bits == 0 { 0 } else { (1u64 << bits) - 1 };
+                let val = (0xA5A5_5A5Au64.wrapping_mul(bits as u64 + 1)) & mask;
+                w.write_bits(val, bits);
+                (bits, val)
+            })
+            .collect();
+        // Large unary runs spanning multiple 64-bit refills (0, 1, 63, 64, 150 zeros + '1').
+        let unaries = [0u64, 1, 63, 64, 150];
+        for &u in &unaries {
+            for _ in 0..u {
+                w.write_bits(0, 1);
+            }
+            w.write_bits(1, 1);
+        }
+        // Rice values with k=0 and k=30.
+        w.write_bits(0b001, 3); // q=2, k=0 -> 2
+        w.write_bits(0b01, 2); // q=1
+        w.write_bits(0x2AAA_AAAA, 30); // r, k=30 -> (1<<30) | r
+        let bytes = w.finish();
+
+        let mut r = BitReader::new(&bytes);
+        for (bits, want) in expected {
+            assert_eq!(r.read_bits(bits).unwrap(), want, "bits={bits}");
+        }
+        for u in unaries {
+            assert_eq!(r.read_unary().unwrap(), u);
+        }
+        assert_eq!(r.read_rice(0).unwrap(), 2);
+        assert_eq!(r.read_rice(30).unwrap(), (1u64 << 30) | 0x2AAA_AAAA);
+
+        // Reading past exact EOS returns Err (never panics).
+        let mut short = BitReader::new(&[0b1010_0000]);
+        assert_eq!(short.read_bits(4).unwrap(), 0b1010);
+        assert!(short.read_bits(5).is_err());
+        let mut all_zero = BitReader::new(&[0u8; 10]);
+        assert!(all_zero.read_unary().is_err());
+        let mut empty = BitReader::new(&[]);
+        assert_eq!(empty.read_bits(0).unwrap(), 0);
+        assert!(empty.read_bits(1).is_err());
+        assert!(empty.read_unary().is_err());
     }
 }

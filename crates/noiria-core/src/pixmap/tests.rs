@@ -679,3 +679,33 @@ fn universal_from_simd_matches_original_scalar() {
         }
     }
 }
+
+#[test]
+fn extract_region_and_blit_handle_extreme_coordinates_without_overflow() {
+    let mut src = Pixmap::new(4, 4);
+    src.fill([200, 100, 50, 255]);
+
+    // y near u32::MAX must not overflow `y + row` and must yield transparent output.
+    let region = src.extract_region(0, u32::MAX, 4, 4);
+    assert_eq!((region.width, region.height), (4, 4));
+    assert!(region.data.iter().all(|&b| b == 0));
+
+    let region2 = src.extract_region(0, u32::MAX - 1, 4, 4);
+    assert!(region2.data.iter().all(|&b| b == 0));
+
+    // Extreme blit dx/dy must not overflow `x + src_w` / `y + src_h` and must leave dst unchanged.
+    let mut dst = Pixmap::new(4, 4);
+    dst.fill([10, 20, 30, 255]);
+    let orig = dst.data.clone();
+    for &(dx, dy) in &[
+        (i32::MAX, 0),
+        (0, i32::MAX),
+        (i32::MAX, i32::MAX),
+        (i32::MIN, 0),
+        (0, i32::MIN),
+        (i32::MIN, i32::MIN),
+    ] {
+        dst.blit_over(&src, dx, dy, 255);
+        assert_eq!(dst.data, orig, "dx={dx} dy={dy}");
+    }
+}

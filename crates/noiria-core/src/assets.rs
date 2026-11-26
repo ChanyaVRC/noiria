@@ -221,6 +221,7 @@ impl GameDir {
             let text = String::from_utf8(text).context("game.json が UTF-8 ではありません")?;
             let config: GameConfig =
                 serde_json::from_str(&text).context("game.json のパースに失敗")?;
+            crate::savedata::validate_game_id(&config.id)?;
             return Ok((
                 Self {
                     backend: Arc::new(Backend::Pak {
@@ -235,6 +236,7 @@ impl GameDir {
         let text = fs::read_to_string(&config_path)
             .with_context(|| format!("game.json が読めません: {}", config_path.display()))?;
         let config: GameConfig = serde_json::from_str(&text).context("game.json のパースに失敗")?;
+        crate::savedata::validate_game_id(&config.id)?;
         Ok((
             Self {
                 backend: Arc::new(Backend::Dir(root)),
@@ -723,6 +725,32 @@ mod tests {
             assert!(pak_dir.open_reader("../secret.ogg").is_err());
             assert!(pak_dir.open_reader("bgm/missing.ogg").is_err());
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_rejects_traversal_game_id_in_dir_and_pak() {
+        let root = std::env::temp_dir().join(format!(
+            "noiria_bad_game_id_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let bad_json = br#"{"title":"Evil","id":"../../evil"}"#;
+        fs::write(root.join("game.json"), bad_json).unwrap();
+        assert!(GameDir::open(&root).is_err());
+
+        let pak_path = root.join("bad.pak");
+        let key = crate::pak::dev_key();
+        let (pak_bytes, _) =
+            crate::pak::build(vec![("game.json".to_string(), bad_json.to_vec())], &key);
+        fs::write(&pak_path, &pak_bytes).unwrap();
+        assert!(GameDir::open(&pak_path).is_err());
 
         let _ = fs::remove_dir_all(&root);
     }

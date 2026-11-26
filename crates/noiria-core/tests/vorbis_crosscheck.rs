@@ -155,7 +155,14 @@ fn check_snapshot(name: &str, r: &RefSnapshot) {
         let end_frame = (frame + r.sample_rate).min(our_frame_count);
         let start = frame * channels;
         let end = end_frame * channels;
-        let chunk = rms(&ours.samples[start..end]);
+        let mut chunk = rms(&ours.samples[start..end]);
+        // 参照スナップショット (rodio/symphonia) は EOS granule による末尾トリムを行わないため、
+        // 最終チャンクはトリム前のフレーム数で割った RMS になっている。同じ分母で比較する。
+        if end_frame == our_frame_count && our_frame_count < r.frame_count {
+            let our_len = (end_frame - frame) as f64;
+            let ref_len = ((frame + r.sample_rate).min(r.frame_count) - frame) as f64;
+            chunk *= (our_len / ref_len).sqrt();
+        }
         let expected = r.chunk_rms[chunk_idx];
         assert!(
             approx_eq_rel(chunk, expected, 0.08, 1e-6),

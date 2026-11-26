@@ -342,12 +342,13 @@ pub(crate) fn inflate_limited_with_capacity(
                 let hlit = br.bits(5)? as usize + 257;
                 let hdist = br.bits(5)? as usize + 1;
                 let hclen = br.bits(4)? as usize + 4;
+                ensure!(hlit <= 286 && hdist <= 30, "HLIT/HDIST が範囲外です");
                 let mut clen = [0u8; 19];
                 for i in 0..hclen {
                     clen[CLEN_ORDER[i]] = br.bits(3)? as u8;
                 }
                 let cl_huff = Huffman::from_lengths(&clen)?;
-                let mut lengths = [0u8; 286 + 32];
+                let mut lengths = [0u8; 286 + 30];
                 let total_lens = hlit + hdist;
                 let mut i = 0;
                 while i < total_lens {
@@ -367,10 +368,12 @@ pub(crate) fn inflate_limited_with_capacity(
                         }
                         17 => {
                             let n = 3 + br.bits(3)? as usize;
+                            ensure!(i + n <= total_lens, "符号長の繰り返しが範囲外");
                             i += n;
                         }
                         18 => {
                             let n = 11 + br.bits(7)? as usize;
+                            ensure!(i + n <= total_lens, "符号長の繰り返しが範囲外");
                             i += n;
                         }
                         _ => bail!("不正な符号長シンボル"),
@@ -524,5 +527,71 @@ mod tests {
             let _ = zlib_decompress(d);
             let _ = zlib_decompress_limited(d, 1000);
         });
+    }
+
+    #[test]
+    fn dynamic_huffman_out_of_range_hlit_hdist_is_error_not_panic() {
+        let build_payload = |hlit_raw: u64, hdist_raw: u64| {
+            let mut b = crate::test_support::LsbBits::default();
+            b.push(1, 1) // BFINAL=1
+                .push(2, 2) // BTYPE=2 (dynamic)
+                .push(hlit_raw, 5)
+                .push(hdist_raw, 5)
+                .push(0, 4) // HCLEN=0 (4 code-length symbols: 16, 17, 18, 0)
+                .push(0, 3) // clen[16]=0
+                .push(0, 3) // clen[17]=0
+                .push(1, 3) // clen[18]=1
+                .push(1, 3); // clen[0]=1
+            let mut out = b.finish();
+            out.resize(54, 0);
+            out
+        };
+
+        // HLIT=31 (288), HDIST=31 (32) -> 54-byte payload that previously panicked at lengths[318].
+        let payload = build_payload(31, 31);
+        assert_eq!(payload.len(), 54);
+        assert!(inflate(&payload).is_err());
+
+        // Individual RFC 1951 bounds: hlit > 286 or hdist > 30.
+        assert!(inflate(&build_payload(30, 0)).is_err());
+        assert!(inflate(&build_payload(0, 30)).is_err());
+    }
+
+    #[test]
+    fn dynamic_huffman_repeat_code_17_18_overflow_is_error() {
+        // Valid HLIT=0 (257), HDIST=0 (1) => total_lens = 258.
+        // clen[18]=1 -> code '0' repeats zero 11 + 127 = 138 times; 2 repeats = 276 > 258.
+        let mut b = crate::test_support::LsbBits::default();
+        b.push(1, 1) // BFINAL=1
+            .push(2, 2) // BTYPE=2
+            .push(0, 5) // HLIT=0 (257)
+            .push(0, 5) // HDIST=0 (1)
+            .push(0, 4) // HCLEN=0 -> 16,17,18,0
+            .push(0, 3) // clen[16]=0
+            .push(1, 3) // clen[17]=1
+            .push(1, 3) // clen[18]=1
+            .push(0, 3) // clen[0]=0
+            // sym 18 ('1') with extra=127 (138 zeros) x2 => 276 > 258
+            .push(1, 1)
+            .push(127, 7)
+            .push(1, 1)
+            .push(127, 7);
+        assert!(inflate(&b.finish()).is_err());
+
+        // Same overflow via code 17 (extra=7 -> 10 zeros, 26 times = 260 > 258).
+        let mut b17 = crate::test_support::LsbBits::default();
+        b17.push(1, 1)
+            .push(2, 2)
+            .push(0, 5)
+            .push(0, 5)
+            .push(0, 4)
+            .push(0, 3)
+            .push(1, 3) // clen[17]=1
+            .push(1, 3) // clen[18]=1
+            .push(0, 3);
+        for _ in 0..26 {
+            b17.push(0, 1).push(7, 3);
+        }
+        assert!(inflate(&b17.finish()).is_err());
     }
 }

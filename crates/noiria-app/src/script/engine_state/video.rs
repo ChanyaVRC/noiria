@@ -306,6 +306,7 @@ pub(super) fn playback_loop(job: PlaybackJob) {
         control.segment_revision.clone()
     };
     let mut pending_boundary_event: Option<(VideoEventKind, u64)> = None;
+    let mut looped_without_frame = false;
     'playback: while !stop.load(Ordering::Relaxed) {
         if generation.load(Ordering::SeqCst) != playback_generation {
             break;
@@ -322,6 +323,7 @@ pub(super) fn playback_loop(job: PlaybackJob) {
                 push_recycle(&mut recycle, pm);
             }
             pending_boundary_event = None;
+            looped_without_frame = false;
             if let Err(e) = source.seek_frame(target) {
                 log::error!("動画フレーム {target} へのシークに失敗: {e:#}");
                 break 'playback;
@@ -352,7 +354,10 @@ pub(super) fn playback_loop(job: PlaybackJob) {
 
         if pending_pixmap.is_none() {
             pending_pixmap = match next_video_pixmap(source.as_mut(), &mut recycle) {
-                Ok(Some(pixmap)) => Some(pixmap),
+                Ok(Some(pixmap)) => {
+                    looped_without_frame = false;
+                    Some(pixmap)
+                }
                 Ok(None) => {
                     let retry = {
                         let _scene = scene.lock_unpoisoned();
@@ -367,7 +372,7 @@ pub(super) fn playback_loop(job: PlaybackJob) {
                             control.pending_seek.is_some()
                                 || control.segment_loop.is_some_and(|(_, end)| index >= end)
                         };
-                        if !retry && !looping {
+                        if !retry && (!looping || looped_without_frame) {
                             playing.store(false, Ordering::Relaxed);
                         }
                         retry
@@ -381,11 +386,18 @@ pub(super) fn playback_loop(job: PlaybackJob) {
                         break 'playback;
                     }
                     if looping {
+                        if looped_without_frame {
+                            log::warn!(
+                                "ループ動画が先頭へ巻き戻してもフレームを返さないため再生を終了します"
+                            );
+                            break 'playback;
+                        }
                         if let Err(e) = source.seek_frame(0) {
                             log::error!("動画の巻き戻しに失敗: {e:#}");
                             break 'playback;
                         }
                         index = 0;
+                        looped_without_frame = true;
                         pending_boundary_event = Some((VideoEventKind::Loop, 0));
                         continue 'playback;
                     }

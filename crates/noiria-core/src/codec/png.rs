@@ -170,6 +170,20 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
         ensure!(!palette.is_empty(), "パレットがありません");
     }
 
+    let trns_gray: Option<u8> = if ihdr.color_type == 0 && trns.len() == 2 {
+        u8::try_from(u16::from_be_bytes([trns[0], trns[1]])).ok()
+    } else {
+        None
+    };
+    let trns_rgb: Option<[u8; 3]> = if ihdr.color_type == 2 && trns.len() == 6 {
+        let r = u8::try_from(u16::from_be_bytes([trns[0], trns[1]])).ok();
+        let g = u8::try_from(u16::from_be_bytes([trns[2], trns[3]])).ok();
+        let b = u8::try_from(u16::from_be_bytes([trns[4], trns[5]])).ok();
+        r.zip(g).zip(b).map(|((r, g), b)| [r, g, b])
+    } else {
+        None
+    };
+
     // 非 RGBA8: 2 行分の走査線バッファだけでフィルタ解除しつつ直接 RGBA8 へ展開する。
     let mut out = vec![0u8; w * h * 4];
     let mut prev_row = vec![0u8; stride];
@@ -181,13 +195,27 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng> {
         let dst_pixels = &mut out.as_chunks_mut::<4>().0[y * w..(y + 1) * w];
         match ihdr.color_type {
             0 => {
-                for (dst, &g) in dst_pixels.iter_mut().zip(&cur_row) {
-                    *dst = [g, g, g, 255];
+                if let Some(key) = trns_gray {
+                    for (dst, &g) in dst_pixels.iter_mut().zip(&cur_row) {
+                        let a = if g == key { 0 } else { 255 };
+                        *dst = [g, g, g, a];
+                    }
+                } else {
+                    for (dst, &g) in dst_pixels.iter_mut().zip(&cur_row) {
+                        *dst = [g, g, g, 255];
+                    }
                 }
             }
             2 => {
-                for (dst, px) in dst_pixels.iter_mut().zip(cur_row.as_chunks::<3>().0) {
-                    *dst = [px[0], px[1], px[2], 255];
+                if let Some(key) = trns_rgb {
+                    for (dst, px) in dst_pixels.iter_mut().zip(cur_row.as_chunks::<3>().0) {
+                        let a = if *px == key { 0 } else { 255 };
+                        *dst = [px[0], px[1], px[2], a];
+                    }
+                } else {
+                    for (dst, px) in dst_pixels.iter_mut().zip(cur_row.as_chunks::<3>().0) {
+                        *dst = [px[0], px[1], px[2], 255];
+                    }
                 }
             }
             3 => {
@@ -933,5 +961,61 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn decode_grayscale_with_trns_color_key() {
+        let mut raw = Vec::new();
+        raw.push(0); // filter None
+        raw.extend_from_slice(&[10, 42, 200]);
+
+        let mut png = Vec::new();
+        png.extend_from_slice(&SIGNATURE);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&3u32.to_be_bytes());
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        write_chunk(&mut png, b"IHDR", &ihdr);
+        write_chunk(&mut png, b"tRNS", &42u16.to_be_bytes());
+        write_chunk(&mut png, b"IDAT", &zlib_compress(&raw));
+        write_chunk(&mut png, b"IEND", &[]);
+
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice());
+        assert_eq!(
+            ours.rgba,
+            vec![10, 10, 10, 255, 42, 42, 42, 0, 200, 200, 200, 255]
+        );
+    }
+
+    #[test]
+    fn decode_rgb_with_trns_color_key() {
+        let mut raw = Vec::new();
+        raw.push(0); // filter None
+        raw.extend_from_slice(&[1, 2, 3, 255, 0, 255, 255, 0, 254]);
+
+        let mut png = Vec::new();
+        png.extend_from_slice(&SIGNATURE);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&3u32.to_be_bytes());
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        write_chunk(&mut png, b"IHDR", &ihdr);
+        let mut trns = Vec::new();
+        trns.extend_from_slice(&255u16.to_be_bytes());
+        trns.extend_from_slice(&0u16.to_be_bytes());
+        trns.extend_from_slice(&255u16.to_be_bytes());
+        write_chunk(&mut png, b"tRNS", &trns);
+        write_chunk(&mut png, b"IDAT", &zlib_compress(&raw));
+        write_chunk(&mut png, b"IEND", &[]);
+
+        let ours = decode(&png).unwrap();
+        let theirs = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(ours.rgba, theirs.as_raw().as_slice());
+        assert_eq!(
+            ours.rgba,
+            vec![1, 2, 3, 255, 255, 0, 255, 0, 255, 0, 254, 255]
+        );
     }
 }

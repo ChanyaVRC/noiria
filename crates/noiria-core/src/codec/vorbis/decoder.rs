@@ -564,6 +564,15 @@ fn parse_setup(
 
 /// パケット列 (Ogg から再構築済み) をまとめてデコードする。
 pub fn decode_packets(packets: &[Vec<u8>]) -> Result<DecodedVorbis> {
+    decode_packets_with_granule(packets, None)
+}
+
+/// EOS ページの granule_position による末尾トリム付きでパケット列をデコードする（Vorbis I 仕様 A.2）。
+/// `eos_granule` が `Some(g)` かつ `g > 0` のとき、総フレーム数が `g` を超える末尾を切り落とす。
+pub(crate) fn decode_packets_with_granule(
+    packets: &[Vec<u8>],
+    eos_granule: Option<i64>,
+) -> Result<DecodedVorbis> {
     ensure!(
         packets.len() >= 3,
         "Vorbis の 3 ヘッダパケットが揃っていません"
@@ -572,6 +581,12 @@ pub fn decode_packets(packets: &[Vec<u8>]) -> Result<DecodedVorbis> {
     let mut samples = Vec::new();
     for packet in &packets[3..] {
         dec.decode_packet_into(packet, &mut samples)?;
+    }
+    if let Some(granule) = eos_granule.filter(|&g| g > 0) {
+        let max_samples = (granule as u64).saturating_mul(dec.channels() as u64);
+        if (samples.len() as u64) > max_samples {
+            samples.truncate(max_samples as usize);
+        }
     }
     Ok(DecodedVorbis {
         channels: dec.channels(),
@@ -582,8 +597,9 @@ pub fn decode_packets(packets: &[Vec<u8>]) -> Result<DecodedVorbis> {
 
 /// Ogg コンテナに包まれた .ogg ファイル全体を丸ごとデコードする。
 pub fn decode(data: &[u8]) -> Result<DecodedVorbis> {
-    let (_serial, packets, _granule) = crate::codec::ogg::extract_first_stream_packets(data)?;
-    decode_packets(&packets)
+    let (_serial, packets, eos_granule) =
+        crate::codec::ogg::extract_first_stream_packets_with_eos(data)?;
+    decode_packets_with_granule(&packets, eos_granule)
 }
 
 #[cfg(test)]

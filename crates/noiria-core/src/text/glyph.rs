@@ -66,6 +66,7 @@ pub(super) fn rasterize_glyph(
     outline_width: u32,
     bold: bool,
 ) -> Pixmap {
+    let outline_width = outline_width.min(super::MAX_OUTLINE_WIDTH);
     let pad = outline_width as usize;
     let wu = w as usize;
     let hu = h as usize;

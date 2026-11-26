@@ -3,7 +3,9 @@
 use std::rc::Rc;
 
 use noiria_core::savedata::SlotInfo;
-use noiria_core::text::{GlyphRect, LocateArgs, TextAlign, TextSegment, TextStyle};
+use noiria_core::text::{
+    GlyphRect, LocateArgs, TextAlign, TextSegment, TextStyle, MAX_OUTLINE_WIDTH,
+};
 use tsint::value::Value;
 use tsint::vm::{number_to_js_string, to_number, to_string_basic, Vm};
 
@@ -101,7 +103,7 @@ pub(super) fn text_style_from_value(vm: &mut Vm, v: &Value) -> Result<TextStyle,
         style.outline_color = oc;
     }
     if let Some(ow) = opt_prop(vm, v, "outlineWidth", as_u32)? {
-        style.outline_width = ow;
+        style.outline_width = ow.min(MAX_OUTLINE_WIDTH);
     }
     if let Some(bw) = opt_prop(vm, v, "boxW", as_u32)? {
         style.box_w = bw;
